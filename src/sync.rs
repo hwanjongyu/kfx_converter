@@ -240,6 +240,40 @@ impl KindleSync {
         Self::detect_device_info().map(|info| info.root)
     }
 
+    /// Safely flushes dirty filesystem caches and unmounts the connected Kindle device.
+    pub fn eject_device(root: &Path) -> Result<(), SyncError> {
+        // 1. Flush file system write cache to prevent eMMC data loss
+        #[cfg(unix)]
+        {
+            unsafe { libc::sync() };
+        }
+        #[cfg(windows)]
+        {
+            let _ = Command::new("cmd").args(["/C", "sync"]).status();
+        }
+
+        // 2. Unmount cleanly depending on host OS and mount type
+        #[cfg(target_os = "linux")]
+        {
+            let root_str = root.to_string_lossy();
+            if root_str.contains("/gvfs/mtp:") {
+                let _ = Command::new("gio").args(["mount", "-u", &root_str]).status();
+            } else {
+                let status = Command::new("gio").args(["mount", "-u"]).arg(root).status();
+                if status.is_err() || !status.unwrap().success() {
+                    let _ = Command::new("udisksctl").args(["unmount", "-b"]).arg(root).status();
+                    let _ = Command::new("umount").arg(root).status();
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("diskutil").args(["unmount"]).arg(root).status();
+        }
+
+        Ok(())
+    }
+
     /// Synchronizes a converted KFX file and optional sidecars to the Kindle.
     pub fn sync_to_device(
         device_root: &Path,
