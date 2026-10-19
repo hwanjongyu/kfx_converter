@@ -12,7 +12,7 @@ use quick_xml::Reader as XmlReader;
 use thiserror::Error;
 use zip::ZipArchive;
 
-use crate::ir::{Block, BookIR, BookMetadata, ResourceAsset, Section, TextSpan};
+use crate::ir::{Block, BookIR, BookMetadata, ResourceAsset, Section, TextSpan, TocItem};
 
 pub const MAX_EPUB_FILES: usize = 10_000;
 pub const MAX_EPUB_UNCOMPRESSED_TOTAL: u64 = 1024 * 1024 * 1024; // 1 GB
@@ -38,6 +38,7 @@ pub struct ManifestItem {
     pub id: String,
     pub href: String,
     pub media_type: String,
+    pub properties: Option<String>,
 }
 
 /// Reads an EPUB archive and constructs a `BookIR`.
@@ -140,19 +141,40 @@ impl EpubReader {
             }
         }
 
-        // 5. Read spine chapters into Sections
+        // 5. Read spine chapters into Sections and build href -> section_id lookup map
         let mut sections = Vec::with_capacity(spine.len());
+        let mut href_to_section = HashMap::new();
+
         for (idx, item_id) in spine.iter().enumerate() {
             if let Some(item) = manifest.get(item_id) {
+                let sec_id = format!("section_{}", idx + 1);
+                href_to_section.insert(item.href.clone(), sec_id.clone());
+                let file_name = Path::new(&item.href)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !file_name.is_empty() {
+                    href_to_section.insert(file_name, sec_id.clone());
+                }
+
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut xhtml = String::new();
                     let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
                     if limited.read_to_string(&mut xhtml).is_ok() {
                         let blocks = Self::parse_xhtml_blocks_with_manifest(&xhtml, &href_to_id);
+                        let detected_title = blocks.iter().find_map(|b| {
+                            if let Block::Heading { spans, .. } = b {
+                                let t = spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ").trim().to_string();
+                                if !t.is_empty() { Some(t) } else { None }
+                            } else {
+                                None
+                            }
+                        }).unwrap_or_else(|| format!("Chapter {}", idx + 1));
+
                         sections.push(Section {
-                            id: format!("section_{}", idx + 1),
-                            title: format!("Chapter {}", idx + 1),
+                            id: sec_id,
+                            title: detected_title,
                             blocks,
                         });
                     }
@@ -160,11 +182,20 @@ impl EpubReader {
             }
         }
 
+        // 6. Extract Table of Contents (NCX, NAV, or Section Headings Fallback)
+        let toc = Self::extract_toc(
+            &mut archive,
+            &opf_dir,
+            &manifest,
+            &href_to_section,
+            &sections,
+        );
+
         Ok(BookIR {
             metadata,
             sections,
             resources,
-            toc: Vec::new(),
+            toc,
             page_list: Vec::new(),
         })
     }
@@ -225,6 +256,7 @@ impl EpubReader {
                         let mut id = String::new();
                         let mut href = String::new();
                         let mut media_type = String::new();
+                        let mut properties = None;
 
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
@@ -232,6 +264,9 @@ impl EpubReader {
                                 b"href" => href = String::from_utf8_lossy(&attr.value).to_string(),
                                 b"media-type" => {
                                     media_type = String::from_utf8_lossy(&attr.value).to_string()
+                                }
+                                b"properties" => {
+                                    properties = Some(String::from_utf8_lossy(&attr.value).to_string())
                                 }
                                 _ => {}
                             }
@@ -244,6 +279,7 @@ impl EpubReader {
                                     id,
                                     href,
                                     media_type,
+                                    properties,
                                 },
                             );
                         }
@@ -304,6 +340,236 @@ impl EpubReader {
         }
 
         Ok((metadata, manifest, spine))
+    }
+
+    fn extract_toc<R: Read + std::io::Seek>(
+        archive: &mut ZipArchive<R>,
+        opf_dir: &str,
+        manifest: &HashMap<String, ManifestItem>,
+        href_to_section: &HashMap<String, String>,
+        sections: &[Section],
+    ) -> Vec<TocItem> {
+        // 1. Try EPUB 3 Navigation Document (nav.xhtml or properties="nav")
+        for item in manifest.values() {
+            let is_nav = item.properties.as_deref().map(|p| p.contains("nav")).unwrap_or(false)
+                || item.id == "nav"
+                || item.href.ends_with("nav.xhtml");
+            if is_nav && item.media_type.contains("xml") {
+                let full_path = Self::resolve_zip_path(opf_dir, &item.href);
+                if let Ok(mut entry) = archive.by_name(&full_path) {
+                    let mut s = String::new();
+                    if entry.read_to_string(&mut s).is_ok() {
+                        let toc = Self::parse_nav_xhtml(&s, href_to_section);
+                        if !toc.is_empty() {
+                            return toc;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Try EPUB 2 NCX Document (toc.ncx or media-type application/x-dtbncx+xml)
+        for item in manifest.values() {
+            let is_ncx = item.media_type == "application/x-dtbncx+xml"
+                || item.id == "ncx"
+                || item.href.ends_with(".ncx");
+            if is_ncx {
+                let full_path = Self::resolve_zip_path(opf_dir, &item.href);
+                if let Ok(mut entry) = archive.by_name(&full_path) {
+                    let mut s = String::new();
+                    if entry.read_to_string(&mut s).is_ok() {
+                        let toc = Self::parse_ncx(&s, href_to_section);
+                        if !toc.is_empty() {
+                            return toc;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback: Build TOC from Sections
+        let mut fallback_toc = Vec::new();
+        for sec in sections {
+            if sec.blocks.is_empty() {
+                continue;
+            }
+            let title = if !sec.title.is_empty() {
+                sec.title.clone()
+            } else {
+                "Chapter".to_string()
+            };
+            fallback_toc.push(TocItem {
+                title,
+                target_section: sec.id.clone(),
+                target_anchor: None,
+                children: Vec::new(),
+            });
+        }
+        fallback_toc
+    }
+
+    fn parse_ncx(ncx_xml: &str, href_to_section: &HashMap<String, String>) -> Vec<TocItem> {
+        let mut items = Vec::new();
+        let mut xml_reader = XmlReader::from_str(ncx_xml);
+        let mut buf = Vec::new();
+
+        let mut current_title = String::new();
+        let mut current_src = String::new();
+        let mut in_text = false;
+        let mut in_nav_label = false;
+
+        loop {
+            match xml_reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) => {
+                    let local = e.local_name();
+                    match local.as_ref() {
+                        b"navPoint" => {
+                            current_title.clear();
+                            current_src.clear();
+                        }
+                        b"navLabel" => {
+                            in_nav_label = true;
+                        }
+                        b"text" if in_nav_label => {
+                            in_text = true;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Event::Empty(ref e)) => {
+                    let local = e.local_name();
+                    if local.as_ref() == b"content" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"src" {
+                                current_src = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Text(ref e)) if in_text => {
+                    let txt = e.unescape().unwrap_or_default().trim().to_string();
+                    if !txt.is_empty() {
+                        current_title = txt;
+                    }
+                }
+                Ok(Event::End(ref e)) => {
+                    let local = e.local_name();
+                    match local.as_ref() {
+                        b"text" => {
+                            in_text = false;
+                        }
+                        b"navLabel" => {
+                            in_nav_label = false;
+                        }
+                        b"navPoint" => {
+                            if !current_title.is_empty() || !current_src.is_empty() {
+                                let (target_sec, target_anchor) =
+                                    Self::resolve_href_target(&current_src, href_to_section);
+                                items.push(TocItem {
+                                    title: if current_title.is_empty() {
+                                        "Chapter".into()
+                                    } else {
+                                        current_title.clone()
+                                    },
+                                    target_section: target_sec,
+                                    target_anchor,
+                                    children: Vec::new(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Event::Eof) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        items
+    }
+
+    fn parse_nav_xhtml(nav_xml: &str, href_to_section: &HashMap<String, String>) -> Vec<TocItem> {
+        let mut items = Vec::new();
+        let mut xml_reader = XmlReader::from_str(nav_xml);
+        let mut buf = Vec::new();
+
+        let mut in_a = false;
+        let mut current_href = String::new();
+        let mut current_text = String::new();
+
+        loop {
+            match xml_reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) => {
+                    if e.local_name().as_ref() == b"a" {
+                        in_a = true;
+                        current_href.clear();
+                        current_text.clear();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"href" {
+                                current_href = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Text(ref e)) if in_a => {
+                    let txt = e.unescape().unwrap_or_default().trim().to_string();
+                    if !txt.is_empty() {
+                        if !current_text.is_empty() {
+                            current_text.push(' ');
+                        }
+                        current_text.push_str(&txt);
+                    }
+                }
+                Ok(Event::End(ref e)) => {
+                    if e.local_name().as_ref() == b"a" {
+                        in_a = false;
+                        if !current_href.is_empty() {
+                            let (target_sec, target_anchor) =
+                                Self::resolve_href_target(&current_href, href_to_section);
+                            let title = if current_text.is_empty() {
+                                "Chapter".to_string()
+                            } else {
+                                current_text.clone()
+                            };
+                            items.push(TocItem {
+                                title,
+                                target_section: target_sec,
+                                target_anchor,
+                                children: Vec::new(),
+                            });
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        items
+    }
+
+    fn resolve_href_target(
+        raw_href: &str,
+        href_to_section: &HashMap<String, String>,
+    ) -> (String, Option<String>) {
+        let mut parts = raw_href.split('#');
+        let file_part = parts.next().unwrap_or("").trim();
+        let anchor_part = parts.next().map(|a| a.trim().to_string());
+
+        let file_name = Path::new(file_part)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let target_sec = href_to_section
+            .get(file_part)
+            .or_else(|| href_to_section.get(&file_name))
+            .cloned()
+            .unwrap_or_else(|| "section_1".to_string());
+
+        (target_sec, anchor_part)
     }
 
     pub fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
@@ -762,6 +1028,55 @@ mod tests {
             }
             other => panic!("Expected Table, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_ncx_and_nav_xhtml() {
+        let mut href_to_sec = HashMap::new();
+        href_to_sec.insert("ch1.xhtml".to_string(), "section_1".to_string());
+        href_to_sec.insert("ch2.xhtml".to_string(), "section_2".to_string());
+
+        let ncx = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+            <navMap>
+                <navPoint id="p1" playOrder="1">
+                    <navLabel><text>Chapter 1: The Beginning</text></navLabel>
+                    <content src="ch1.xhtml#start"/>
+                </navPoint>
+                <navPoint id="p2" playOrder="2">
+                    <navLabel><text>Chapter 2: The Journey</text></navLabel>
+                    <content src="ch2.xhtml"/>
+                </navPoint>
+            </navMap>
+        </ncx>"#;
+
+        let ncx_toc = EpubReader::parse_ncx(ncx, &href_to_sec);
+        assert_eq!(ncx_toc.len(), 2);
+        assert_eq!(ncx_toc[0].title, "Chapter 1: The Beginning");
+        assert_eq!(ncx_toc[0].target_section, "section_1");
+        assert_eq!(ncx_toc[0].target_anchor.as_deref(), Some("start"));
+        assert_eq!(ncx_toc[1].title, "Chapter 2: The Journey");
+        assert_eq!(ncx_toc[1].target_section, "section_2");
+        assert_eq!(ncx_toc[1].target_anchor, None);
+
+        let nav_xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+            <body>
+                <nav epub:type="toc">
+                    <ol>
+                        <li><a href="ch1.xhtml#start">1. Start</a></li>
+                        <li><a href="ch2.xhtml">2. Next</a></li>
+                    </ol>
+                </nav>
+            </body>
+        </html>"#;
+
+        let nav_toc = EpubReader::parse_nav_xhtml(nav_xhtml, &href_to_sec);
+        assert_eq!(nav_toc.len(), 2);
+        assert_eq!(nav_toc[0].title, "1. Start");
+        assert_eq!(nav_toc[0].target_section, "section_1");
+        assert_eq!(nav_toc[1].title, "2. Next");
+        assert_eq!(nav_toc[1].target_section, "section_2");
     }
 }
 

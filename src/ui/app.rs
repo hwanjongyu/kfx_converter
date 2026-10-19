@@ -2,7 +2,10 @@
 
 use gpui::*;
 use super::theme::Theme;
-use super::state::{detect_kindle_device, ConversionSettings, ConversionTask, DeviceStatus, KindleFile, StudioTab, TaskStatus};
+use super::state::{
+    detect_kindle_device, load_device_files, ConversionSettings, ConversionTask, DeviceStatus,
+    KindleFile, StudioTab, TaskStatus,
+};
 
 pub struct KindleStudio {
     tab: StudioTab,
@@ -16,66 +19,109 @@ pub struct KindleStudio {
 impl KindleStudio {
     pub fn new(_cx: &mut Context<Self>) -> Self {
         let device = detect_kindle_device();
-        
-        let sample_tasks = vec![
-            ConversionTask {
-                id: 1,
-                filename: "Contagious - Jonah Berger.epub".into(),
-                file_size_str: "1.6 MB".into(),
-                status: TaskStatus::Completed,
-                progress: 1.0,
-                word_wise: true,
-                xray: true,
-            },
-            ConversionTask {
-                id: 2,
-                filename: "Andrew Huberman Decoded - Success Decoded.epub".into(),
-                file_size_str: "249.5 KB".into(),
-                status: TaskStatus::Completed,
-                progress: 1.0,
-                word_wise: true,
-                xray: false,
-            },
-        ];
-
-        let sample_files = vec![
-            KindleFile {
-                name: "Contagious - Jonah Berger.kfx".into(),
-                format: "KFX".into(),
-                size_formatted: "1.6 MB".into(),
-                modified: "2026-10-13 22:15".into(),
-            },
-            KindleFile {
-                name: "Zorba the Greek - Nikos Kazantzakis.kfx".into(),
-                format: "KFX".into(),
-                size_formatted: "840 KB".into(),
-                modified: "2026-10-13 21:50".into(),
-            },
-            KindleFile {
-                name: "Fourth Wing - Rebecca Yarros.kfx".into(),
-                format: "KFX".into(),
-                size_formatted: "2.1 MB".into(),
-                modified: "2026-10-13 21:30".into(),
-            },
-            KindleFile {
-                name: "Classic Reader Sample.mobi".into(),
-                format: "MOBI".into(),
-                size_formatted: "950 KB".into(),
-                modified: "2026-10-11 14:20".into(),
-            },
-        ];
+        let files = load_device_files(&device);
 
         Self {
             tab: StudioTab::Convert,
             device,
             settings: ConversionSettings::default(),
-            tasks: sample_tasks,
-            files: sample_files,
+            tasks: Vec::new(),
+            files,
             _search_query: String::new(),
         }
     }
 
-    fn render_header(&self) -> impl IntoElement {
+    pub fn refresh_device(&mut self, cx: &mut Context<Self>) {
+        self.device = detect_kindle_device();
+        self.files = load_device_files(&self.device);
+        cx.notify();
+    }
+
+    pub fn handle_incoming_path(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if path.is_file() {
+            if path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("epub"))
+                .unwrap_or(false)
+            {
+                self.process_epub_file(path, cx);
+            }
+        } else if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let child_path = entry.path();
+                    if child_path.is_file()
+                        && child_path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|ext| ext.eq_ignore_ascii_case("epub"))
+                            .unwrap_or(false)
+                    {
+                        self.process_epub_file(&child_path, cx);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn process_epub_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let file_size_str = match std::fs::metadata(path) {
+            Ok(meta) => {
+                let bytes = meta.len();
+                if bytes >= 1024 * 1024 {
+                    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+                } else {
+                    format!("{} KB", bytes / 1024)
+                }
+            }
+            Err(_) => "Unknown".into(),
+        };
+
+        let task_id = (self.tasks.len() as u64) + 1;
+        self.tasks.insert(0, ConversionTask {
+            id: task_id,
+            filename: filename.clone(),
+            file_size_str,
+            status: TaskStatus::Converting,
+            progress: 0.5,
+            word_wise: self.settings.word_wise,
+            xray: false,
+        });
+        cx.notify();
+
+        self.device = detect_kindle_device();
+
+        match super::state::convert_epub_file(&path.to_path_buf(), &self.settings, &self.device) {
+            Ok(res) => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+                    t.progress = 1.0;
+                    if res.synced_to_device {
+                        t.status = TaskStatus::Completed;
+                    } else if let Some(err) = res.sync_error {
+                        t.status = TaskStatus::SyncFailed(err);
+                    } else {
+                        t.status = TaskStatus::ConvertedLocalOnly;
+                    }
+                }
+
+                // If file was truly synced to the device, reload the real Kindle files list
+                if res.synced_to_device {
+                    self.files = super::state::load_device_files(&self.device);
+                }
+            }
+            Err(err) => {
+                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+                    t.status = TaskStatus::Failed(err);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let conn_color = if self.device.connected {
             Theme::accent_green()
         } else {
@@ -137,7 +183,26 @@ impl KindleStudio {
                         div()
                             .text_xs()
                             .text_color(Theme::text_muted())
-                            .child(format!("{:.1} GB / {:.1} GB", self.device.used_gb, self.device.total_gb)),
+                            .child(if self.device.connected {
+                                format!("{:.1} GB / {:.1} GB", self.device.used_gb, self.device.total_gb)
+                            } else {
+                                "연결 확인 필요".to_string()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("btn_refresh_device")
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(Theme::bg_card_hover())
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(Theme::text_muted())
+                            .child("🔄 새로고침")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.refresh_device(cx);
+                            })),
                     ),
             )
     }
@@ -168,7 +233,7 @@ impl KindleStudio {
                     .child("📥 도서 변환 & 전송 (Converter)")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::Convert;
-                        cx.notify();
+                        this.refresh_device(cx);
                     })),
             )
             .child(
@@ -185,7 +250,7 @@ impl KindleStudio {
                     .child("📚 킨들 도서 탐색기 (Explorer)")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::Explorer;
-                        cx.notify();
+                        this.refresh_device(cx);
                     })),
             )
     }
@@ -196,6 +261,14 @@ impl KindleStudio {
             .flex_col()
             .p_6()
             .gap_6()
+            .drag_over::<ExternalPaths>(|style, _paths, _window, _cx| {
+                style
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                for path in paths.paths() {
+                    this.handle_incoming_path(path, cx);
+                }
+            }))
             // 1. Dropzone Card
             .child(
                 div()
@@ -210,6 +283,16 @@ impl KindleStudio {
                     .border_color(Theme::border())
                     .bg(Theme::bg_card())
                     .cursor_pointer()
+                    .drag_over::<ExternalPaths>(|mut style, _paths, _window, _cx| {
+                        style.border_color = Some(Theme::accent_amber().into());
+                        style.background = Some(Theme::bg_card_hover().into());
+                        style
+                    })
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                        for path in paths.paths() {
+                            this.handle_incoming_path(path, cx);
+                        }
+                    }))
                     .child(
                         div()
                             .text_2xl()
@@ -221,45 +304,38 @@ impl KindleStudio {
                             .mt_2()
                             .text_sm()
                             .text_color(Theme::text_muted())
-                            .child("클릭하여 컴퓨터의 도서 파일을 변환할 수 있습니다 (샘플 도서 자동 감지)"),
+                            .child("클릭하여 컴퓨터의 도서 파일을 선택하거나, EPUB 파일을 여기로 드래그 앤 드롭하세요"),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let sample_path = std::path::PathBuf::from("../sample/Apocolocyntosis - Lucius Annaeus Seneca.epub");
-                        if sample_path.exists() {
-                            let task_id = this.tasks.len() as u64 + 1;
-                            this.tasks.insert(0, ConversionTask {
-                                id: task_id,
-                                filename: "Apocolocyntosis - Lucius Annaeus Seneca.epub".into(),
-                                file_size_str: "128 KB".into(),
-                                status: TaskStatus::Converting,
-                                progress: 0.5,
-                                word_wise: this.settings.word_wise,
-                                xray: false,
-                            });
-                            cx.notify();
-
-                            match super::state::convert_epub_file(&sample_path, &this.settings, &this.device) {
-                                Ok(out) => {
-                                    if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
-                                        t.status = TaskStatus::Completed;
-                                        t.progress = 1.0;
-                                    }
-                                    let filename = out.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                    this.files.insert(0, KindleFile {
-                                        name: filename,
-                                        format: "KFX".into(),
-                                        size_formatted: "120 KB".into(),
-                                        modified: "방금 전".into(),
-                                    });
+                    .on_click(cx.listener(|_this, _, _, cx| {
+                        let receiver = cx.prompt_for_paths(PathPromptOptions {
+                            files: true,
+                            directories: false,
+                            multiple: true,
+                            prompt: Some("변환할 EPUB 도서를 선택하세요".into()),
+                        });
+                        cx.spawn(async move |this, cx| {
+                            match receiver.await {
+                                Ok(Ok(Some(paths))) => {
+                                    this.update(cx, |this, cx| {
+                                        for path in paths {
+                                            this.handle_incoming_path(&path, cx);
+                                        }
+                                    }).ok();
                                 }
-                                Err(err) => {
-                                    if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
-                                        t.status = TaskStatus::Failed(err);
+                                Ok(Ok(None)) => {
+                                    // User cancelled the file dialog
+                                }
+                                _ => {
+                                    // File picker unsupported or failed, fallback to sample book if available
+                                    let sample_path = std::path::PathBuf::from("../sample/Apocolocyntosis - Lucius Annaeus Seneca.epub");
+                                    if sample_path.exists() {
+                                        this.update(cx, |this, cx| {
+                                            this.handle_incoming_path(&sample_path, cx);
+                                        }).ok();
                                     }
                                 }
                             }
-                            cx.notify();
-                        }
+                        }).detach();
                     })),
             )
             // 2. Settings Bar
@@ -334,6 +410,44 @@ impl KindleStudio {
                     .flex_col()
                     .gap_3()
                     .children(self.tasks.iter().map(|task| {
+                        let (badge_bg, badge_text, sub_desc) = match &task.status {
+                            TaskStatus::Completed => (
+                                Theme::accent_green(),
+                                "변환 및 전송 완료".to_string(),
+                                format!("크기: {} | Kindle 저장소 동기화 완료", task.file_size_str),
+                            ),
+                            TaskStatus::ConvertedLocalOnly => (
+                                Theme::accent_blue(),
+                                "로컬 변환 완료 (기기 미연결)".to_string(),
+                                format!("크기: {} | 로컬 KFX 생성 완료 (Kindle 미연결)", task.file_size_str),
+                            ),
+                            TaskStatus::SyncFailed(err) => (
+                                Theme::accent_red(),
+                                "전송 실패".to_string(),
+                                format!("크기: {} | 전송 오류: {}", task.file_size_str, err),
+                            ),
+                            TaskStatus::Converting => (
+                                Theme::accent_amber(),
+                                "변환 중...".to_string(),
+                                format!("크기: {} | KFX 패키징 진행 중...", task.file_size_str),
+                            ),
+                            TaskStatus::Syncing => (
+                                Theme::accent_purple(),
+                                "기기 전송 중...".to_string(),
+                                format!("크기: {} | Kindle 동기화 중...", task.file_size_str),
+                            ),
+                            TaskStatus::Queued => (
+                                Theme::border(),
+                                "대기 중".to_string(),
+                                format!("크기: {}", task.file_size_str),
+                            ),
+                            TaskStatus::Failed(err) => (
+                                Theme::accent_red(),
+                                "변환 실패".to_string(),
+                                format!("오류: {}", err),
+                            ),
+                        };
+
                         div()
                             .flex()
                             .justify_between()
@@ -359,7 +473,7 @@ impl KindleStudio {
                                         div()
                                             .text_xs()
                                             .text_color(Theme::text_muted())
-                                            .child(format!("크기: {} | 소요시간: 0.28초", task.file_size_str)),
+                                            .child(sub_desc),
                                     ),
                             )
                             .child(
@@ -383,11 +497,11 @@ impl KindleStudio {
                                             .px_2()
                                             .py_0p5()
                                             .rounded_sm()
-                                            .bg(Theme::accent_green())
+                                            .bg(badge_bg)
                                             .text_xs()
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(Theme::text_primary())
-                                            .child("변환 및 전송 완료"),
+                                            .child(badge_text),
                                     ),
                             )
                     })),
@@ -495,7 +609,7 @@ impl Render for KindleStudio {
             .flex_col()
             .size_full()
             .bg(Theme::bg_root())
-            .child(self.render_header())
+            .child(self.render_header(cx))
             .child(self.render_tabs(cx))
             .child(match self.tab {
                 StudioTab::Convert => self.render_converter_view(cx).into_any_element(),

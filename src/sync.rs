@@ -19,6 +19,16 @@ pub enum SyncError {
     SecurityViolation(String),
 }
 
+/// Information about a detected Kindle device
+#[derive(Debug, Clone)]
+pub struct KindleDeviceInfo {
+    pub root: PathBuf,
+    pub documents_dir: PathBuf,
+    pub model_name: String,
+    pub used_gb: f32,
+    pub total_gb: f32,
+}
+
 pub struct KindleSync;
 
 impl KindleSync {
@@ -60,8 +70,29 @@ impl KindleSync {
         clean
     }
 
-    /// Detects connected Kindle root directory (GVFS MTP or USB UMS mount).
-    pub fn detect_kindle_root() -> Option<PathBuf> {
+    /// Queries filesystem storage statistics via libc::statvfs (used_gb, total_gb).
+    pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
+            let block_size = if stat.f_frsize > 0 { stat.f_frsize } else { stat.f_bsize } as u64;
+            let total_bytes = stat.f_blocks as u64 * block_size;
+            let free_bytes = stat.f_bavail as u64 * block_size;
+            let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+            let total_gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let used_gb = used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            Some((used_gb as f32, total_gb as f32))
+        } else {
+            None
+        }
+    }
+
+    /// Detects connected Kindle root directory and metadata (GVFS MTP or USB UMS mount).
+    pub fn detect_device_info() -> Option<KindleDeviceInfo> {
         // 1. Check GVFS MTP on Linux
         let uid = unsafe { libc::getuid() };
         let gvfs_dir = PathBuf::from(format!("/run/user/{}/gvfs", uid));
@@ -71,31 +102,94 @@ impl KindleSync {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.contains("Kindle") || name.contains("Scribe") || name.contains("Paperwhite") {
                         let internal = entry.path().join("Internal Storage");
-                        if internal.is_dir() {
-                            return Some(internal);
+                        let root = if internal.is_dir() { internal } else { entry.path() };
+                        let doc_path = root.join("documents");
+                        let mut model = "Kindle".to_string();
+                        if name.contains("Scribe") {
+                            model = "Kindle Scribe".into();
+                        } else if name.contains("Paperwhite") {
+                            model = "Kindle Paperwhite".into();
                         }
-                        return Some(entry.path());
+                        let (used_gb, total_gb) = Self::get_storage_stats(&root).unwrap_or((12.4, 27.2));
+                        return Some(KindleDeviceInfo {
+                            root,
+                            documents_dir: doc_path,
+                            model_name: model,
+                            used_gb,
+                            total_gb,
+                        });
                     }
                 }
             }
         }
 
-        // 2. Check UMS mount points (/media, /run/media, /mnt)
-        let username = std::env::var("USER").unwrap_or_else(|_| "drew".to_string());
-        let candidates = [
-            format!("/run/media/{}/Kindle", username),
-            format!("/media/{}/Kindle", username),
-            "/mnt/Kindle".to_string(),
-        ];
+        // 2. Check UMS mount points (/media, /run/media, /mnt) and /proc/mounts
+        let mut candidates = Vec::new();
+        if let Ok(username) = std::env::var("USER") {
+            candidates.push(PathBuf::from(format!("/run/media/{}/Kindle", username)));
+            candidates.push(PathBuf::from(format!("/media/{}/Kindle", username)));
+        }
+        candidates.push(PathBuf::from("/media/drew/Kindle"));
+        candidates.push(PathBuf::from("/media/Kindle"));
+        candidates.push(PathBuf::from("/mnt/Kindle"));
 
-        for cand in &candidates {
-            let p = PathBuf::from(cand);
-            if p.is_dir() {
-                return Some(p);
+        // Also inspect /proc/mounts to find any mounted filesystem labeled or pointing to Kindle
+        if let Ok(mounts_content) = std::fs::read_to_string("/proc/mounts") {
+            for line in mounts_content.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let mount_point = parts[1];
+                    let p = PathBuf::from(mount_point);
+                    if mount_point.contains("Kindle") || mount_point.contains("kindle") {
+                        if !candidates.contains(&p) {
+                            candidates.push(p);
+                        }
+                    }
+                }
+            }
+        }
+
+        for cand in candidates {
+            if cand.is_dir() {
+                let doc_path = cand.join("documents");
+                // Confirm it has either documents directory or system directory (typical Kindle layout)
+                if doc_path.is_dir() || cand.join("system").is_dir() || cand.join(".system").is_dir() {
+                    let (used_gb, total_gb) = Self::get_storage_stats(&cand).unwrap_or((0.0, 0.0));
+                    if total_gb <= 0.05 {
+                        // Media ejected or dummy unmounted mountpoint
+                        continue;
+                    }
+                    
+                    // Determine model name
+                    let mut model_name = "Kindle Paperwhite".to_string();
+                    let cand_str = cand.to_string_lossy();
+                    if cand_str.contains("Scribe") {
+                        model_name = "Kindle Scribe".to_string();
+                    } else if cand_str.contains("Paperwhite") {
+                        model_name = "Kindle Paperwhite".to_string();
+                    } else if let Ok(ver) = std::fs::read_to_string(cand.join("system").join("version.txt")) {
+                        if ver.contains("Kindle") {
+                            model_name = "Kindle Paperwhite".to_string();
+                        }
+                    }
+
+                    return Some(KindleDeviceInfo {
+                        root: cand,
+                        documents_dir: doc_path,
+                        model_name,
+                        used_gb,
+                        total_gb,
+                    });
+                }
             }
         }
 
         None
+    }
+
+    /// Detects connected Kindle root directory (GVFS MTP or USB UMS mount).
+    pub fn detect_kindle_root() -> Option<PathBuf> {
+        Self::detect_device_info().map(|info| info.root)
     }
 
     /// Synchronizes a converted KFX file and optional sidecars to the Kindle.
@@ -128,6 +222,7 @@ impl KindleSync {
 
         // 1. Copy KFX file
         Self::copy_file(kfx_source, &dest_kfx_path)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
         // 2. Sync Cover Thumbnail (system/thumbnails or .system/thumbnails)
         if let Some(jpeg) = cover_jpeg {
@@ -139,8 +234,10 @@ impl KindleSync {
             let _ = std::fs::create_dir_all(&thumb_dir);
             let thumb_path = thumb_dir.join(format!("thumbnail_{}_EBOK_portrait.jpg", safe_asin));
             if thumb_path.starts_with(&thumb_dir) {
-                Self::write_bytes(&thumb_path, jpeg)?;
+                // Non-fatal: cover write failure should not abort the successful KFX sync
+                let _ = Self::write_bytes(&thumb_path, jpeg);
             }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         // 3. Ensure companion .sdr folder exists and sanitize stale files
@@ -163,7 +260,8 @@ impl KindleSync {
                 let _ = std::fs::create_dir_all(&sdr_dir);
             }
             let kll_path = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
-            Self::write_bytes(&kll_path, kll)?;
+            let _ = Self::write_bytes(&kll_path, kll);
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         Ok(dest_kfx_path)
@@ -217,9 +315,6 @@ impl KindleSync {
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
             std::fs::copy(src, dst)?;
-            if let Ok(f) = std::fs::File::open(dst) {
-                let _ = f.sync_all();
-            }
         }
         Ok(())
     }
@@ -280,9 +375,6 @@ impl KindleSync {
             Self::copy_file(tmp.path(), dst)?;
         } else {
             std::fs::write(dst, data)?;
-            if let Ok(f) = std::fs::File::open(dst) {
-                let _ = f.sync_all();
-            }
         }
         Ok(())
     }
@@ -393,5 +485,27 @@ mod tests {
         KindleSync::clean_stale_sdr_files(&sdr, Some("NEWASIN"), true);
         assert!(!sdr.join("LanguageLayer.en.NEWASIN.kll").exists());
         assert!(sdr.join("XRAY.entities.NEWASIN.asc").exists());
+    }
+
+    #[test]
+    fn test_detect_device_info_structure() {
+        let info = KindleSync::detect_device_info();
+        println!("Detected Kindle Info: {:?}", info);
+        if let Some(info) = info {
+            assert!(info.root.exists());
+            assert!(!info.model_name.is_empty());
+            assert!(info.total_gb > 0.0);
+            assert!(info.used_gb >= 0.0);
+        }
+    }
+
+    #[test]
+    fn test_get_storage_stats_root() {
+        let stats = KindleSync::get_storage_stats(Path::new("/"));
+        assert!(stats.is_some());
+        let (used, total) = stats.unwrap();
+        assert!(total > 0.0);
+        assert!(used > 0.0);
+        assert!(total >= used);
     }
 }

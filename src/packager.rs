@@ -75,11 +75,24 @@ impl LocalSymbols {
 }
 
 pub struct SectionPackData {
+    pub raw_id: String,
     pub name: String,
     pub sec_sym_id: u32,
     pub sec_eid: u32,
     pub story_sym_id: u32,
     pub block_info: Vec<(u32, usize)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StyleSymMap {
+    pub h1: u32,
+    pub h2: u32,
+    pub h3: u32,
+    pub p: u32,
+    pub blockquote: u32,
+    pub bold: u32,
+    pub italic: u32,
+    pub underline: u32,
 }
 
 /// Generates deterministic Amazon Content Repository container ID.
@@ -235,14 +248,20 @@ impl<'a> KfxPackager<'a> {
         // 3. Build book metadata ($490)
         self.build_book_metadata();
 
-        // 4. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
-        let section_data = self.build_storylines_and_sections(&mut symbols);
+        // 4. Build typography and text styles ($157)
+        let styles = self.build_styles(&mut symbols);
 
-        // 5. Build metadata ($258) with synchronized reading_orders
+        // 5. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
+        let section_data = self.build_storylines_and_sections(&mut symbols, &styles);
+
+        // 6. Build navigation ($389, $391, $393)
+        let nav_sym = self.build_navigation(&mut symbols, &section_data);
+
+        // 7. Build metadata ($258) with synchronized reading_orders
         self.build_metadata(&section_data);
 
-        // 6. Build document data ($538) with Decimal font_size & line_height
-        self.build_document_data(&section_data, &symbols);
+        // 8. Build document data ($538) with Decimal font_size & line_height and book_navigation
+        self.build_document_data(&section_data, &symbols, nav_sym);
 
         // 6. Build Kindle OS position maps ($609, $264, $265, $550, $621)
         self.build_position_maps(&section_data);
@@ -483,9 +502,145 @@ impl<'a> KfxPackager<'a> {
         });
     }
 
+    fn build_styles(&mut self, symbols: &mut LocalSymbols) -> StyleSymMap {
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let sym_name = symbol_id("name").unwrap_or(4);
+        let sym_font_size = symbol_id("font_size").unwrap_or(16);
+        let sym_font_weight = symbol_id("font_weight").unwrap_or(13);
+        let sym_font_style = symbol_id("font_style").unwrap_or(12);
+        let sym_underline = symbol_id("underline").unwrap_or(23);
+        let sym_margin_top = symbol_id("margin_top").unwrap_or(47);
+        let sym_margin_bottom = symbol_id("margin_bottom").unwrap_or(49);
+        let sym_margin_left = symbol_id("margin_left").unwrap_or(48);
+        let sym_margin_right = symbol_id("margin_right").unwrap_or(50);
+        let sym_text_indent = symbol_id("text_indent").unwrap_or(36);
+        let sym_line_height = symbol_id("line_height").unwrap_or(42);
+        let sym_value = symbol_id("value").unwrap_or(307);
+        let sym_unit = symbol_id("unit").unwrap_or(306);
+        let sym_em = symbol_id("em").unwrap_or(308);
+        let sym_bold = symbol_id("bold").unwrap_or(361);
+        let sym_italic = symbol_id("italic").unwrap_or(382);
+
+        let h1_sym = symbols.intern("style_h1");
+        let h2_sym = symbols.intern("style_h2");
+        let h3_sym = symbols.intern("style_h3");
+        let p_sym = symbols.intern("style_p");
+        let bq_sym = symbols.intern("style_blockquote");
+        let bold_sym = symbols.intern("style_bold");
+        let italic_sym = symbols.intern("style_italic");
+        let underline_sym = symbols.intern("style_underline");
+
+        let make_em = |val: &str| {
+            IonValue::Struct(vec![
+                (sym_value, IonValue::Decimal(val.to_string())),
+                (sym_unit, IonValue::Symbol(sym_em)),
+            ])
+        };
+
+        // 1. h1 style
+        let h1_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(h1_sym)),
+            (sym_font_size, make_em("1.6")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("1.3")),
+            (sym_margin_top, make_em("1.2")),
+            (sym_margin_bottom, make_em("0.6")),
+        ]);
+
+        // 2. h2 style
+        let h2_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(h2_sym)),
+            (sym_font_size, make_em("1.35")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("1.3")),
+            (sym_margin_top, make_em("1.0")),
+            (sym_margin_bottom, make_em("0.5")),
+        ]);
+
+        // 3. h3 style
+        let h3_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(h3_sym)),
+            (sym_font_size, make_em("1.2")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("1.3")),
+            (sym_margin_top, make_em("0.8")),
+            (sym_margin_bottom, make_em("0.4")),
+        ]);
+
+        // 4. p style
+        let p_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(p_sym)),
+            (sym_line_height, make_em("1.4")),
+            (sym_margin_bottom, make_em("0.4")),
+            (sym_text_indent, make_em("1.0")),
+        ]);
+
+        // 5. blockquote style
+        let bq_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(bq_sym)),
+            (sym_margin_left, make_em("1.5")),
+            (sym_margin_right, make_em("1.5")),
+            (sym_margin_top, make_em("0.8")),
+            (sym_margin_bottom, make_em("0.8")),
+            (sym_font_style, IonValue::Symbol(sym_italic)),
+        ]);
+
+        // 6. inline bold style
+        let bold_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(bold_sym)),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+        ]);
+
+        // 7. inline italic style
+        let italic_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(italic_sym)),
+            (sym_font_style, IonValue::Symbol(sym_italic)),
+        ]);
+
+        // 8. inline underline style
+        let underline_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(underline_sym)),
+            (sym_underline, IonValue::Bool(true)),
+        ]);
+
+        let style_list = [
+            (h1_sym, h1_val),
+            (h2_sym, h2_val),
+            (h3_sym, h3_val),
+            (p_sym, p_val),
+            (bq_sym, bq_val),
+            (bold_sym, bold_val),
+            (italic_sym, italic_val),
+            (underline_sym, underline_val),
+        ];
+
+        for (sym_id_val, val) in style_list {
+            let mut writer = IonWriter::new();
+            writer.write_bvm();
+            writer.write_value(&val);
+            self.entities.push(KfxEntity {
+                entity_id: sym_id_val,
+                chunk_type: sym_style,
+                data: writer.into_bytes(),
+            });
+        }
+
+        StyleSymMap {
+            h1: h1_sym,
+            h2: h2_sym,
+            h3: h3_sym,
+            p: p_sym,
+            blockquote: bq_sym,
+            bold: bold_sym,
+            italic: italic_sym,
+            underline: underline_sym,
+        }
+    }
+
     fn build_storylines_and_sections(
         &mut self,
         symbols: &mut LocalSymbols,
+        styles: &StyleSymMap,
     ) -> Vec<SectionPackData> {
         let sym_content = SYM_CONTENT; // 145
         let sym_storyline = SYM_STORYLINE; // 259
@@ -498,6 +653,12 @@ impl<'a> KfxPackager<'a> {
         let sym_id = symbol_id("id").unwrap_or(155);
         let sym_type = symbol_id("type").unwrap_or(159);
         let sym_type_text = symbol_id("text").unwrap_or(269);
+        let sym_type_image = symbol_id("image").unwrap_or(271);
+        let sym_resource = symbol_id("resource").unwrap_or(162);
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let sym_style_events = symbol_id("style_events").unwrap_or(142);
+        let sym_offset = symbol_id("offset").unwrap_or(143);
+        let sym_length = symbol_id("length").unwrap_or(144);
         let sym_index = symbol_id("index").unwrap_or(153);
         let sym_section_name = symbol_id("section_name").unwrap_or(174);
         let sym_page_templates = symbol_id("page_templates").unwrap_or(141);
@@ -510,24 +671,17 @@ impl<'a> KfxPackager<'a> {
         let mut section_data = Vec::with_capacity(num_sections);
 
         for idx in 0..num_sections {
-            let (raw_name, is_cover_sec, blocks_data) = {
-                let sec = &self.sections[idx];
-                let raw_name = if sec.id.is_empty() {
-                    format!("sec_{}", idx + 1)
-                } else {
-                    sec.id.clone()
-                };
-                let is_cover = (idx == 0)
-                    && (sec.id.to_lowercase().contains("cover")
-                        || (sec.blocks.len() == 1
-                            && matches!(sec.blocks[0], Block::Image { .. })));
-                let blocks: Vec<(String, usize)> = sec
-                    .blocks
-                    .iter()
-                    .map(|b| (b.plain_text(), b.char_count().max(1)))
-                    .collect();
-                (raw_name, is_cover, blocks)
+            let sec = self.sections[idx].clone();
+            let raw_name = if sec.id.is_empty() {
+                format!("sec_{}", idx + 1)
+            } else {
+                sec.id.clone()
             };
+            let is_cover = (idx == 0)
+                && (sec.id.to_lowercase().contains("cover")
+                    || (sec.blocks.len() == 1
+                        && matches!(sec.blocks[0], Block::Image { .. })));
+
             let sec_name = format!("c_{}", raw_name);
 
             let sec_sym_id = symbols.intern(&sec_name);
@@ -539,17 +693,164 @@ impl<'a> KfxPackager<'a> {
 
             let mut block_info = Vec::new();
             let mut para_strings = Vec::new();
+            let mut story_elements = Vec::new();
 
-            for (block_text, block_len) in blocks_data {
+            for block in &sec.blocks {
                 let block_eid = self.alloc_eid();
-                block_info.push((block_eid, block_len));
-                para_strings.push(IonValue::String(block_text));
+
+                match block {
+                    Block::Heading { level, spans, .. } => {
+                        let style_sym = match level {
+                            1 => styles.h1,
+                            2 => styles.h2,
+                            _ => styles.h3,
+                        };
+                        let mut full_text = String::new();
+                        let mut style_events = Vec::new();
+                        let mut offset = 0;
+
+                        for span in spans {
+                            let span_len = span.text.chars().count();
+                            if let Some(st) = &span.style {
+                                if st.contains("italic") {
+                                    style_events.push(IonValue::Struct(vec![
+                                        (sym_offset, IonValue::Int(offset as i64)),
+                                        (sym_length, IonValue::Int(span_len as i64)),
+                                        (sym_style, IonValue::Symbol(styles.italic)),
+                                    ]));
+                                }
+                            }
+                            full_text.push_str(&span.text);
+                            offset += span_len;
+                        }
+
+                        let content_idx = para_strings.len();
+                        block_info.push((block_eid, full_text.chars().count().max(1)));
+                        para_strings.push(IonValue::String(full_text));
+
+                        let mut elem_fields = vec![
+                            (sym_id, IonValue::Int(block_eid as i64)),
+                            (sym_type, IonValue::Symbol(sym_type_text)),
+                            (sym_style, IonValue::Symbol(style_sym)),
+                            (
+                                sym_content,
+                                IonValue::Struct(vec![
+                                    (sym_name, IonValue::Symbol(content_sym_id)),
+                                    (sym_index, IonValue::Int(content_idx as i64)),
+                                ]),
+                            ),
+                        ];
+                        if !style_events.is_empty() {
+                            elem_fields.push((sym_style_events, IonValue::List(style_events)));
+                        }
+                        story_elements.push(IonValue::Struct(elem_fields));
+                    }
+                    Block::Paragraph { spans, style, .. } => {
+                        let is_bq = style.as_deref() == Some("blockquote");
+                        let base_style = if is_bq { styles.blockquote } else { styles.p };
+                        let mut full_text = String::new();
+                        let mut style_events = Vec::new();
+                        let mut offset = 0;
+
+                        for span in spans {
+                            let span_len = span.text.chars().count();
+                            if let Some(st) = &span.style {
+                                if st.contains("bold") {
+                                    style_events.push(IonValue::Struct(vec![
+                                        (sym_offset, IonValue::Int(offset as i64)),
+                                        (sym_length, IonValue::Int(span_len as i64)),
+                                        (sym_style, IonValue::Symbol(styles.bold)),
+                                    ]));
+                                }
+                                if st.contains("italic") {
+                                    style_events.push(IonValue::Struct(vec![
+                                        (sym_offset, IonValue::Int(offset as i64)),
+                                        (sym_length, IonValue::Int(span_len as i64)),
+                                        (sym_style, IonValue::Symbol(styles.italic)),
+                                    ]));
+                                }
+                                if st.contains("underline") {
+                                    style_events.push(IonValue::Struct(vec![
+                                        (sym_offset, IonValue::Int(offset as i64)),
+                                        (sym_length, IonValue::Int(span_len as i64)),
+                                        (sym_style, IonValue::Symbol(styles.underline)),
+                                    ]));
+                                }
+                            }
+                            full_text.push_str(&span.text);
+                            offset += span_len;
+                        }
+
+                        let content_idx = para_strings.len();
+                        block_info.push((block_eid, full_text.chars().count().max(1)));
+                        para_strings.push(IonValue::String(full_text));
+
+                        let mut elem_fields = vec![
+                            (sym_id, IonValue::Int(block_eid as i64)),
+                            (sym_type, IonValue::Symbol(sym_type_text)),
+                            (sym_style, IonValue::Symbol(base_style)),
+                            (
+                                sym_content,
+                                IonValue::Struct(vec![
+                                    (sym_name, IonValue::Symbol(content_sym_id)),
+                                    (sym_index, IonValue::Int(content_idx as i64)),
+                                ]),
+                            ),
+                        ];
+                        if !style_events.is_empty() {
+                            elem_fields.push((sym_style_events, IonValue::List(style_events)));
+                        }
+                        story_elements.push(IonValue::Struct(elem_fields));
+                    }
+                    Block::Image { resource_id, alt, .. } => {
+                        let res_path = format!("resource/{}", resource_id);
+                        let alt_text = alt.clone().unwrap_or_default();
+                        block_info.push((block_eid, alt_text.chars().count().max(1)));
+
+                        story_elements.push(IonValue::Struct(vec![
+                            (sym_id, IonValue::Int(block_eid as i64)),
+                            (sym_type, IonValue::Symbol(sym_type_image)),
+                            (sym_resource, IonValue::String(res_path)),
+                        ]));
+                    }
+                    _ => {
+                        let text = block.plain_text();
+                        let content_idx = para_strings.len();
+                        block_info.push((block_eid, text.chars().count().max(1)));
+                        para_strings.push(IonValue::String(text));
+
+                        story_elements.push(IonValue::Struct(vec![
+                            (sym_id, IonValue::Int(block_eid as i64)),
+                            (sym_type, IonValue::Symbol(sym_type_text)),
+                            (sym_style, IonValue::Symbol(styles.p)),
+                            (
+                                sym_content,
+                                IonValue::Struct(vec![
+                                    (sym_name, IonValue::Symbol(content_sym_id)),
+                                    (sym_index, IonValue::Int(content_idx as i64)),
+                                ]),
+                            ),
+                        ]));
+                    }
+                }
             }
 
             if block_info.is_empty() {
                 let fallback_eid = self.alloc_eid();
                 block_info.push((fallback_eid, 1));
                 para_strings.push(IonValue::String(String::new()));
+                story_elements.push(IonValue::Struct(vec![
+                    (sym_id, IonValue::Int(fallback_eid as i64)),
+                    (sym_type, IonValue::Symbol(sym_type_text)),
+                    (sym_style, IonValue::Symbol(styles.p)),
+                    (
+                        sym_content,
+                        IonValue::Struct(vec![
+                            (sym_name, IonValue::Symbol(content_sym_id)),
+                            (sym_index, IonValue::Int(0)),
+                        ]),
+                    ),
+                ]));
             }
 
             // 1. Content entity ($145)
@@ -567,20 +868,6 @@ impl<'a> KfxPackager<'a> {
             });
 
             // 2. Storyline entity ($259)
-            let mut story_elements = Vec::with_capacity(block_info.len());
-            for (c_idx, &(p_eid, _)) in block_info.iter().enumerate() {
-                story_elements.push(IonValue::Struct(vec![
-                    (sym_id, IonValue::Int(p_eid as i64)),
-                    (sym_type, IonValue::Symbol(sym_type_text)),
-                    (
-                        sym_content,
-                        IonValue::Struct(vec![
-                            (sym_name, IonValue::Symbol(content_sym_id)),
-                            (sym_index, IonValue::Int(c_idx as i64)),
-                        ]),
-                    ),
-                ]));
-            }
             let story_val = IonValue::Struct(vec![
                 (sym_story_name, IonValue::Symbol(story_sym_id)),
                 (sym_content_list, IonValue::List(story_elements)),
@@ -595,7 +882,7 @@ impl<'a> KfxPackager<'a> {
             });
 
             // 3. Section entity ($260) with cover container/scale_fit template support
-            let page_template = if is_cover_sec {
+            let page_template = if is_cover {
                 IonValue::Struct(vec![
                     (sym_id, IonValue::Int(section_eid as i64)),
                     (sym_story_name, IonValue::Symbol(story_sym_id)),
@@ -662,6 +949,7 @@ impl<'a> KfxPackager<'a> {
             });
 
             section_data.push(SectionPackData {
+                raw_id: raw_name,
                 name: sec_name,
                 sec_sym_id,
                 sec_eid: section_eid,
@@ -671,6 +959,96 @@ impl<'a> KfxPackager<'a> {
         }
 
         section_data
+    }
+
+    fn build_navigation(
+        &mut self,
+        symbols: &mut LocalSymbols,
+        section_data: &[SectionPackData],
+    ) -> Option<u32> {
+        if self.book.toc.is_empty() {
+            return None;
+        }
+
+        let sym_book_navigation = symbol_id("book_navigation").unwrap_or(389);
+        let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
+        let sym_nav_unit = symbol_id("nav_unit").unwrap_or(393);
+        let sym_toc = symbol_id("toc").unwrap_or(212);
+        let sym_nav_type = symbol_id("nav_type").unwrap_or(235);
+        let sym_nav_container_name = symbol_id("nav_container_name").unwrap_or(239);
+        let sym_nav_unit_name = symbol_id("nav_unit_name").unwrap_or(240);
+        let sym_nav_containers = symbol_id("nav_containers").unwrap_or(392);
+        let sym_entries = symbol_id("entries").unwrap_or(247);
+        let sym_section_name = symbol_id("section_name").unwrap_or(174);
+        let sym_label = symbol_id("label").unwrap_or(305);
+        let sym_position = symbol_id("position").unwrap_or(173);
+
+        let mut nav_unit_syms = Vec::new();
+
+        for (idx, item) in self.book.toc.iter().enumerate() {
+            let unit_sym = symbols.intern(&format!("nav_unit_{}", idx + 1));
+            nav_unit_syms.push(IonValue::Symbol(unit_sym));
+
+            let target_sec = section_data
+                .iter()
+                .find(|s| s.raw_id == item.target_section || s.name == item.target_section)
+                .or_else(|| section_data.first());
+
+            let (target_sec_sym, target_pos) = if let Some(sec) = target_sec {
+                let first_pid = sec.block_info.first().map(|&(eid, _)| eid).unwrap_or(sec.sec_eid);
+                (sec.sec_sym_id, first_pid)
+            } else {
+                (symbols.intern("c_section_1"), 200)
+            };
+
+            let unit_val = IonValue::Struct(vec![
+                (sym_nav_unit_name, IonValue::Symbol(unit_sym)),
+                (sym_label, IonValue::String(item.title.clone())),
+                (sym_section_name, IonValue::Symbol(target_sec_sym)),
+                (sym_position, IonValue::Int(target_pos as i64)),
+            ]);
+
+            let mut unit_writer = IonWriter::new();
+            unit_writer.write_bvm();
+            unit_writer.write_value(&unit_val);
+            self.entities.push(KfxEntity {
+                entity_id: unit_sym,
+                chunk_type: sym_nav_unit,
+                data: unit_writer.into_bytes(),
+            });
+        }
+
+        // Build nav_container ($391)
+        let container_sym = symbols.intern("toc_nav_container");
+        let container_val = IonValue::Struct(vec![
+            (sym_nav_container_name, IonValue::Symbol(container_sym)),
+            (sym_nav_type, IonValue::Symbol(sym_toc)),
+            (sym_entries, IonValue::List(nav_unit_syms)),
+        ]);
+        let mut container_writer = IonWriter::new();
+        container_writer.write_bvm();
+        container_writer.write_value(&container_val);
+        self.entities.push(KfxEntity {
+            entity_id: container_sym,
+            chunk_type: sym_nav_container,
+            data: container_writer.into_bytes(),
+        });
+
+        // Build book_navigation ($389)
+        let book_nav_sym = symbols.intern("book_navigation");
+        let book_nav_val = IonValue::Struct(vec![
+            (sym_nav_containers, IonValue::List(vec![IonValue::Symbol(container_sym)])),
+        ]);
+        let mut nav_writer = IonWriter::new();
+        nav_writer.write_bvm();
+        nav_writer.write_value(&book_nav_val);
+        self.entities.push(KfxEntity {
+            entity_id: book_nav_sym,
+            chunk_type: sym_book_navigation,
+            data: nav_writer.into_bytes(),
+        });
+
+        Some(book_nav_sym)
     }
 
     fn build_metadata(&mut self, section_data: &[SectionPackData]) {
@@ -709,6 +1087,7 @@ impl<'a> KfxPackager<'a> {
         &mut self,
         section_data: &[SectionPackData],
         symbols: &LocalSymbols,
+        nav_sym: Option<u32>,
     ) {
         let sym_doc_data = SYM_DOCUMENT_DATA; // 538
         let sym_direction = symbol_id("direction").unwrap_or(192);
@@ -746,7 +1125,7 @@ impl<'a> KfxPackager<'a> {
         let max_sym = 852 + symbols.names.len() as u32;
         let max_id = (max_sym.max(self.next_eid) + 1) as i64;
 
-        let doc_fields = IonValue::Struct(vec![
+        let mut doc_fields = vec![
             (sym_direction, IonValue::Symbol(sym_ltr)),
             (sym_column_count, IonValue::Symbol(sym_auto)),
             (
@@ -769,11 +1148,18 @@ impl<'a> KfxPackager<'a> {
             (sym_font_family, IonValue::String("serif".to_string())),
             (sym_spacing_base, IonValue::Symbol(sym_width)),
             (sym_reading_orders, IonValue::List(vec![reading_order])),
-        ]);
+        ];
+
+        if let Some(nav_id) = nav_sym {
+            let sym_book_navigation = symbol_id("book_navigation").unwrap_or(389);
+            doc_fields.push((sym_book_navigation, IonValue::Symbol(nav_id)));
+        }
+
+        let doc_struct = IonValue::Struct(doc_fields);
 
         let mut doc_writer = IonWriter::new();
         doc_writer.write_bvm();
-        doc_writer.write_value(&doc_fields);
+        doc_writer.write_value(&doc_struct);
 
         self.entities.push(KfxEntity {
             entity_id: SINGLETON_ID,
@@ -1263,4 +1649,151 @@ mod tests {
         let has_fcap_in_entities = packager.entities.iter().any(|e| e.chunk_type == SYM_FORMAT_CAPABILITIES);
         assert!(!has_fcap_in_entities, "format_capabilities ($593) must NOT be in bcIndexTab entities");
     }
+
+    #[test]
+    fn test_packager_emits_navigation_and_toc() {
+        let mut book = BookIR::default();
+        book.metadata.title = "TOC Test Book".to_string();
+        book.sections.push(Section {
+            id: "chap1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Chapter 1 content".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                }],
+                style: None,
+            }],
+        });
+        book.sections.push(Section {
+            id: "chap2".to_string(),
+            title: "Chapter 2".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p2".to_string(),
+                spans: vec![TextSpan {
+                    text: "Chapter 2 content".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                }],
+                style: None,
+            }],
+        });
+
+        book.toc = vec![
+            crate::ir::TocItem {
+                title: "Chapter 1".to_string(),
+                target_section: "chap1".to_string(),
+                target_anchor: None,
+                children: Vec::new(),
+            },
+            crate::ir::TocItem {
+                title: "Chapter 2".to_string(),
+                target_section: "chap2".to_string(),
+                target_anchor: None,
+                children: Vec::new(),
+            },
+        ];
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging with TOC failed");
+        assert!(size > 0);
+
+        let sym_book_nav = symbol_id("book_navigation").unwrap_or(389);
+        let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
+        let sym_nav_unit = symbol_id("nav_unit").unwrap_or(393);
+
+        // Verify book_navigation ($389) entity emitted
+        let has_book_nav = packager.entities.iter().any(|e| e.chunk_type == sym_book_nav);
+        assert!(has_book_nav, "book_navigation ($389) entity was not emitted");
+
+        // Verify nav_container ($391) entity emitted
+        let has_nav_container = packager.entities.iter().any(|e| e.chunk_type == sym_nav_container);
+        assert!(has_nav_container, "nav_container ($391) entity was not emitted");
+
+        // Verify nav_unit ($393) entities emitted for both TOC items
+        let nav_units: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_nav_unit).collect();
+        assert_eq!(nav_units.len(), 2, "Expected 2 nav_unit ($393) entities for 2 TOC items");
+
+        // Verify document_data ($538) was emitted
+        let has_doc_data = packager.entities.iter().any(|e| e.chunk_type == SYM_DOCUMENT_DATA);
+        assert!(has_doc_data, "document_data ($538) was not emitted");
+    }
+
+    #[test]
+    fn test_packager_emits_styles_and_heading_formatting() {
+        let mut book = BookIR::default();
+        book.metadata.title = "Style & Typography Test".to_string();
+        book.sections.push(Section {
+            id: "sec1".to_string(),
+            title: "Styled Section".to_string(),
+            blocks: vec![
+                Block::Heading {
+                    id: "h1".to_string(),
+                    level: 1,
+                    spans: vec![TextSpan {
+                        text: "Major Heading 1".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                    }],
+                },
+                Block::Paragraph {
+                    id: "p_styled".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "Normal text with ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "bold keyword".to_string(),
+                            style: Some("bold".to_string()),
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: " and ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "italic emphasis".to_string(),
+                            style: Some("italic".to_string()),
+                            anchor_id: None,
+                            href: None,
+                        },
+                    ],
+                    style: None,
+                },
+                Block::Paragraph {
+                    id: "p_quote".to_string(),
+                    spans: vec![TextSpan {
+                        text: "This is a profound quotation.".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                    }],
+                    style: Some("blockquote".to_string()),
+                },
+            ],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging with styles failed");
+        assert!(size > 0);
+
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
+        // We register 8 default typography styles: h1, h2, h3, p, blockquote, bold, italic, underline
+        assert_eq!(style_entities.len(), 8, "Expected 8 style ($157) entities in KFX container");
+    }
 }
+

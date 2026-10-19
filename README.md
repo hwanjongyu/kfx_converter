@@ -107,12 +107,19 @@ cargo build --release --bin kfx-conv
 # target/release/kfx-conv
 ```
 
-### Build the GPUI Desktop GUI (`kfx-studio`)
+### Build and Run the GPUI Desktop GUI (`kfx-studio`)
 
 The desktop GUI uses the high-performance GPUI framework. Enable the `gui` feature flag:
 
 ```bash
+# Build the GUI binary
 cargo build --release --bin kfx-studio --features gui
+
+# Run the pre-built release binary directly
+./target/release/kfx-studio
+
+# Or build and launch directly via Cargo
+cargo run --release --bin kfx-studio --features gui
 ```
 
 ---

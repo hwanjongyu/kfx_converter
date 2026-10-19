@@ -109,3 +109,17 @@ Kindle Scribe uses the Media Transfer Protocol (MTP) rather than UMS.
 - The converter detects GVFS mounts at `/run/user/$UID/gvfs/mtp:host=*`.
 - Ensure GVFS MTP tools are installed (`gvfs-backends` on Debian/Ubuntu).
 - The converter executes `gio copy` with a 60-second watchdog timer to avoid MTP deadlocks.
+ 
+---
+
+## 4. Desktop GUI Application (`kfx-studio`)
+
+For a graphical desktop experience with drag-and-drop book conversion, settings toggles, and live Kindle device explorer:
+
+```bash
+# Run the pre-built release binary directly
+./target/release/kfx-studio
+
+# Or build and launch directly via Cargo
+cargo run --release --bin kfx-studio --features gui
+```
