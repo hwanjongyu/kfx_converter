@@ -1,0 +1,384 @@
+//! Kindle Device Synchronization Engine
+//!
+//! Handles safe transfer of KFX books, lockscreen cover thumbnails, and Word Wise (.kll) sidecars
+//! to Amazon Kindle devices over both UMS (USB Mass Storage) and Linux GVFS MTP (`gio copy`).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum SyncError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Device not connected or documents directory not found at {0:?}")]
+    DeviceNotFound(PathBuf),
+    #[error("gio command failed: {0}")]
+    GioFailed(String),
+    #[error("Security violation: {0}")]
+    SecurityViolation(String),
+}
+
+pub struct KindleSync;
+
+impl KindleSync {
+    /// Sanitizes an e-book title to be completely safe for FAT32 / VFAT storage
+    /// and prevents directory traversal attacks (CWE-22 / CWE-73).
+    pub fn sanitize_filename(name: &str) -> String {
+        let forbidden = ['\\', '/', ':', '*', '?', '"', '<', '>', '|', '\0'];
+        let mut clean: String = name
+            .chars()
+            .map(|c| if forbidden.contains(&c) || c.is_control() { '_' } else { c })
+            .collect();
+
+        // Disallow relative directory traversal sequences
+        while clean.contains("..") {
+            clean = clean.replace("..", "_");
+        }
+
+        let mut clean = clean.trim().trim_end_matches(['.', '_', ' ']).to_string();
+        if clean.is_empty() {
+            clean = "book".to_string();
+        }
+        if clean.len() > 128 {
+            clean = clean.chars().take(128).collect();
+        }
+        clean
+    }
+
+    /// Sanitizes an ASIN identifier against path traversal and special characters.
+    pub fn sanitize_asin(asin: &str) -> String {
+        let forbidden = ['\\', '/', ':', '*', '?', '"', '<', '>', '|', '\0', ' ', '.'];
+        let mut clean: String = asin
+            .chars()
+            .filter(|c| !forbidden.contains(c) && !c.is_control())
+            .collect();
+        if clean.is_empty() {
+            clean = "UNKNOWN_ASIN".to_string();
+        }
+        clean.truncate(64);
+        clean
+    }
+
+    /// Detects connected Kindle root directory (GVFS MTP or USB UMS mount).
+    pub fn detect_kindle_root() -> Option<PathBuf> {
+        // 1. Check GVFS MTP on Linux
+        let uid = unsafe { libc::getuid() };
+        let gvfs_dir = PathBuf::from(format!("/run/user/{}/gvfs", uid));
+        if gvfs_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&gvfs_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.contains("Kindle") || name.contains("Scribe") || name.contains("Paperwhite") {
+                        let internal = entry.path().join("Internal Storage");
+                        if internal.is_dir() {
+                            return Some(internal);
+                        }
+                        return Some(entry.path());
+                    }
+                }
+            }
+        }
+
+        // 2. Check UMS mount points (/media, /run/media, /mnt)
+        let username = std::env::var("USER").unwrap_or_else(|_| "drew".to_string());
+        let candidates = [
+            format!("/run/media/{}/Kindle", username),
+            format!("/media/{}/Kindle", username),
+            "/mnt/Kindle".to_string(),
+        ];
+
+        for cand in &candidates {
+            let p = PathBuf::from(cand);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+
+        None
+    }
+
+    /// Synchronizes a converted KFX file and optional sidecars to the Kindle.
+    pub fn sync_to_device(
+        device_root: &Path,
+        kfx_source: &Path,
+        book_title: &str,
+        asin: &str,
+        cover_jpeg: Option<&[u8]>,
+        kll_bytes: Option<&[u8]>,
+    ) -> Result<PathBuf, SyncError> {
+        let docs_dir = device_root.join("documents");
+        if !docs_dir.exists() {
+            return Err(SyncError::DeviceNotFound(docs_dir));
+        }
+
+        let safe_title = Self::sanitize_filename(book_title);
+        let safe_asin = Self::sanitize_asin(asin);
+
+        let kfx_filename = format!("{}.kfx", safe_title);
+        let dest_kfx_path = docs_dir.join(&kfx_filename);
+
+        // Security assertion: Destination path must reside strictly within docs_dir
+        if !dest_kfx_path.starts_with(&docs_dir) {
+            return Err(SyncError::SecurityViolation(format!(
+                "Path traversal detected in KFX target: {:?}",
+                kfx_filename
+            )));
+        }
+
+        // 1. Copy KFX file
+        Self::copy_file(kfx_source, &dest_kfx_path)?;
+
+        // 2. Sync Cover Thumbnail (system/thumbnails or .system/thumbnails)
+        if let Some(jpeg) = cover_jpeg {
+            let thumb_dir = if device_root.join(".system").is_dir() {
+                device_root.join(".system").join("thumbnails")
+            } else {
+                device_root.join("system").join("thumbnails")
+            };
+            let _ = std::fs::create_dir_all(&thumb_dir);
+            let thumb_path = thumb_dir.join(format!("thumbnail_{}_EBOK_portrait.jpg", safe_asin));
+            if thumb_path.starts_with(&thumb_dir) {
+                Self::write_bytes(&thumb_path, jpeg)?;
+            }
+        }
+
+        // 3. Ensure companion .sdr folder exists and sanitize stale files
+        let sdr_dir = docs_dir.join(format!("{}.sdr", safe_title));
+        if !sdr_dir.starts_with(&docs_dir) {
+            return Err(SyncError::SecurityViolation(format!(
+                "Path traversal detected in SDR directory: {:?}",
+                safe_title
+            )));
+        }
+        let purge_ww = kll_bytes.is_none();
+        Self::clean_stale_sdr_files(&sdr_dir, Some(&safe_asin), purge_ww);
+
+        // 4. Sync Word Wise Sidecar (<Title>.sdr/LanguageLayer.en.{asin}.kll)
+        if let Some(kll) = kll_bytes {
+            let kll_path = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
+            Self::write_bytes(&kll_path, kll)?;
+        }
+
+        Ok(dest_kfx_path)
+    }
+
+    /// Purges .bad_file markers, incompatible serialized state files, and orphaned enhancement sidecars.
+    pub fn clean_stale_sdr_files(
+        sdr_dir: &Path,
+        current_asin: Option<&str>,
+        purge_word_wise: bool,
+    ) {
+        if !sdr_dir.is_dir() {
+            return;
+        }
+        let stale_exts = [".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea"];
+        if let Ok(entries) = std::fs::read_dir(sdr_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let fname_lower = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default();
+
+                if fname_lower.ends_with(".bad_file") {
+                    let _ = std::fs::remove_file(&path);
+                } else if stale_exts.iter().any(|ext| fname_lower.ends_with(ext)) {
+                    let _ = std::fs::remove_file(&path);
+                } else if purge_word_wise && fname_lower.contains(".kll") {
+                    let _ = std::fs::remove_file(&path);
+                } else if let Some(asin) = current_asin {
+                    let asin_lower = asin.to_lowercase();
+                    if (fname_lower.contains(".kll") || fname_lower.contains(".asc"))
+                        && !fname_lower.contains(&asin_lower)
+                    {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Robust copy using `gio copy` for Linux GVFS MTP or `std::fs::copy` for standard mounts.
+    fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
+        let dst_str = dst.to_string_lossy();
+        if dst_str.contains("/gvfs/mtp:") {
+            // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
+            Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
+        } else {
+            std::fs::copy(src, dst)?;
+        }
+        Ok(())
+    }
+
+    /// Spawns `gio copy` with an explicit watchdog timeout to prevent UI/CLI thread freezes.
+    fn execute_gio_copy_with_timeout(
+        src: &Path,
+        dst: &Path,
+        timeout: std::time::Duration,
+    ) -> Result<(), SyncError> {
+        let mut child = Command::new("gio")
+            .arg("copy")
+            .arg("--")
+            .arg(src)
+            .arg(dst)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    if status.success() {
+                        return Ok(());
+                    } else {
+                        let mut err_msg = String::new();
+                        if let Some(mut stderr) = child.stderr.take() {
+                            use std::io::Read;
+                            let _ = stderr.read_to_string(&mut err_msg);
+                        }
+                        return Err(SyncError::GioFailed(err_msg));
+                    }
+                }
+                None => {
+                    if start.elapsed() >= timeout {
+                        let _ = child.kill();
+                        return Err(SyncError::GioFailed(format!(
+                            "gio copy timed out after {} seconds",
+                            timeout.as_secs()
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
+    /// Writes raw bytes to device, using a temporary file and `gio copy` if on MTP.
+    fn write_bytes(dst: &Path, data: &[u8]) -> Result<(), SyncError> {
+        let dst_str = dst.to_string_lossy();
+        if dst_str.contains("/gvfs/mtp:") {
+            let mut tmp = tempfile::NamedTempFile::new()?;
+            use std::io::Write;
+            tmp.write_all(data)?;
+            tmp.flush()?;
+            Self::copy_file(tmp.path(), dst)?;
+        } else {
+            std::fs::write(dst, data)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_filename_basic() {
+        assert_eq!(KindleSync::sanitize_filename("Simple Title"), "Simple Title");
+        assert_eq!(
+            KindleSync::sanitize_filename("What If?: Serious Scientific Answers"),
+            "What If__ Serious Scientific Answers"
+        );
+        assert_eq!(
+            KindleSync::sanitize_filename("../../etc/passwd"),
+            "____etc_passwd"
+        );
+        assert_eq!(KindleSync::sanitize_filename("   "), "book");
+        assert_eq!(KindleSync::sanitize_filename("Trailing Dots..."), "Trailing Dots");
+    }
+
+    #[test]
+    fn test_sanitize_asin_basic() {
+        assert_eq!(KindleSync::sanitize_asin("B000JML542"), "B000JML542");
+        assert_eq!(KindleSync::sanitize_asin("../../root/key"), "rootkey");
+        assert_eq!(KindleSync::sanitize_asin(""), "UNKNOWN_ASIN");
+    }
+
+    #[test]
+    fn test_sync_to_device_traversal_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        let kfx_src = temp.path().join("source.kfx");
+        std::fs::write(&kfx_src, b"FAKE_KFX_BYTES").unwrap();
+
+        // Sync with a malicious title that attempts traversal
+        let result = KindleSync::sync_to_device(
+            temp.path(),
+            &kfx_src,
+            "../../../../etc/shadow",
+            "B00TESTASIN",
+            None,
+            None,
+        );
+        assert!(result.is_ok());
+        let synced_path = result.unwrap();
+        // Ensure destination path stays strictly inside documents
+        assert!(synced_path.starts_with(&docs));
+        assert!(!synced_path.to_string_lossy().contains(".."));
+    }
+
+    #[test]
+    fn test_gio_copy_error_reporting() {
+        let dummy_src = Path::new("/nonexistent_src_12345");
+        let dummy_dst = Path::new("/nonexistent_dst_67890");
+        let res = KindleSync::execute_gio_copy_with_timeout(
+            dummy_src,
+            dummy_dst,
+            std::time::Duration::from_millis(500),
+        );
+        // gio copy must either fail or report GioFailed
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_clean_stale_sdr_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let sdr = temp.path().join("TestBook.sdr");
+        std::fs::create_dir_all(&sdr).unwrap();
+
+        std::fs::write(sdr.join("test.han"), b"stale_han").unwrap();
+        std::fs::write(sdr.join("test.tan"), b"stale_tan").unwrap();
+        std::fs::write(sdr.join("test.pdr"), b"stale_pdr").unwrap();
+        std::fs::write(sdr.join("test.mbp1"), b"stale_mbp1").unwrap();
+        std::fs::write(sdr.join("test.phl"), b"stale_phl").unwrap();
+        std::fs::write(sdr.join("test.bdr"), b"stale_bdr").unwrap();
+        std::fs::write(sdr.join("test.ea"), b"stale_ea").unwrap();
+        std::fs::write(sdr.join("old.mbp1.bad_file"), b"bad_file").unwrap();
+        std::fs::write(sdr.join("corrupted.han.BAD_FILE"), b"bad_file_caps").unwrap();
+        std::fs::write(sdr.join("XRAY.entities.OLDASIN.asc"), b"orphaned_xray").unwrap();
+        std::fs::write(sdr.join("LanguageLayer.en.OLDASIN.kll"), b"orphaned_ww").unwrap();
+        std::fs::write(sdr.join("LanguageLayer.en.NEWASIN.kll"), b"valid_ww").unwrap();
+        std::fs::write(sdr.join("XRAY.entities.NEWASIN.asc"), b"valid_xray").unwrap();
+
+        KindleSync::clean_stale_sdr_files(&sdr, Some("NEWASIN"), false);
+
+        assert!(!sdr.join("test.han").exists());
+        assert!(!sdr.join("test.tan").exists());
+        assert!(!sdr.join("test.pdr").exists());
+        assert!(!sdr.join("test.mbp1").exists());
+        assert!(!sdr.join("test.phl").exists());
+        assert!(!sdr.join("test.bdr").exists());
+        assert!(!sdr.join("test.ea").exists());
+        assert!(!sdr.join("old.mbp1.bad_file").exists());
+        assert!(!sdr.join("corrupted.han.BAD_FILE").exists());
+        assert!(!sdr.join("XRAY.entities.OLDASIN.asc").exists());
+        assert!(!sdr.join("LanguageLayer.en.OLDASIN.kll").exists());
+
+        assert!(sdr.join("LanguageLayer.en.NEWASIN.kll").exists());
+        assert!(sdr.join("XRAY.entities.NEWASIN.asc").exists());
+
+        // Test with purge_word_wise = true: should purge valid_ww as well
+        KindleSync::clean_stale_sdr_files(&sdr, Some("NEWASIN"), true);
+        assert!(!sdr.join("LanguageLayer.en.NEWASIN.kll").exists());
+        assert!(sdr.join("XRAY.entities.NEWASIN.asc").exists());
+    }
+}
