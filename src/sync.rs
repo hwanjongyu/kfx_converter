@@ -151,11 +151,17 @@ impl KindleSync {
                 safe_title
             )));
         }
+        if kll_bytes.is_some() && !sdr_dir.exists() {
+            let _ = std::fs::create_dir_all(&sdr_dir);
+        }
         let purge_ww = kll_bytes.is_none();
         Self::clean_stale_sdr_files(&sdr_dir, Some(&safe_asin), purge_ww);
 
         // 4. Sync Word Wise Sidecar (<Title>.sdr/LanguageLayer.en.{asin}.kll)
         if let Some(kll) = kll_bytes {
+            if !sdr_dir.exists() {
+                let _ = std::fs::create_dir_all(&sdr_dir);
+            }
             let kll_path = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
             Self::write_bytes(&kll_path, kll)?;
         }
@@ -211,6 +217,9 @@ impl KindleSync {
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
             std::fs::copy(src, dst)?;
+            if let Ok(f) = std::fs::File::open(dst) {
+                let _ = f.sync_all();
+            }
         }
         Ok(())
     }
@@ -248,6 +257,7 @@ impl KindleSync {
                 None => {
                     if start.elapsed() >= timeout {
                         let _ = child.kill();
+                        let _ = child.wait(); // Reap zombie process
                         return Err(SyncError::GioFailed(format!(
                             "gio copy timed out after {} seconds",
                             timeout.as_secs()
@@ -270,6 +280,9 @@ impl KindleSync {
             Self::copy_file(tmp.path(), dst)?;
         } else {
             std::fs::write(dst, data)?;
+            if let Ok(f) = std::fs::File::open(dst) {
+                let _ = f.sync_all();
+            }
         }
         Ok(())
     }

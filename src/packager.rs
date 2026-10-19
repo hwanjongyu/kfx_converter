@@ -192,7 +192,7 @@ impl<'a> KfxPackager<'a> {
             asin,
             book_id,
             entities: Vec::new(),
-            next_eid: 1,
+            next_eid: 852,
         }
     }
 
@@ -951,7 +951,10 @@ impl<'a> KfxPackager<'a> {
         let sym_jpg = symbol_id("jpg").unwrap_or(285);
         let sym_png = symbol_id("png").unwrap_or(284);
 
-        for (res_id, asset) in &self.book.resources {
+        let mut sorted_resources: Vec<_> = self.book.resources.iter().collect();
+        sorted_resources.sort_by_key(|(k, _)| *k);
+
+        for (res_id, asset) in sorted_resources {
             let res_sym_id = symbols.intern(res_id);
             let raw_path = format!("resource/{}", res_id);
             let raw_sym_id = symbols.intern(&raw_path);

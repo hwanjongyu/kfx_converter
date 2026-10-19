@@ -237,8 +237,8 @@ impl LemmaDictionary {
         });
 
         let mut clean = word.trim().trim_matches(&['\'', '’', '"', '“', '”', '`', ',', '.', ';', ':', '!', '?'][..]).to_lowercase();
-        if clean.ends_with("'s") || clean.ends_with("’s") {
-            clean.truncate(clean.len().saturating_sub(2));
+        if let Some(stripped) = clean.strip_suffix("'s").or_else(|| clean.strip_suffix("’s")) {
+            clean = stripped.to_string();
         }
 
         if clean.len() < min_word_len || stopwords.contains(clean.as_str()) {
@@ -317,5 +317,11 @@ mod tests {
         // 5. Doubled consonant
         let res3 = dict.lookup("compelled", 3);
         assert_eq!(res3, Some((4, 1286)));
+
+        // 6. Smart apostrophe (UTF-8 3-byte curly quote) - must not panic
+        let res4 = dict.lookup("ameliorate’s", 3);
+        assert_eq!(res4, Some((3, 35386)));
+        let res5 = dict.lookup("ameliorate's", 3);
+        assert_eq!(res5, Some((3, 35386)));
     }
 }

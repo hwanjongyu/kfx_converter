@@ -177,34 +177,35 @@ impl WordWiseBuilder {
         for section in &book.sections {
             for block in &section.blocks {
                 let text = block.plain_text();
-                let mut word_start = None;
+                let mut word_char_start = None;
+                let mut word_str = String::new();
+                let mut char_idx = 0usize;
 
-                for (idx, ch) in text.char_indices() {
+                for ch in text.chars() {
                     if ch.is_alphabetic() {
-                        if word_start.is_none() {
-                            word_start = Some(idx);
+                        if word_char_start.is_none() {
+                            word_char_start = Some(char_idx);
                         }
-                    } else if let Some(start_idx) = word_start {
-                        let word = &text[start_idx..idx];
-                        word_start = None;
-
-                        if let Some((difficulty, sense_id)) = dict.lookup(word, 3) {
+                        word_str.push(ch);
+                    } else if let Some(start_c) = word_char_start.take() {
+                        if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
                             self.add_gloss_paced(
-                                abs_pos + start_idx,
+                                abs_pos + start_c,
                                 None,
                                 difficulty,
                                 sense_id,
                                 false,
                             );
                         }
+                        word_str.clear();
                     }
+                    char_idx += 1;
                 }
 
-                if let Some(start_idx) = word_start {
-                    let word = &text[start_idx..];
-                    if let Some((difficulty, sense_id)) = dict.lookup(word, 3) {
+                if let Some(start_c) = word_char_start.take() {
+                    if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
                         self.add_gloss_paced(
-                            abs_pos + start_idx,
+                            abs_pos + start_c,
                             None,
                             difficulty,
                             sense_id,
@@ -213,7 +214,7 @@ impl WordWiseBuilder {
                     }
                 }
 
-                abs_pos += text.chars().count() + 1; // account for newline between blocks
+                abs_pos += char_idx + 1; // account for newline between blocks
             }
         }
 

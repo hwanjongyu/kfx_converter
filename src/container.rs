@@ -7,7 +7,7 @@ use std::path::Path;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use thiserror::Error;
 
-use crate::ion::{wrap_enty_header, IonValue, IonWriter};
+use crate::ion::{IonValue, IonWriter};
 use crate::symbols::symbol_id;
 
 pub const KFX_MAGIC: &[u8; 4] = b"CONT";
@@ -169,9 +169,12 @@ impl KfxContainer {
         let mut buf = vec![0u8; chunk.length as usize];
         self.reader.read_exact(&mut buf)?;
 
-        // If enveloped by ENTY header (21 bytes: ENTY + length + reserved + ion), unwrap it
-        if buf.len() >= 21 && &buf[0..4] == KFX_ENTITY_MAGIC {
-            return Ok(buf[21..].to_vec());
+        // If enveloped by ENTY header, unwrap it dynamically using header_length (bytes 6..10)
+        if buf.len() >= 10 && &buf[0..4] == KFX_ENTITY_MAGIC {
+            let header_len = (&buf[6..10]).read_u32::<LittleEndian>()? as usize;
+            if header_len <= buf.len() {
+                return Ok(buf[header_len..].to_vec());
+            }
         }
 
         Ok(buf)
@@ -196,7 +199,6 @@ impl KfxContainer {
         mut writer: W,
     ) -> Result<u64, ContainerError> {
         let mut entity_table_entries = Vec::with_capacity(entities.len() * 24);
-        let mut wrapped_payloads = Vec::new();
         let mut current_raw_offset: u64 = 0;
 
         for ent in entities {
@@ -210,8 +212,7 @@ impl KfxContainer {
                 );
             }
 
-            let wrapped = wrap_enty_header(&ent.data, 1);
-            let payload_len = wrapped.len() as u64;
+            let payload_len = ent.data.len() as u64 + crate::ion::ENTY_HEADER_LEN as u64;
 
             // Record: entity_id (u32), chunk_type (u32), raw_offset (u64), raw_len (u64)
             entity_table_entries.write_u32::<LittleEndian>(ent.entity_id)?;
@@ -220,7 +221,6 @@ impl KfxContainer {
             entity_table_entries.write_u64::<LittleEndian>(payload_len)?;
 
             current_raw_offset += payload_len;
-            wrapped_payloads.push(wrapped);
         }
 
         let index_tab_offset: u32 = 18;
@@ -300,9 +300,13 @@ impl KfxContainer {
         // Write ContainerInfo Ion
         writer.write_all(&ci_bytes)?;
 
-        // Write all wrapped entity payloads
-        for payload in &wrapped_payloads {
-            writer.write_all(payload)?;
+        // Write all wrapped entity payloads directly to writer (zero intermediate allocations)
+        for ent in entities {
+            writer.write_all(crate::ion::MAGIC_ENTY)?;
+            writer.write_u16::<LittleEndian>(1)?;
+            writer.write_u32::<LittleEndian>(crate::ion::ENTY_HEADER_LEN)?;
+            writer.write_all(&crate::ion::ENTY_HEADER_ION)?;
+            writer.write_all(&ent.data)?;
         }
 
         let total_size = writer.seek(SeekFrom::Current(0))?;

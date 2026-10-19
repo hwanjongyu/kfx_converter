@@ -110,14 +110,23 @@ impl EpubReader {
 
         let (metadata, manifest, spine) = Self::parse_opf(&opf_content)?;
 
-        // 4. Extract resources (images, fonts)
+        // 4. Extract resources (images, fonts) and build href -> item_id lookup map
         let mut resources = HashMap::new();
+        let mut href_to_id = HashMap::new();
         for item in manifest.values() {
+            let file_name = Path::new(&item.href)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| item.href.clone());
+            href_to_id.insert(item.href.clone(), item.id.clone());
+            href_to_id.insert(file_name, item.id.clone());
+
             if item.media_type.starts_with("image/") || item.media_type.starts_with("font/") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
-                    let mut data = Vec::with_capacity(entry.size() as usize);
-                    if entry.read_to_end(&mut data).is_ok() {
+                    let mut data = Vec::with_capacity(entry.size().min(MAX_EPUB_FILE_SIZE) as usize);
+                    let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
+                    if limited.read_to_end(&mut data).is_ok() {
                         resources.insert(
                             item.id.clone(),
                             ResourceAsset {
@@ -138,8 +147,9 @@ impl EpubReader {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut xhtml = String::new();
-                    if entry.read_to_string(&mut xhtml).is_ok() {
-                        let blocks = Self::parse_xhtml_blocks(&xhtml);
+                    let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
+                    if limited.read_to_string(&mut xhtml).is_ok() {
+                        let blocks = Self::parse_xhtml_blocks_with_manifest(&xhtml, &href_to_id);
                         sections.push(Section {
                             id: format!("section_{}", idx + 1),
                             title: format!("Chapter {}", idx + 1),
@@ -296,7 +306,11 @@ impl EpubReader {
         Ok((metadata, manifest, spine))
     }
 
-    fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
+    pub fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
+        Self::parse_xhtml_blocks_with_manifest(xhtml, &HashMap::new())
+    }
+
+    fn parse_xhtml_blocks_with_manifest(xhtml: &str, href_to_id: &HashMap<String, String>) -> Vec<Block> {
         let mut blocks = Vec::new();
         let mut xml_reader = XmlReader::from_str(xhtml);
         let mut buf = Vec::new();
@@ -469,10 +483,15 @@ impl EpubReader {
                                 }
                                 if !src.is_empty() {
                                     let img_id = format!("img_{}", blocks.len() + 1);
-                                    let res_id = Path::new(&src)
+                                    let file_name = Path::new(&src)
                                         .file_name()
                                         .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or(src);
+                                        .unwrap_or_else(|| src.clone());
+                                    let res_id = href_to_id
+                                        .get(&src)
+                                        .or_else(|| href_to_id.get(&file_name))
+                                        .cloned()
+                                        .unwrap_or(file_name);
                                     blocks.push(Block::Image {
                                         id: img_id,
                                         resource_id: res_id,

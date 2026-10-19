@@ -124,16 +124,28 @@ impl Block {
 
     /// Returns the total character count of text content in this block.
     pub fn char_count(&self) -> usize {
-        self.plain_text().chars().count()
+        match self {
+            Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+                spans.iter().map(|s| s.text.chars().count()).sum()
+            }
+            Block::Table { rows, .. } => {
+                rows.iter().flat_map(|r| r.iter()).map(|c| c.chars().count()).sum()
+            }
+            Block::List { items, .. } => {
+                items.iter().flat_map(|it| it.iter()).map(|b| b.char_count()).sum()
+            }
+            Block::Image { alt, .. } => {
+                alt.as_ref().map(|a| a.chars().count()).unwrap_or(0)
+            }
+            Block::HorizontalRule => 3,
+        }
     }
 }
 
 /// Chapter-First Hybrid Fragmentation Thresholds:
-/// Standard chapters (typically 10,000 - 25,000 chars) are preserved 1:1 intact as single section chunks.
-/// Only oversized chapters or massive appendices (e.g. 240KB Index/References) exceeding these bounds
-/// are cleanly sub-fragmented to protect Kindle's 240MB pmond memory ceiling.
-pub const DEFAULT_MAX_SECTION_CHARS: usize = 7_500;
-pub const DEFAULT_MAX_SECTION_BLOCKS: usize = 25;
+/// Lowered to 3,500 chars / 15 blocks to protect 512MB Kindle OS devices from pmond memory kills and JSQueue thread freezes.
+pub const DEFAULT_MAX_SECTION_CHARS: usize = 3_500;
+pub const DEFAULT_MAX_SECTION_BLOCKS: usize = 15;
 
 impl BookIR {
     /// Fragments sections exceeding character or block limits into smaller sequential sections.
