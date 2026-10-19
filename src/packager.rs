@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::container::{ContainerError, KfxContainer, KfxEntity};
 use crate::ion::{IonValue, IonWriter};
-use crate::ir::{Block, BookIR, Section, DEFAULT_MAX_SECTION_BLOCKS, DEFAULT_MAX_SECTION_CHARS};
+use crate::ir::{Block, BookIR, Section, TextSpan, DEFAULT_MAX_SECTION_BLOCKS, DEFAULT_MAX_SECTION_CHARS};
 use crate::symbols::{
     symbol_id, SYM_AUXILIARY_DATA, SYM_BOOK_METADATA, SYM_CONTAINER_ENTITY_MAP,
     SYM_CONTENT, SYM_CONTENT_FEATURES, SYM_DOCUMENT_DATA, SYM_FORMAT_CAPABILITIES,
@@ -89,10 +89,18 @@ pub struct StyleSymMap {
     pub h2: u32,
     pub h3: u32,
     pub p: u32,
+    pub p_first: u32,
+    pub align_center: u32,
+    pub align_right: u32,
+    pub align_justify: u32,
     pub blockquote: u32,
     pub bold: u32,
     pub italic: u32,
     pub underline: u32,
+    pub strikethrough: u32,
+    pub superscript: u32,
+    pub subscript: u32,
+    pub code: u32,
 }
 
 /// Generates deterministic Amazon Content Repository container ID.
@@ -509,10 +517,14 @@ impl<'a> KfxPackager<'a> {
     fn build_styles(&mut self, symbols: &mut LocalSymbols) -> StyleSymMap {
         let sym_style = symbol_id("style").unwrap_or(157);
         let sym_name = symbol_id("name").unwrap_or(4);
+        let sym_font_family = symbol_id("font_family").unwrap_or(11);
         let sym_font_size = symbol_id("font_size").unwrap_or(16);
         let sym_font_weight = symbol_id("font_weight").unwrap_or(13);
         let sym_font_style = symbol_id("font_style").unwrap_or(12);
         let sym_underline = symbol_id("underline").unwrap_or(23);
+        let sym_strikethrough = symbol_id("strikethrough").unwrap_or(27);
+        let sym_baseline_shift = symbol_id("baseline_shift").unwrap_or(31);
+        let sym_text_alignment = symbol_id("text_alignment").unwrap_or(34);
         let sym_margin_top = symbol_id("margin_top").unwrap_or(47);
         let sym_margin_bottom = symbol_id("margin_bottom").unwrap_or(49);
         let sym_margin_left = symbol_id("margin_left").unwrap_or(48);
@@ -524,15 +536,26 @@ impl<'a> KfxPackager<'a> {
         let sym_em = symbol_id("em").unwrap_or(308);
         let sym_bold = symbol_id("bold").unwrap_or(361);
         let sym_italic = symbol_id("italic").unwrap_or(382);
+        let sym_center = symbol_id("center").unwrap_or(320);
+        let sym_right = symbol_id("right").unwrap_or(61);
+        let sym_justify = symbol_id("justify").unwrap_or(321);
 
         let h1_sym = symbols.intern("style_h1");
         let h2_sym = symbols.intern("style_h2");
         let h3_sym = symbols.intern("style_h3");
         let p_sym = symbols.intern("style_p");
+        let p_first_sym = symbols.intern("style_p_first");
+        let align_center_sym = symbols.intern("style_align_center");
+        let align_right_sym = symbols.intern("style_align_right");
+        let align_justify_sym = symbols.intern("style_align_justify");
         let bq_sym = symbols.intern("style_blockquote");
         let bold_sym = symbols.intern("style_bold");
         let italic_sym = symbols.intern("style_italic");
         let underline_sym = symbols.intern("style_underline");
+        let strike_sym = symbols.intern("style_strikethrough");
+        let sup_sym = symbols.intern("style_superscript");
+        let sub_sym = symbols.intern("style_subscript");
+        let code_sym = symbols.intern("style_code");
 
         let make_em = |val: &str| {
             IonValue::Struct(vec![
@@ -579,7 +602,42 @@ impl<'a> KfxPackager<'a> {
             (sym_text_indent, make_em("1.0")),
         ]);
 
-        // 5. blockquote style
+        // 5. p_first style (first paragraph in chapter, suppressed indent)
+        let p_first_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(p_first_sym)),
+            (sym_line_height, make_em("1.4")),
+            (sym_margin_bottom, make_em("0.4")),
+            (sym_text_indent, make_em("0.0")),
+        ]);
+
+        // 6. align_center style
+        let align_center_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(align_center_sym)),
+            (sym_text_alignment, IonValue::Symbol(sym_center)),
+            (sym_line_height, make_em("1.4")),
+            (sym_margin_bottom, make_em("0.4")),
+            (sym_text_indent, make_em("0.0")),
+        ]);
+
+        // 7. align_right style
+        let align_right_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(align_right_sym)),
+            (sym_text_alignment, IonValue::Symbol(sym_right)),
+            (sym_line_height, make_em("1.4")),
+            (sym_margin_bottom, make_em("0.4")),
+            (sym_text_indent, make_em("0.0")),
+        ]);
+
+        // 8. align_justify style
+        let align_justify_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(align_justify_sym)),
+            (sym_text_alignment, IonValue::Symbol(sym_justify)),
+            (sym_line_height, make_em("1.4")),
+            (sym_margin_bottom, make_em("0.4")),
+            (sym_text_indent, make_em("1.0")),
+        ]);
+
+        // 9. blockquote style
         let bq_val = IonValue::Struct(vec![
             (sym_name, IonValue::Symbol(bq_sym)),
             (sym_margin_left, make_em("1.5")),
@@ -589,22 +647,49 @@ impl<'a> KfxPackager<'a> {
             (sym_font_style, IonValue::Symbol(sym_italic)),
         ]);
 
-        // 6. inline bold style
+        // 10. inline bold style
         let bold_val = IonValue::Struct(vec![
             (sym_name, IonValue::Symbol(bold_sym)),
             (sym_font_weight, IonValue::Symbol(sym_bold)),
         ]);
 
-        // 7. inline italic style
+        // 11. inline italic style
         let italic_val = IonValue::Struct(vec![
             (sym_name, IonValue::Symbol(italic_sym)),
             (sym_font_style, IonValue::Symbol(sym_italic)),
         ]);
 
-        // 8. inline underline style
+        // 12. inline underline style
         let underline_val = IonValue::Struct(vec![
             (sym_name, IonValue::Symbol(underline_sym)),
             (sym_underline, IonValue::Bool(true)),
+        ]);
+
+        // 13. inline strikethrough style
+        let strike_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(strike_sym)),
+            (sym_strikethrough, IonValue::Bool(true)),
+        ]);
+
+        // 14. inline superscript style
+        let sup_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(sup_sym)),
+            (sym_font_size, make_em("0.75")),
+            (sym_baseline_shift, make_em("0.35")),
+        ]);
+
+        // 15. inline subscript style
+        let sub_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(sub_sym)),
+            (sym_font_size, make_em("0.75")),
+            (sym_baseline_shift, make_em("-0.20")),
+        ]);
+
+        // 16. inline monospace code style
+        let code_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(code_sym)),
+            (sym_font_family, IonValue::String("monospace".to_string())),
+            (sym_font_size, make_em("0.9")),
         ]);
 
         let style_list = [
@@ -612,10 +697,18 @@ impl<'a> KfxPackager<'a> {
             (h2_sym, h2_val),
             (h3_sym, h3_val),
             (p_sym, p_val),
+            (p_first_sym, p_first_val),
+            (align_center_sym, align_center_val),
+            (align_right_sym, align_right_val),
+            (align_justify_sym, align_justify_val),
             (bq_sym, bq_val),
             (bold_sym, bold_val),
             (italic_sym, italic_val),
             (underline_sym, underline_val),
+            (strike_sym, strike_val),
+            (sup_sym, sup_val),
+            (sub_sym, sub_val),
+            (code_sym, code_val),
         ];
 
         for (sym_id_val, val) in style_list {
@@ -634,10 +727,18 @@ impl<'a> KfxPackager<'a> {
             h2: h2_sym,
             h3: h3_sym,
             p: p_sym,
+            p_first: p_first_sym,
+            align_center: align_center_sym,
+            align_right: align_right_sym,
+            align_justify: align_justify_sym,
             blockquote: bq_sym,
             bold: bold_sym,
             italic: italic_sym,
             underline: underline_sym,
+            strikethrough: strike_sym,
+            superscript: sup_sym,
+            subscript: sub_sym,
+            code: code_sym,
         }
     }
 
@@ -700,6 +801,70 @@ impl<'a> KfxPackager<'a> {
             let mut para_strings = Vec::new();
             let mut story_elements = Vec::new();
 
+            let extract_style_events = |spans: &[TextSpan]| -> (String, Vec<IonValue>) {
+                let mut full_text = String::new();
+                let mut style_events = Vec::new();
+                let mut offset = 0;
+
+                for span in spans {
+                    let span_len = span.text.chars().count();
+                    if let Some(st) = &span.style {
+                        if st.contains("bold") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.bold)),
+                            ]));
+                        }
+                        if st.contains("italic") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.italic)),
+                            ]));
+                        }
+                        if st.contains("underline") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.underline)),
+                            ]));
+                        }
+                        if st.contains("strike") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.strikethrough)),
+                            ]));
+                        }
+                        if st.contains("sup") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.superscript)),
+                            ]));
+                        }
+                        if st.contains("sub") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.subscript)),
+                            ]));
+                        }
+                        if st.contains("code") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.code)),
+                            ]));
+                        }
+                    }
+                    full_text.push_str(&span.text);
+                    offset += span_len;
+                }
+                (full_text, style_events)
+            };
+
             for block in &sec.blocks {
                 let block_eid = self.alloc_eid();
 
@@ -710,24 +875,7 @@ impl<'a> KfxPackager<'a> {
                             2 => styles.h2,
                             _ => styles.h3,
                         };
-                        let mut full_text = String::new();
-                        let mut style_events = Vec::new();
-                        let mut offset = 0;
-
-                        for span in spans {
-                            let span_len = span.text.chars().count();
-                            if let Some(st) = &span.style {
-                                if st.contains("italic") {
-                                    style_events.push(IonValue::Struct(vec![
-                                        (sym_offset, IonValue::Int(offset as i64)),
-                                        (sym_length, IonValue::Int(span_len as i64)),
-                                        (sym_style, IonValue::Symbol(styles.italic)),
-                                    ]));
-                                }
-                            }
-                            full_text.push_str(&span.text);
-                            offset += span_len;
-                        }
+                        let (full_text, style_events) = extract_style_events(spans);
 
                         let content_idx = para_strings.len();
                         block_info.push((block_eid, full_text.chars().count().max(1)));
@@ -751,40 +899,24 @@ impl<'a> KfxPackager<'a> {
                         story_elements.push(IonValue::Struct(elem_fields));
                     }
                     Block::Paragraph { spans, style, .. } => {
-                        let is_bq = style.as_deref() == Some("blockquote");
-                        let base_style = if is_bq { styles.blockquote } else { styles.p };
-                        let mut full_text = String::new();
-                        let mut style_events = Vec::new();
-                        let mut offset = 0;
-
-                        for span in spans {
-                            let span_len = span.text.chars().count();
-                            if let Some(st) = &span.style {
-                                if st.contains("bold") {
-                                    style_events.push(IonValue::Struct(vec![
-                                        (sym_offset, IonValue::Int(offset as i64)),
-                                        (sym_length, IonValue::Int(span_len as i64)),
-                                        (sym_style, IonValue::Symbol(styles.bold)),
-                                    ]));
-                                }
-                                if st.contains("italic") {
-                                    style_events.push(IonValue::Struct(vec![
-                                        (sym_offset, IonValue::Int(offset as i64)),
-                                        (sym_length, IonValue::Int(span_len as i64)),
-                                        (sym_style, IonValue::Symbol(styles.italic)),
-                                    ]));
-                                }
-                                if st.contains("underline") {
-                                    style_events.push(IonValue::Struct(vec![
-                                        (sym_offset, IonValue::Int(offset as i64)),
-                                        (sym_length, IonValue::Int(span_len as i64)),
-                                        (sym_style, IonValue::Symbol(styles.underline)),
-                                    ]));
-                                }
+                        let base_style = if let Some(st) = style.as_deref() {
+                            if st.contains("align_center") {
+                                styles.align_center
+                            } else if st.contains("align_right") {
+                                styles.align_right
+                            } else if st.contains("align_justify") {
+                                styles.align_justify
+                            } else if st.contains("blockquote") {
+                                styles.blockquote
+                            } else if st.contains("p_first") {
+                                styles.p_first
+                            } else {
+                                styles.p
                             }
-                            full_text.push_str(&span.text);
-                            offset += span_len;
-                        }
+                        } else {
+                            styles.p
+                        };
+                        let (full_text, style_events) = extract_style_events(spans);
 
                         let content_idx = para_strings.len();
                         block_info.push((block_eid, full_text.chars().count().max(1)));
@@ -1833,8 +1965,92 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
-        // We register 8 default typography styles: h1, h2, h3, p, blockquote, bold, italic, underline
-        assert_eq!(style_entities.len(), 8, "Expected 8 style ($157) entities in KFX container");
+        // We register 16 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code
+        assert_eq!(style_entities.len(), 16, "Expected 16 style ($157) entities in KFX container");
+    }
+
+    #[test]
+    fn test_packager_emits_comprehensive_formatting_styles() {
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "sec_formatting".to_string(),
+            title: "Formatting Chapter".to_string(),
+            blocks: vec![
+                Block::Heading {
+                    id: "h_1".to_string(),
+                    level: 1,
+                    spans: vec![TextSpan {
+                        text: "Heading with Code".to_string(),
+                        style: Some("code".to_string()),
+                        anchor_id: None,
+                        href: None,
+                    }],
+                },
+                Block::Paragraph {
+                    id: "p_1".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "Chapter opening unindented text with ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "deleted words".to_string(),
+                            style: Some("strike".to_string()),
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: ", E=mc".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "2".to_string(),
+                            style: Some("sup".to_string()),
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: ", H".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "2".to_string(),
+                            style: Some("sub".to_string()),
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "O, and ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "println!()".to_string(),
+                            style: Some("code".to_string()),
+                            anchor_id: None,
+                            href: None,
+                        },
+                    ],
+                    style: Some("p_first align_center".to_string()),
+                },
+            ],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging with comprehensive formatting failed");
+        assert!(size > 0);
+
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
+        assert_eq!(style_count, 16);
     }
 
     #[test]

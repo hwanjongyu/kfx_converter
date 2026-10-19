@@ -596,6 +596,9 @@ impl EpubReader {
         let mut bold = false;
         let mut italic = false;
         let mut underline = false;
+        let mut strike = false;
+        let mut sup = false;
+        let mut sub = false;
         let mut code = false;
         let mut current_href: Option<String> = None;
         let mut current_anchor: Option<String> = None;
@@ -610,6 +613,7 @@ impl EpubReader {
         let mut in_heading = false;
         let mut heading_level = 1u8;
         let mut ignore_depth = 0usize;
+        let mut first_paragraph_seen = false;
 
         // Table state
         let mut table_rows: Vec<Vec<String>> = Vec::new();
@@ -628,6 +632,9 @@ impl EpubReader {
                                   i: bool,
                                   u: bool,
                                   c: bool,
+                                  stk: bool,
+                                  sp: bool,
+                                  sb: bool,
                                   href: &Option<String>,
                                   anchor: &Option<String>,
                                   cs: &Option<String>| {
@@ -637,6 +644,9 @@ impl EpubReader {
                 if i { style_parts.push("italic"); }
                 if u { style_parts.push("underline"); }
                 if c { style_parts.push("code"); }
+                if stk { style_parts.push("strike"); }
+                if sp { style_parts.push("sup"); }
+                if sb { style_parts.push("sub"); }
                 if let Some(s) = cs { style_parts.push(s.as_str()); }
                 let style = if style_parts.is_empty() { None } else { Some(style_parts.join(" ")) };
 
@@ -716,7 +726,7 @@ impl EpubReader {
                         match local_bytes {
                             b"div" | b"section" | b"article" | b"main" | b"aside" => {
                                 if in_p {
-                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
@@ -734,7 +744,7 @@ impl EpubReader {
                             }
                             b"p" | b"blockquote" => {
                                 if in_p {
-                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
@@ -749,17 +759,45 @@ impl EpubReader {
                                     }
                                 }
                                 in_p = true;
-                                p_style = if local_bytes == b"blockquote" {
-                                    Some("blockquote".to_string())
-                                } else {
-                                    None
-                                };
+                                let mut p_tokens = Vec::new();
+                                if local_bytes == b"blockquote" {
+                                    p_tokens.push("blockquote".to_string());
+                                } else if !first_paragraph_seen {
+                                    first_paragraph_seen = true;
+                                    p_tokens.push("p_first".to_string());
+                                }
+                                for attr in e.attributes().flatten() {
+                                    let key = attr.key.as_ref();
+                                    if key == b"style" {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        p_tokens.extend(Self::sanitize_css_style(&val));
+                                    } else if key == b"align" {
+                                        let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                        if val == "center" {
+                                            p_tokens.push("align_center".to_string());
+                                        } else if val == "right" {
+                                            p_tokens.push("align_right".to_string());
+                                        } else if val == "justify" {
+                                            p_tokens.push("align_justify".to_string());
+                                        }
+                                    }
+                                }
+                                p_style = if p_tokens.is_empty() { None } else { Some(p_tokens.join(" ")) };
+                                current_span_text.clear();
+                                current_spans.clear();
+                            }
+                            b"center" => {
+                                if in_p {
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                }
+                                in_p = true;
+                                p_style = Some("align_center".to_string());
                                 current_span_text.clear();
                                 current_spans.clear();
                             }
                             b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
                                 if in_p {
-                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
@@ -780,23 +818,35 @@ impl EpubReader {
                                 current_spans.clear();
                             }
                             b"b" | b"strong" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 bold = true;
                             }
                             b"i" | b"em" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 italic = true;
                             }
                             b"u" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 underline = true;
                             }
-                            b"code" | b"pre" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                            b"del" | b"s" | b"strike" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                strike = true;
+                            }
+                            b"sup" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                sup = true;
+                            }
+                            b"sub" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                sub = true;
+                            }
+                            b"code" | b"tt" | b"kbd" | b"samp" | b"pre" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 code = true;
                             }
                             b"a" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 for attr in e.attributes().flatten() {
                                     if attr.key.as_ref() == b"href" {
                                         current_href = Some(String::from_utf8_lossy(&attr.value).to_string());
@@ -806,12 +856,17 @@ impl EpubReader {
                                 }
                             }
                             b"span" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                let mut span_tokens = Vec::new();
                                 for attr in e.attributes().flatten() {
-                                    if attr.key.as_ref() == b"class" || attr.key.as_ref() == b"style" {
-                                        current_style = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                    if attr.key.as_ref() == b"style" {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        span_tokens.extend(Self::sanitize_css_style(&val));
+                                    } else if attr.key.as_ref() == b"class" {
+                                        span_tokens.push(String::from_utf8_lossy(&attr.value).to_string());
                                     }
                                 }
+                                current_style = if span_tokens.is_empty() { None } else { Some(span_tokens.join(" ")) };
                             }
                             b"table" => {
                                 table_rows.clear();
@@ -838,7 +893,7 @@ impl EpubReader {
                             b"img" | b"image" => {
                                 if let Some(img_block) = parse_image_block(e, blocks.len()) {
                                     if in_p || in_heading || in_li {
-                                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                         if !current_spans.is_empty() {
                                             let p_id = format!("p_{}", blocks.len() + 1);
                                             let p_block = Block::Paragraph {
@@ -878,7 +933,7 @@ impl EpubReader {
                             b"img" | b"image" => {
                                 if let Some(img_block) = parse_image_block(e, blocks.len()) {
                                     if in_p || in_heading || in_li {
-                                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                         if !current_spans.is_empty() {
                                             let p_id = format!("p_{}", blocks.len() + 1);
                                             let p_block = Block::Paragraph {
@@ -927,9 +982,9 @@ impl EpubReader {
                         ignore_depth -= 1;
                     } else if ignore_depth == 0 {
                         match local_bytes {
-                            b"p" | b"blockquote" | b"div" | b"section" | b"article" | b"main" | b"aside" => {
+                            b"p" | b"blockquote" | b"center" | b"div" | b"section" | b"article" | b"main" | b"aside" => {
                                 if in_p {
-                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
@@ -947,7 +1002,7 @@ impl EpubReader {
                             }
                             b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
                                 if in_heading {
-                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
                                         let h_block = Block::Heading {
                                             id: format!("h_{}", blocks.len() + 1),
@@ -964,28 +1019,40 @@ impl EpubReader {
                                 }
                             }
                             b"b" | b"strong" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 bold = false;
                             }
                             b"i" | b"em" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 italic = false;
                             }
                             b"u" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 underline = false;
                             }
-                            b"code" | b"pre" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                            b"del" | b"s" | b"strike" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                strike = false;
+                            }
+                            b"sup" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                sup = false;
+                            }
+                            b"sub" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                sub = false;
+                            }
+                            b"code" | b"tt" | b"kbd" | b"samp" | b"pre" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 code = false;
                             }
                             b"a" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 current_href = None;
                                 current_anchor = None;
                             }
                             b"span" => {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 current_style = None;
                             }
                             b"th" | b"td" => {
@@ -1008,7 +1075,7 @@ impl EpubReader {
                             }
                             b"li" => {
                                 in_li = false;
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 if !current_spans.is_empty() {
                                     current_list_item_blocks.push(Block::Paragraph {
                                         id: format!("li_{}", blocks.len() + 1),
@@ -1037,7 +1104,7 @@ impl EpubReader {
                 }
                 Ok(Event::Eof) => {
                     if in_p {
-                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                         if !current_spans.is_empty() {
                             let p_block = Block::Paragraph {
                                 id: format!("p_{}", blocks.len() + 1),
@@ -1051,7 +1118,7 @@ impl EpubReader {
                             }
                         }
                     } else if in_heading {
-                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                         if !current_spans.is_empty() {
                             let h_block = Block::Heading {
                                 id: format!("h_{}", blocks.len() + 1),
@@ -1110,6 +1177,72 @@ impl EpubReader {
             i += 1;
         }
         String::from_utf8_lossy(&result).to_string()
+    }
+
+    /// Parses and sanitizes CSS style strings:
+    /// - Extracts text-align: left, center, right, justify
+    /// - Extracts text-decoration: line-through, underline
+    /// - Strips hardcoded pure black colors (#000000, #000, black, rgb(0,0,0)) for dark mode safety
+    /// - Returns a list of standardized style tokens (e.g. ["align_center", "strike"])
+    pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        for declaration in style_str.split(';') {
+            let decl = declaration.trim();
+            if decl.is_empty() {
+                continue;
+            }
+            if let Some((prop, val)) = decl.split_once(':') {
+                let p = prop.trim().to_lowercase();
+                let v = val.trim().to_lowercase();
+
+                match p.as_str() {
+                    "text-align" => {
+                        if v.contains("center") {
+                            tokens.push("align_center".to_string());
+                        } else if v.contains("right") {
+                            tokens.push("align_right".to_string());
+                        } else if v.contains("justify") {
+                            tokens.push("align_justify".to_string());
+                        } else if v.contains("left") {
+                            tokens.push("align_left".to_string());
+                        }
+                    }
+                    "text-decoration" | "text-decoration-line" => {
+                        if v.contains("line-through") {
+                            tokens.push("strike".to_string());
+                        }
+                        if v.contains("underline") {
+                            tokens.push("underline".to_string());
+                        }
+                    }
+                    "vertical-align" => {
+                        if v.contains("super") {
+                            tokens.push("sup".to_string());
+                        } else if v.contains("sub") {
+                            tokens.push("sub".to_string());
+                        }
+                    }
+                    "color" => {
+                        // Dark mode safety: filter out pure black color values
+                        let is_pure_black = v == "#000000"
+                            || v == "#000"
+                            || v == "black"
+                            || v.replace(' ', "") == "rgb(0,0,0)"
+                            || v.replace(' ', "") == "rgba(0,0,0,1)";
+                        if !is_pure_black {
+                            tokens.push(format!("color_{}", v.replace(['#', ' ', '(', ')', ','], "_")));
+                        }
+                    }
+                    "page-break-before" | "break-before" => {
+                        if v.contains("page") || v.contains("always") {
+                            tokens.push("page_break_before".to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        tokens
     }
 }
 
@@ -1327,6 +1460,71 @@ mod tests {
         assert_eq!(img_blocks[0], ("res_fig1", Some("Figure 1")));
         assert_eq!(img_blocks[1], ("res_fig2", Some("Figure 2")));
         assert_eq!(img_blocks[2], ("res_cover", None));
+    }
+
+    #[test]
+    fn test_sanitize_css_style_dark_mode_and_alignment() {
+        // Pure black colors must be stripped for Kindle dark mode safety
+        let black_style = "color: #000000; text-align: center; text-decoration: line-through;";
+        let tokens = EpubReader::sanitize_css_style(black_style);
+        assert!(!tokens.iter().any(|t| t.starts_with("color_")), "Pure black color #000000 should be stripped");
+        assert!(tokens.contains(&"align_center".to_string()));
+        assert!(tokens.contains(&"strike".to_string()));
+
+        let black_name_style = "color: black; text-align: justify;";
+        let tokens2 = EpubReader::sanitize_css_style(black_name_style);
+        assert!(!tokens2.iter().any(|t| t.starts_with("color_")), "Pure black color 'black' should be stripped");
+        assert!(tokens2.contains(&"align_justify".to_string()));
+
+        // Non-black accent colors must be preserved
+        let blue_style = "color: #003366; vertical-align: super;";
+        let tokens3 = EpubReader::sanitize_css_style(blue_style);
+        assert!(tokens3.iter().any(|t| t.starts_with("color_")), "Accent color should be preserved");
+        assert!(tokens3.contains(&"sup".to_string()));
+    }
+
+    #[test]
+    fn test_parse_xhtml_sup_sub_strike_code_formatting() {
+        let manifest = HashMap::new();
+        let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+    <p>Chapter opening with <del>removed text</del>, E=mc<sup>2</sup>, and H<sub>2</sub>O.</p>
+    <center>Centered text</center>
+    <p>Code inline <code>cargo check</code> and preformatted <pre>let x = 1;</pre></p>
+</body>
+</html>"#;
+        let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
+        assert_eq!(blocks.len(), 3);
+
+        // First paragraph should have p_first style token and sup/sub/strike spans
+        if let Block::Paragraph { spans, style, .. } = &blocks[0] {
+            assert!(style.as_ref().unwrap().contains("p_first"));
+            let has_strike = spans.iter().any(|s| s.style.as_deref() == Some("strike"));
+            let has_sup = spans.iter().any(|s| s.style.as_deref() == Some("sup"));
+            let has_sub = spans.iter().any(|s| s.style.as_deref() == Some("sub"));
+            assert!(has_strike, "Expected strike span");
+            assert!(has_sup, "Expected sup span");
+            assert!(has_sub, "Expected sub span");
+        } else {
+            panic!("Expected paragraph for block 0");
+        }
+
+        // Second block from <center> should have align_center style
+        if let Block::Paragraph { spans, style, .. } = &blocks[1] {
+            assert!(style.as_ref().unwrap().contains("align_center"));
+            assert_eq!(spans[0].text, "Centered text");
+        } else {
+            panic!("Expected paragraph for block 1");
+        }
+
+        // Third block should contain code spans
+        if let Block::Paragraph { spans, .. } = &blocks[2] {
+            let has_code = spans.iter().any(|s| s.style.as_deref() == Some("code"));
+            assert!(has_code, "Expected code span");
+        } else {
+            panic!("Expected paragraph for block 2");
+        }
     }
 }
 

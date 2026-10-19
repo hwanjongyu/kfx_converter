@@ -171,3 +171,51 @@ Descriptive metadata registered in `bcIndexTab` under chunk type `$164`:
 ### 6.3 Raw Media Payload Entity (`$417`)
 The raw binary image byte stream (JPEG/PNG) stored in `bcIndexTab` under chunk type `$417` (`bcRawMedia`) with entity ID matching `symbols.intern("resource/img_chapter1")`.
 
+---
+
+## 7. Style Entities (`$157`) & Typography Preservation
+
+In Yellowjacket, styles are structured Amazon Ion entities registered under chunk type `$157` (`style`) in `bcIndexTab`. Storyline text elements reference styles via `$157` on block containers or via `$142` (`style_events`) on character ranges.
+
+### 7.1 Relative Units (`em`) Requirement
+All typography dimensions and spacing properties (`$16 font_size`, `$42 line_height`, `$36 text_indent`, `$31 baseline_shift`, `$47 margin_top`, `$48 margin_left`, `$49 margin_bottom`, `$50 margin_right`) **must** be expressed in relative `$308 em` units:
+```ion
+{
+    $307: "1.4",  // value (decimal string)
+    $306: $308    // unit = em ($308)
+}
+```
+Using absolute values (`px`, `pt`) breaks font scaling when the reader adjusts font size in the Kindle UI.
+
+### 7.2 Dark Mode Text Color Protection
+To avoid black-on-black illegibility when the user activates Kindle Dark Mode:
+- Pure black CSS color declarations (`#000000`, `black`, `rgb(0,0,0)`) are sanitized and stripped out during EPUB ingestion.
+- This allows Kindle's system color inverter to automatically convert text to white while preserving dark mode backgrounds.
+- Intentional colored accents (e.g., `#003366`, `#A00000`) are preserved.
+
+### 7.3 Paragraph Indent Suppression (`p_first`)
+Publishing industry typographic convention requires that the opening paragraph of a chapter or section following a header has no first-line indent:
+- Opening paragraphs are assigned `style_p_first` (`$36 text_indent`: `0.0em`).
+- Subsequent body paragraphs use standard `style_p` (`$36 text_indent`: `1.0em`).
+
+### 7.4 Standard Style Entity Catalog
+
+| Entity Symbol Name | Chunk Type | Yellowjacket Property Mappings | Description |
+| :--- | :--- | :--- | :--- |
+| `style_h1` | `$157` | `$16`: 1.6em, `$13`: `$361` (bold), `$42`: 1.3em, `$47`: 1.2em, `$49`: 0.6em | Level 1 Header |
+| `style_h2` | `$157` | `$16`: 1.35em, `$13`: `$361` (bold), `$42`: 1.3em, `$47`: 1.0em, `$49`: 0.5em | Level 2 Header |
+| `style_h3` | `$157` | `$16`: 1.2em, `$13`: `$361` (bold), `$42`: 1.3em, `$47`: 0.8em, `$49`: 0.4em | Level 3 Header |
+| `style_p` | `$157` | `$42`: 1.4em, `$49`: 0.4em, `$36`: 1.0em | Standard body paragraph |
+| `style_p_first` | `$157` | `$42`: 1.4em, `$49`: 0.4em, `$36`: 0.0em | First paragraph (unindented) |
+| `style_align_center` | `$157` | `$34`: `$320` (center), `$42`: 1.4em, `$49`: 0.4em, `$36`: 0.0em | Center alignment |
+| `style_align_right` | `$157` | `$34`: `$61` (right), `$42`: 1.4em, `$49`: 0.4em, `$36`: 0.0em | Right alignment |
+| `style_align_justify` | `$157` | `$34`: `$321` (justify), `$42`: 1.4em, `$49`: 0.4em, `$36`: 1.0em | Justified body text |
+| `style_blockquote` | `$157` | `$48`: 1.5em, `$50`: 1.5em, `$47`: 0.8em, `$49`: 0.8em, `$12`: `$382` (italic) | Blockquote block |
+| `style_bold` | `$157` | `$13`: `$361` (bold) | Inline bold span |
+| `style_italic` | `$157` | `$12`: `$382` (italic) | Inline italic span |
+| `style_underline` | `$157` | `$23`: `true` | Inline underline span |
+| `style_strikethrough` | `$157` | `$27`: `true` | Inline strikethrough span |
+| `style_superscript` | `$157` | `$16`: 0.75em, `$31`: 0.35em | Inline superscript span |
+| `style_subscript` | `$157` | `$16`: 0.75em, `$31`: -0.20em | Inline subscript span |
+| `style_code` | `$157` | `$11`: `"monospace"`, `$16`: 0.9em | Inline code / preformatted text |
+

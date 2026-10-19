@@ -205,3 +205,46 @@ flowchart LR
    - Support SVG image tags (`<image xlink:href="..." />` and `<image href="..." />`).
    - Decode percent-encoded URLs (e.g. `%20` -> space) and recursively strip relative prefixes (`../`, `./`) so chapter references cleanly match OPF manifest identifiers.
 
+---
+
+## 8. Typography & Formatting Preservation Architecture
+
+Yellowjacket replaces arbitrary CSS cascades with fixed `$157 style` entities registered in `bcIndexTab` and referenced by storylines and inline `style_events`.
+
+### 8.1 Relative Units Invariant (`em`)
+> [!CRITICAL]
+> All dimension and spacing attributes (`font_size`, `line_height`, `margin_*`, `text_indent`, `baseline_shift`) **MUST** use relative units (`$308 em`) instead of absolute points (`pt`) or pixels (`px`).
+> Absolute units lock font geometry and completely break the user-facing Kindle font size zoom slider (`Aa` menu) and layout re-flow.
+
+### 8.2 Dark Mode Color Neutralization
+Kindle e-ink devices support a system-wide Dark Mode (Inverted Display / White-on-Black):
+- When an EPUB stylesheet contains explicit `color: #000000`, `color: black`, or `color: rgb(0,0,0)`, hardcoded black colors cause the Kindle renderer to draw black text directly on a dark background, resulting in completely unreadable black-on-black text.
+- `kfx-converter` strips hardcoded pure black colors during XHTML ingestion, allowing Kindle's dynamic palette engine to invert text color automatically.
+- Non-black accent colors (e.g. `#003366`, `#8b0000`) are safely preserved.
+
+### 8.3 Chapter Opening Paragraph Indent Invariant (`p_first`)
+Standard publishing typography dictates that the opening paragraph of a chapter or following a section break should not have a first-line indent:
+- `kfx-converter` assigns `style_p_first` (`text_indent: 0.0em`) to the first paragraph of each section.
+- Subsequent body paragraphs use `style_p` (`text_indent: 1.0em`).
+
+### 8.4 Yellowjacket Style Entity Specification
+
+| Style Name | Target | Key Yellowjacket Symbols | Value / Relative Unit |
+| :--- | :--- | :--- | :--- |
+| **`style_h1`** | `<h1>` | `$16` (font_size), `$13` (font_weight), `$42` (line_height), `$47` (margin_top), `$49` (margin_bottom) | `1.6em`, `$361` (bold), `1.3em`, `1.2em`, `0.6em` |
+| **`style_h2`** | `<h2>` | `$16`, `$13`, `$42`, `$47`, `$49` | `1.35em`, `$361` (bold), `1.3em`, `1.0em`, `0.5em` |
+| **`style_h3`** | `<h3>` | `$16`, `$13`, `$42`, `$47`, `$49` | `1.2em`, `$361` (bold), `1.3em`, `0.8em`, `0.4em` |
+| **`style_p`** | `<p>` | `$42` (line_height), `$49` (margin_bottom), `$36` (text_indent) | `1.4em`, `0.4em`, `1.0em` |
+| **`style_p_first`**| Opening `<p>` | `$42`, `$49`, `$36` | `1.4em`, `0.4em`, `0.0em` |
+| **`style_align_center`**| `<center>`, `text-align: center` | `$34` (text_alignment), `$42`, `$49`, `$36` | `$320` (center), `1.4em`, `0.4em`, `0.0em` |
+| **`style_align_right`** | `text-align: right` | `$34` (text_alignment), `$42`, `$49`, `$36` | `$61` (right), `1.4em`, `0.4em`, `0.0em` |
+| **`style_align_justify`**| `text-align: justify` | `$34` (text_alignment), `$42`, `$49`, `$36` | `$321` (justify), `1.4em`, `0.4em`, `1.0em` |
+| **`style_blockquote`** | `<blockquote>` | `$48` (margin_left), `$50` (margin_right), `$47`, `$49`, `$12` (font_style) | `1.5em`, `1.5em`, `0.8em`, `0.8em`, `$382` (italic) |
+| **`style_bold`** | `<b>`, `<strong>` | `$13` (font_weight) | `$361` (bold) |
+| **`style_italic`** | `<i>`, `<em>` | `$12` (font_style) | `$382` (italic) |
+| **`style_underline`** | `<u>` | `$23` (underline) | `true` |
+| **`style_strikethrough`** | `<del>`, `<s>`, `<strike>` | `$27` (strikethrough) | `true` |
+| **`style_superscript`** | `<sup>`, `vertical-align: super` | `$16` (font_size), `$31` (baseline_shift) | `0.75em`, `0.35em` |
+| **`style_subscript`** | `<sub>`, `vertical-align: sub` | `$16` (font_size), `$31` (baseline_shift) | `0.75em`, `-0.20em` |
+| **`style_code`** | `<code>`, `<pre>`, `<tt>` | `$11` (font_family), `$16` (font_size) | `"monospace"`, `0.9em` |
+
