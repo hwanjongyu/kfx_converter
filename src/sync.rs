@@ -323,14 +323,22 @@ impl KindleSync {
         }
     }
 
-    /// Robust copy using `gio copy` for Linux GVFS MTP or `std::fs::copy` for standard mounts.
+    /// Robust copy using `gio copy` for Linux GVFS MTP or `std::fs::copy` with cache flush for standard mounts.
     fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
         let dst_str = dst.to_string_lossy();
         if dst_str.contains("/gvfs/mtp:") {
             // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
-            std::fs::copy(src, dst)?;
+            let mut r = std::fs::File::open(src)?;
+            let mut w = std::fs::File::create(dst)?;
+            std::io::copy(&mut r, &mut w)?;
+            let _ = w.sync_all();
+            if let Some(parent) = dst.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
         }
         Ok(())
     }
@@ -390,7 +398,15 @@ impl KindleSync {
             tmp.flush()?;
             Self::copy_file(tmp.path(), dst)?;
         } else {
-            std::fs::write(dst, data)?;
+            use std::io::Write;
+            let mut f = std::fs::File::create(dst)?;
+            f.write_all(data)?;
+            let _ = f.sync_all();
+            if let Some(parent) = dst.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
         }
         Ok(())
     }

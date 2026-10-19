@@ -54,7 +54,7 @@ impl LocalSymbols {
         let import_entry = IonValue::Struct(vec![
             (4, IonValue::String("YJ_symbols".to_string())), // $4 = name
             (5, IonValue::Int(10)),                         // $5 = version
-            (8, IonValue::Int(851)),                        // $8 = max_id
+            (8, IonValue::Int(842)),                        // $8 = max_id (842 symbols: 10..=851)
         ]);
         let sym_values: Vec<IonValue> = self
             .names
@@ -166,6 +166,7 @@ pub fn generate_book_id(seed: &str) -> String {
 pub struct KfxPackager<'a> {
     book: &'a BookIR,
     sections: Vec<Section>,
+    toc: Vec<crate::ir::TocItem>,
     content_type: &'a str,
     container_id: String,
     content_id: String,
@@ -188,17 +189,20 @@ impl<'a> KfxPackager<'a> {
         let asin = content_id.clone();
         let book_id = generate_book_id(&seed);
 
-        let sections = book.sections.clone();
         let mut temp_book = BookIR {
-            sections,
+            sections: book.sections.clone(),
+            toc: book.toc.clone(),
+            page_list: book.page_list.clone(),
             ..Default::default()
         };
         temp_book.fragment_large_sections(DEFAULT_MAX_SECTION_CHARS, DEFAULT_MAX_SECTION_BLOCKS);
         let sections = temp_book.sections;
+        let toc = temp_book.toc;
 
         Self {
             book,
             sections,
+            toc,
             content_type,
             container_id,
             content_id,
@@ -966,7 +970,7 @@ impl<'a> KfxPackager<'a> {
         symbols: &mut LocalSymbols,
         section_data: &[SectionPackData],
     ) -> Option<u32> {
-        if self.book.toc.is_empty() {
+        if self.toc.is_empty() {
             return None;
         }
 
@@ -985,13 +989,19 @@ impl<'a> KfxPackager<'a> {
 
         let mut nav_unit_syms = Vec::new();
 
-        for (idx, item) in self.book.toc.iter().enumerate() {
+        for (idx, item) in self.toc.iter().enumerate() {
             let unit_sym = symbols.intern(&format!("nav_unit_{}", idx + 1));
             nav_unit_syms.push(IonValue::Symbol(unit_sym));
 
             let target_sec = section_data
                 .iter()
                 .find(|s| s.raw_id == item.target_section || s.name == item.target_section)
+                .or_else(|| {
+                    let prefix = format!("{}_p", item.target_section);
+                    section_data
+                        .iter()
+                        .find(|s| s.raw_id.starts_with(&prefix) || s.name.starts_with(&prefix))
+                })
                 .or_else(|| section_data.first());
 
             let (target_sec_sym, target_pos) = if let Some(sec) = target_sec {
@@ -1794,6 +1804,63 @@ mod tests {
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
         // We register 8 default typography styles: h1, h2, h3, p, blockquote, bold, italic, underline
         assert_eq!(style_entities.len(), 8, "Expected 8 style ($157) entities in KFX container");
+    }
+
+    #[test]
+    fn test_yj_symbols_import_max_id_842() {
+        let mut symbols = LocalSymbols::new();
+        let id1 = symbols.intern("test_local_sym_1");
+        assert_eq!(id1, 852);
+        let id2 = symbols.intern("test_local_sym_2");
+        assert_eq!(id2, 853);
+
+        let symtab_bytes = symbols.to_ion_symbol_table();
+        assert!(!symtab_bytes.is_empty());
+        // Verify BVM magic
+        assert_eq!(&symtab_bytes[0..4], &[0xE0, 0x01, 0x00, 0xEA]);
+    }
+
+    #[test]
+    fn test_packager_navigation_resolves_fragmented_sections() {
+        let mut book = BookIR::default();
+        let mut blocks = Vec::new();
+        for i in 0..20 {
+            blocks.push(Block::Paragraph {
+                id: format!("p_{}", i),
+                spans: vec![TextSpan {
+                    text: "Extremely long text block that will trigger section fragmentation. ".repeat(20),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                }],
+                style: None,
+            });
+        }
+        book.sections.push(Section {
+            id: "chapter_one".to_string(),
+            title: "Chapter One".to_string(),
+            blocks,
+        });
+
+        book.toc.push(crate::ir::TocItem {
+            title: "Chapter One".to_string(),
+            target_section: "chapter_one".to_string(),
+            target_anchor: None,
+            children: Vec::new(),
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        assert!(packager.sections.len() > 1, "Section should be fragmented into multiple parts");
+        assert_eq!(packager.sections[0].id, "chapter_one_p1");
+
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging with fragmented TOC failed");
+        assert!(size > 0);
+
+        // Verify that a nav_unit ($393) entity was created
+        let sym_nav_unit = symbol_id("nav_unit").unwrap_or(393);
+        let nav_units: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_nav_unit).collect();
+        assert_eq!(nav_units.len(), 1);
     }
 }
 

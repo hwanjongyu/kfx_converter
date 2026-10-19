@@ -45,13 +45,13 @@ However, cross-perspective analysis by Gemini Pro, Claude Sonnet, and Claude Opu
 
 ### 🚨 Critical Severity (P0 — Crashes, Data Loss & Specification Violations)
 
-- [ ] **Fix Yellowjacket Shared Symbol Table Import `max_id` Offset ([`src/packager.rs#L54-L74`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/packager.rs#L54-L74))**:
+- [x] **Fix Yellowjacket Shared Symbol Table Import `max_id` Offset ([`src/packager.rs#L54-L74`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/packager.rs#L54-L74))**:
   - In `LocalSymbols::to_ion_symbol_table`, change `(8, IonValue::Int(851))` to `(8, IonValue::Int(842))`.
   - *Rationale*: System symbols 1–9 + 842 imported symbols = 851. Local symbols start at 852. With `max_id = 851`, local symbols 852–860 are erroneously consumed as shared imports.
-- [ ] **Preserve Table of Contents & Page List Targets Across Chapter Fragmentation ([`src/ir.rs#L153-L214`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/ir.rs#L153-L214), [`src/packager.rs#L988-L1003`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/packager.rs#L988-L1003))**:
+- [x] **Preserve Table of Contents & Page List Targets Across Chapter Fragmentation ([`src/ir.rs#L153-L214`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/ir.rs#L153-L214), [`src/packager.rs#L988-L1003`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/packager.rs#L988-L1003))**:
   - Maintain a mapping from original section IDs to new part IDs (`section_id -> section_id_p1`) and rewrite `item.target_section` in `BookIR.toc` and `BookIR.page_list`.
   - Prevent fallback to `section_data.first()` (the book cover) when jumping to fragmented chapters.
-- [ ] **Flush Dirty Page Cache on USB Mass Storage Transfers ([`src/sync.rs#L311-L380`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L311-L380))**:
+- [x] **Flush Dirty Page Cache on USB Mass Storage Transfers ([`src/sync.rs#L311-L380`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L311-L380))**:
   - In `copy_file` and `write_bytes`, open target destination files directly, stream content, call `f.sync_all()`, and call `dir.sync_all()` on the parent directory.
   - Prevents fatal FAT32 truncation and Kindle OS `.bad_file` blacklisting when users unplug the USB cable after conversion.
 - [x] **Fix UTF-8 Char Boundary Panic in ASIN Sanitizer ([`src/sync.rs#L60-L71`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L60-L71))**:

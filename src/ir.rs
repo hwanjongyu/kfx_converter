@@ -150,8 +150,12 @@ pub const DEFAULT_MAX_SECTION_BLOCKS: usize = 15;
 impl BookIR {
     /// Fragments sections exceeding character or block limits into smaller sequential sections.
     /// This prevents Kindle reader KPPMainApp (Hermes JS/KUX) from hitting the 240MB pmond memory ceiling.
+    /// Also rewrites `toc` and `page_list` targets so navigation remains intact after fragmentation.
     pub fn fragment_large_sections(&mut self, max_chars: usize, max_blocks: usize) {
         let mut new_sections = Vec::new();
+        let mut section_first_part_map: HashMap<String, String> = HashMap::new();
+        let mut anchor_part_map: HashMap<(String, String), String> = HashMap::new();
+
         for section in std::mem::take(&mut self.sections) {
             if section.blocks.is_empty() {
                 new_sections.push(section);
@@ -160,6 +164,12 @@ impl BookIR {
 
             let total_chars: usize = section.blocks.iter().map(|b| b.char_count()).sum();
             if total_chars <= max_chars && section.blocks.len() <= max_blocks {
+                // Not fragmented: map anchors directly
+                for block in &section.blocks {
+                    for anchor in extract_anchors_from_block(block) {
+                        anchor_part_map.insert((section.id.clone(), anchor), section.id.clone());
+                    }
+                }
                 new_sections.push(section);
                 continue;
             }
@@ -175,8 +185,14 @@ impl BookIR {
                 if !current_blocks.is_empty()
                     && (current_chars + block_chars > max_chars || current_blocks.len() >= max_blocks)
                 {
+                    let part_id = format!("{}_p{}", orig_id, part_idx);
+                    for b in &current_blocks {
+                        for anchor in extract_anchors_from_block(b) {
+                            anchor_part_map.insert((orig_id.clone(), anchor), part_id.clone());
+                        }
+                    }
                     new_sections.push(Section {
-                        id: format!("{}_p{}", orig_id, part_idx),
+                        id: part_id,
                         title: if part_idx == 1 {
                             orig_title.clone()
                         } else {
@@ -193,7 +209,7 @@ impl BookIR {
 
             if !current_blocks.is_empty() {
                 let final_id = if part_idx == 1 {
-                    orig_id
+                    orig_id.clone()
                 } else {
                     format!("{}_p{}", orig_id, part_idx)
                 };
@@ -202,14 +218,66 @@ impl BookIR {
                 } else {
                     format!("{} (part {})", orig_title, part_idx)
                 };
+                for b in &current_blocks {
+                    for anchor in extract_anchors_from_block(b) {
+                        anchor_part_map.insert((orig_id.clone(), anchor), final_id.clone());
+                    }
+                }
                 new_sections.push(Section {
                     id: final_id,
                     title: final_title,
                     blocks: current_blocks,
                 });
             }
+
+            if part_idx > 1 {
+                section_first_part_map.insert(orig_id.clone(), format!("{}_p1", orig_id));
+            }
         }
         self.sections = new_sections;
+
+        // Update TOC references
+        fn update_toc_items(
+            items: &mut [TocItem],
+            anchor_map: &HashMap<(String, String), String>,
+            section_map: &HashMap<String, String>,
+        ) {
+            for item in items.iter_mut() {
+                if let Some(ref anchor) = item.target_anchor {
+                    if let Some(part_id) = anchor_map.get(&(item.target_section.clone(), anchor.clone())) {
+                        item.target_section = part_id.clone();
+                    } else if let Some(first_part) = section_map.get(&item.target_section) {
+                        item.target_section = first_part.clone();
+                    }
+                } else if let Some(first_part) = section_map.get(&item.target_section) {
+                    item.target_section = first_part.clone();
+                }
+                update_toc_items(&mut item.children, anchor_map, section_map);
+            }
+        }
+        update_toc_items(&mut self.toc, &anchor_part_map, &section_first_part_map);
+
+        // Update Page List references
+        for page in &mut self.page_list {
+            if let Some(ref anchor) = page.target_anchor {
+                if let Some(part_id) = anchor_part_map.get(&(page.target_section.clone(), anchor.clone())) {
+                    page.target_section = part_id.clone();
+                } else if let Some(first_part) = section_first_part_map.get(&page.target_section) {
+                    page.target_section = first_part.clone();
+                }
+            } else if let Some(first_part) = section_first_part_map.get(&page.target_section) {
+                page.target_section = first_part.clone();
+            }
+        }
+    }
+}
+
+fn extract_anchors_from_block(block: &Block) -> Vec<String> {
+    match block {
+        Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+            spans.iter().filter_map(|s| s.anchor_id.clone()).collect()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -262,6 +330,64 @@ mod tests {
             style: None,
         };
         assert_eq!(block.char_count(), 9);
+    }
+
+    #[test]
+    fn test_section_fragmentation_updates_toc_and_page_list() {
+        let mut book = BookIR::default();
+        let mut blocks = Vec::new();
+        for i in 0..10 {
+            blocks.push(Block::Paragraph {
+                id: format!("p_{}", i),
+                spans: vec![TextSpan {
+                    text: "Block of text ".repeat(10),
+                    style: None,
+                    anchor_id: if i == 5 { Some("mid_anchor".to_string()) } else { None },
+                    href: None,
+                }],
+                style: None,
+            });
+        }
+        book.sections.push(Section {
+            id: "chapter_1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks,
+        });
+
+        book.toc.push(TocItem {
+            title: "Chapter 1 Beginning".to_string(),
+            target_section: "chapter_1".to_string(),
+            target_anchor: None,
+            children: vec![
+                TocItem {
+                    title: "Mid Chapter".to_string(),
+                    target_section: "chapter_1".to_string(),
+                    target_anchor: Some("mid_anchor".to_string()),
+                    children: Vec::new(),
+                }
+            ],
+        });
+
+        book.page_list.push(PageEntry {
+            page_number: "1".to_string(),
+            target_section: "chapter_1".to_string(),
+            target_anchor: None,
+        });
+
+        // Fragment with max 4 blocks per section
+        book.fragment_large_sections(100_000, 4);
+
+        assert_eq!(book.sections.len(), 3);
+        assert_eq!(book.sections[0].id, "chapter_1_p1");
+        assert_eq!(book.sections[1].id, "chapter_1_p2");
+        assert_eq!(book.sections[2].id, "chapter_1_p3");
+
+        // TOC top level should point to first part chapter_1_p1
+        assert_eq!(book.toc[0].target_section, "chapter_1_p1");
+        // Child pointing to "mid_anchor" (block index 5, in part 2) should point to chapter_1_p2
+        assert_eq!(book.toc[0].children[0].target_section, "chapter_1_p2");
+        // Page list should point to chapter_1_p1
+        assert_eq!(book.page_list[0].target_section, "chapter_1_p1");
     }
 }
 
