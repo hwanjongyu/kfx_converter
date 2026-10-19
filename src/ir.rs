@@ -15,12 +15,13 @@ pub struct BookMetadata {
     pub cover_image_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TextSpan {
     pub text: String,
     pub style: Option<String>,
     pub anchor_id: Option<String>,
     pub href: Option<String>,
+    pub ruby: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +321,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             });
@@ -349,6 +351,7 @@ mod tests {
                 style: None,
                 anchor_id: None,
                 href: None,
+                ruby: None,
             }],
             style: None,
         };
@@ -367,6 +370,7 @@ mod tests {
                     style: None,
                     anchor_id: if i == 5 { Some("mid_anchor".to_string()) } else { None },
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             });
@@ -427,6 +431,7 @@ mod tests {
                         style: None,
                         anchor_id: None,
                         href: None,
+                        ruby: None,
                     }],
                     style: None,
                 },
@@ -437,6 +442,7 @@ mod tests {
                         style: None,
                         anchor_id: None,
                         href: None,
+                        ruby: None,
                     }],
                     style: Some("page_break_before".to_string()),
                 },

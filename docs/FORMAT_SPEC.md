@@ -321,6 +321,47 @@ $597 /* auxiliary_data */: {
 - An in-page modal dialog appears floating over the reading surface displaying `$444 popup_text`.
 - Tapping outside the modal dismisses it without page reload, maintaining the user's reading position.
 
+---
 
+## 11. Ruby Annotations & East Asian Typography (`$756 ruby_content`)
 
+East Asian typography (Japanese furigana, Chinese zhuyin/pinyin, Korean hanja reading guides) is represented in Yellowjacket KFX via inline style events rather than raw text parentheses.
 
+### 11.1 EPUB Ingestion Model
+`EpubReader` parses standard HTML5 / EPUB 3 ruby tags:
+- `<ruby>`: Establishes an annotation container.
+- `<rb>`: Base text (Kanji / Hanja).
+- `<rt>` / `<rtc>`: Phonetic annotation text (Hiragana / Pinyin).
+- `<rp>`: Parenthesis fallbacks for non-ruby renderers (e.g. `(かんじ)`). The parser strips `<rp>` tags and discards their inner text to avoid rendering redundant parenthesis characters alongside native Kindle ruby annotations.
+- Pairwise association: The parser supports 1-to-1 (`<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>`), 1-to-many (`<ruby>漢字<rt>かんじ</rt></ruby>`), and nested base text elements, mapping them into `TextSpan.ruby: Option<String>`.
+
+### 11.2 Yellowjacket Style Entity (`$157 style_ruby`)
+Every book container registers a global `style_ruby` entity configuring ruby alignment:
+
+```ion
+$157 /* style */: {
+    $4 /* name */: $style_ruby,
+    $765 /* ruby_text_align */: $773 /* space_around */,
+    $766 /* ruby_base_align */: $773 /* space_around */,
+    $770 /* ruby_base_edge_align */: $771 /* separate */
+}
+```
+
+### 11.3 Storyline Style Events (`$142 style_events`)
+Phonetic readings are attached to reading blocks inside `$259 storyline` elements as inline `$142 style_events`:
+
+```ion
+$142 /* style_events */: [
+    {
+        $143 /* offset */: 5,
+        $144 /* length */: 2,
+        $157 /* style */: $style_ruby,
+        $756 /* ruby_content */: "かんじ"
+    }
+]
+```
+
+- `$143 offset`: Character offset (UTF-8 / Unicode scalar) within the block's text string where the base characters start.
+- `$144 length`: Character length of the base text span covered by the phonetic guide.
+- `$157 style`: Symbol reference to `$style_ruby`.
+- `$756 ruby_content`: Phonetic guide string placed directly above (horizontal text) or to the right (vertical text) of the base text on Kindle E-ink displays.

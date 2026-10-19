@@ -614,6 +614,15 @@ impl EpubReader {
         let mut current_footnote_id: Option<String> = None;
         let mut current_footnote_text = String::new();
 
+        // Ruby (Furigana) state
+        let mut in_ruby = false;
+        let mut in_rt = false;
+        let mut in_rp = false;
+        let mut ruby_bases: Vec<String> = Vec::new();
+        let mut ruby_rts: Vec<String> = Vec::new();
+        let mut current_base = String::new();
+        let mut current_rt = String::new();
+
         // Style & Inline state
         let mut bold = false;
         let mut italic = false;
@@ -673,6 +682,7 @@ impl EpubReader {
                                 style: orig_style,
                                 anchor_id: None,
                                 href: None,
+                                ruby: None,
                             });
                         }
                     }
@@ -720,6 +730,7 @@ impl EpubReader {
                     style,
                     anchor_id: anchor.clone(),
                     href: href.clone(),
+                    ruby: None,
                 });
             }
         };
@@ -818,6 +829,31 @@ impl EpubReader {
                         }
 
                         match local_bytes {
+                            b"ruby" => {
+                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                in_ruby = true;
+                                in_rt = false;
+                                in_rp = false;
+                                ruby_bases.clear();
+                                ruby_rts.clear();
+                                current_base.clear();
+                                current_rt.clear();
+                            }
+                            b"rb" => {
+                                if !current_base.is_empty() {
+                                    ruby_bases.push(std::mem::take(&mut current_base));
+                                }
+                            }
+                            b"rt" | b"rtc" => {
+                                in_rt = true;
+                                if !current_base.is_empty() {
+                                    ruby_bases.push(std::mem::take(&mut current_base));
+                                }
+                                current_rt.clear();
+                            }
+                            b"rp" => {
+                                in_rp = true;
+                            }
                             b"div" | b"section" | b"article" | b"main" | b"aside" => {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
@@ -1177,18 +1213,31 @@ impl EpubReader {
                 Ok(Event::Text(ref e)) => {
                     if ignore_depth == 0 {
                         let text = e.unescape().unwrap_or_default();
-                        if footnote_depth > 0 {
-                            current_footnote_text.push_str(&text);
-                        }
-                        if in_cell {
-                            current_cell.push_str(&text);
-                        } else if in_p || in_heading || in_li {
-                            current_span_text.push_str(&text);
-                        } else if !text.trim().is_empty() {
-                            // Implicit paragraph for text directly in <div>, <section>, <body>, etc.
-                            in_p = true;
-                            p_style = None;
-                            current_span_text.push_str(&text);
+                        if in_ruby {
+                            if in_rp {
+                                // Discard fallback parentheses (<rp>(</rp>) so they don't render alongside ruby annotations
+                            } else if in_rt {
+                                current_rt.push_str(&text);
+                            } else {
+                                current_base.push_str(&text);
+                                if footnote_depth > 0 {
+                                    current_footnote_text.push_str(&text);
+                                }
+                            }
+                        } else {
+                            if footnote_depth > 0 {
+                                current_footnote_text.push_str(&text);
+                            }
+                            if in_cell {
+                                current_cell.push_str(&text);
+                            } else if in_p || in_heading || in_li {
+                                current_span_text.push_str(&text);
+                            } else if !text.trim().is_empty() {
+                                // Implicit paragraph for text directly in <div>, <section>, <body>, etc.
+                                in_p = true;
+                                p_style = None;
+                                current_span_text.push_str(&text);
+                            }
                         }
                     }
                 }
@@ -1220,6 +1269,94 @@ impl EpubReader {
                             }
                         }
                         match local_bytes {
+                            b"rt" | b"rtc" => {
+                                in_rt = false;
+                                if !current_rt.is_empty() {
+                                    ruby_rts.push(std::mem::take(&mut current_rt));
+                                }
+                            }
+                            b"rp" => {
+                                in_rp = false;
+                            }
+                            b"rb" => {
+                                if !current_base.is_empty() {
+                                    ruby_bases.push(std::mem::take(&mut current_base));
+                                }
+                            }
+                            b"ruby" => {
+                                in_ruby = false;
+                                if !current_base.is_empty() {
+                                    ruby_bases.push(std::mem::take(&mut current_base));
+                                }
+                                if !current_rt.is_empty() {
+                                    ruby_rts.push(std::mem::take(&mut current_rt));
+                                }
+
+                                let mut style_parts = Vec::new();
+                                if bold { style_parts.push("bold"); }
+                                if italic { style_parts.push("italic"); }
+                                if underline { style_parts.push("underline"); }
+                                if code { style_parts.push("code"); }
+                                if strike { style_parts.push("strike"); }
+                                if sup { style_parts.push("sup"); }
+                                if sub { style_parts.push("sub"); }
+                                if let Some(ref s) = current_style { style_parts.push(s.as_str()); }
+                                let base_style = if style_parts.is_empty() { None } else { Some(style_parts.join(" ")) };
+
+                                if ruby_bases.len() == ruby_rts.len() {
+                                    for (b, r) in ruby_bases.drain(..).zip(ruby_rts.drain(..)) {
+                                        if !b.is_empty() {
+                                            current_spans.push(TextSpan {
+                                                text: b,
+                                                style: base_style.clone(),
+                                                anchor_id: current_anchor.clone(),
+                                                href: current_href.clone(),
+                                                ruby: if r.is_empty() { None } else { Some(r) },
+                                            });
+                                        }
+                                    }
+                                } else if ruby_rts.len() == 1 {
+                                    let b = ruby_bases.join("");
+                                    let r = ruby_rts.pop().unwrap_or_default();
+                                    if !b.is_empty() {
+                                        current_spans.push(TextSpan {
+                                            text: b,
+                                            style: base_style.clone(),
+                                            anchor_id: current_anchor.clone(),
+                                            href: current_href.clone(),
+                                            ruby: if r.is_empty() { None } else { Some(r) },
+                                        });
+                                    }
+                                } else if ruby_rts.is_empty() {
+                                    for b in ruby_bases.drain(..) {
+                                        if !b.is_empty() {
+                                            current_spans.push(TextSpan {
+                                                text: b,
+                                                style: base_style.clone(),
+                                                anchor_id: current_anchor.clone(),
+                                                href: current_href.clone(),
+                                                ruby: None,
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    let b = ruby_bases.join("");
+                                    let r = ruby_rts.join("");
+                                    if !b.is_empty() {
+                                        current_spans.push(TextSpan {
+                                            text: b,
+                                            style: base_style.clone(),
+                                            anchor_id: current_anchor.clone(),
+                                            href: current_href.clone(),
+                                            ruby: if r.is_empty() { None } else { Some(r) },
+                                        });
+                                    }
+                                }
+                                ruby_bases.clear();
+                                ruby_rts.clear();
+                                current_base.clear();
+                                current_rt.clear();
+                            }
                             b"p" | b"blockquote" | b"center" | b"div" | b"section" | b"article" | b"main" | b"aside" => {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
@@ -1946,6 +2083,41 @@ mod tests {
             footnotes.get("fn2").map(|s| s.as_str()),
             Some("[2] See Heisenberg Uncertainty Principle.")
         );
+    }
+
+    #[test]
+    fn test_parse_xhtml_ruby_furigana() {
+        let xhtml = r##"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+    <p>
+        Simple ruby: <ruby>漢字<rp>(</rp><rt>かんじ</rt><rp>)</rp></ruby>.
+        Per-character ruby: <ruby><rb>東</rb><rt>とう</rt><rb>京</rb><rt>きょう</rt></ruby>.
+    </p>
+</body>
+</html>"##;
+        let manifest = HashMap::new();
+        let (blocks, _) = EpubReader::parse_xhtml_with_manifest(xhtml, &manifest);
+        assert_eq!(blocks.len(), 1);
+
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            // Find "漢字" span
+            let kanji_span = spans.iter().find(|s| s.text == "漢字").expect("漢字 span");
+            assert_eq!(kanji_span.ruby.as_deref(), Some("かんじ"));
+
+            // Verify <rp> text "(" and ")" were stripped/ignored
+            assert!(!spans.iter().any(|s| s.text.contains('(') || s.text.contains(')')));
+
+            // Find "東" and "京" spans
+            let to_span = spans.iter().find(|s| s.text == "東").expect("東 span");
+            assert_eq!(to_span.ruby.as_deref(), Some("とう"));
+
+            let kyo_span = spans.iter().find(|s| s.text == "京").expect("京 span");
+            assert_eq!(kyo_span.ruby.as_deref(), Some("きょう"));
+        } else {
+            panic!("Expected paragraph block");
+        }
     }
 }
 

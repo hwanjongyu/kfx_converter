@@ -104,6 +104,7 @@ pub struct StyleSymMap {
     pub small_caps: u32,
     pub dropcap: u32,
     pub uppercase: u32,
+    pub ruby: u32,
 }
 
 /// Generates deterministic Amazon Content Repository container ID.
@@ -562,6 +563,7 @@ impl<'a> KfxPackager<'a> {
         let small_caps_sym = symbols.intern("style_small_caps");
         let dropcap_sym = symbols.intern("style_dropcap");
         let uppercase_sym = symbols.intern("style_uppercase");
+        let ruby_sym = symbols.intern("style_ruby");
 
         let sym_font_variant = symbol_id("font_variant").unwrap_or(14);
         let sym_small_caps = symbol_id("small_caps").unwrap_or(369);
@@ -569,6 +571,11 @@ impl<'a> KfxPackager<'a> {
         let sym_dropcap_chars = symbol_id("dropcap_chars").unwrap_or(126);
         let sym_text_transform = symbol_id("text_transform").unwrap_or(41);
         let sym_uppercase = symbol_id("uppercase").unwrap_or(372);
+        let sym_ruby_text_align = symbol_id("ruby_text_align").unwrap_or(765);
+        let sym_ruby_base_align = symbol_id("ruby_base_align").unwrap_or(766);
+        let sym_ruby_base_edge_align = symbol_id("ruby_base_edge_align").unwrap_or(770);
+        let sym_space_around = symbol_id("space_around").unwrap_or(773);
+        let sym_separate = symbol_id("separate").unwrap_or(771);
 
         let make_em = |val: &str| {
             IonValue::Struct(vec![
@@ -728,6 +735,14 @@ impl<'a> KfxPackager<'a> {
             (sym_text_transform, IonValue::Symbol(sym_uppercase)),
         ]);
 
+        // 20. inline ruby style
+        let ruby_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(ruby_sym)),
+            (sym_ruby_text_align, IonValue::Symbol(sym_space_around)),
+            (sym_ruby_base_align, IonValue::Symbol(sym_space_around)),
+            (sym_ruby_base_edge_align, IonValue::Symbol(sym_separate)),
+        ]);
+
         let style_list = [
             (h1_sym, h1_val),
             (h2_sym, h2_val),
@@ -748,6 +763,7 @@ impl<'a> KfxPackager<'a> {
             (small_caps_sym, small_caps_val),
             (dropcap_sym, dropcap_val),
             (uppercase_sym, uppercase_val),
+            (ruby_sym, ruby_val),
         ];
 
         for (sym_id_val, val) in style_list {
@@ -781,6 +797,7 @@ impl<'a> KfxPackager<'a> {
             small_caps: small_caps_sym,
             dropcap: dropcap_sym,
             uppercase: uppercase_sym,
+            ruby: ruby_sym,
         }
     }
 
@@ -925,6 +942,15 @@ impl<'a> KfxPackager<'a> {
                                 (sym_style, IonValue::Symbol(styles.uppercase)),
                             ]));
                         }
+                    }
+                    if let Some(ref rt) = span.ruby {
+                        let sym_ruby_content = symbol_id("ruby_content").unwrap_or(756);
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.ruby)),
+                            (sym_ruby_content, IonValue::String(rt.clone())),
+                        ]));
                     }
                     full_text.push_str(&span.text);
                     offset += span_len;
@@ -1768,6 +1794,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             }],
@@ -1834,6 +1861,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             }],
@@ -1868,6 +1896,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             }],
@@ -1923,6 +1952,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             }],
@@ -1967,6 +1997,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             }],
@@ -1981,6 +2012,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             }],
@@ -2043,6 +2075,7 @@ mod tests {
                         style: None,
                         anchor_id: None,
                         href: None,
+                        ruby: None,
                     }],
                     style: None,
                 },
@@ -2054,24 +2087,28 @@ mod tests {
                             style: None,
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "bold keyword".to_string(),
                             style: Some("bold".to_string()),
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: " and ".to_string(),
                             style: None,
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "italic emphasis".to_string(),
                             style: Some("italic".to_string()),
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                     ],
                     style: None,
@@ -2083,6 +2120,7 @@ mod tests {
                         style: None,
                         anchor_id: None,
                         href: None,
+                        ruby: None,
                     }],
                     style: Some("blockquote".to_string()),
                 },
@@ -2096,8 +2134,8 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
-        // We register 19 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps, dropcap, uppercase
-        assert_eq!(style_entities.len(), 19, "Expected 19 style ($157) entities in KFX container");
+        // We register 20 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps, dropcap, uppercase, ruby
+        assert_eq!(style_entities.len(), 20, "Expected 20 style ($157) entities in KFX container");
     }
 
     #[test]
@@ -2115,6 +2153,7 @@ mod tests {
                         style: Some("code".to_string()),
                         anchor_id: None,
                         href: None,
+                        ruby: None,
                     }],
                     style: None,
                 },
@@ -2126,48 +2165,56 @@ mod tests {
                             style: None,
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "deleted words".to_string(),
                             style: Some("strike".to_string()),
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: ", E=mc".to_string(),
                             style: None,
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "2".to_string(),
                             style: Some("sup".to_string()),
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: ", H".to_string(),
                             style: None,
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "2".to_string(),
                             style: Some("sub".to_string()),
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "O, and ".to_string(),
                             style: None,
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "println!()".to_string(),
                             style: Some("code".to_string()),
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                     ],
                     style: Some("p_first align_center".to_string()),
@@ -2182,7 +2229,7 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
-        assert_eq!(style_count, 19);
+        assert_eq!(style_count, 20);
     }
 
     #[test]
@@ -2211,6 +2258,7 @@ mod tests {
                     style: None,
                     anchor_id: None,
                     href: None,
+                    ruby: None,
                 }],
                 style: None,
             });
@@ -2265,6 +2313,7 @@ mod tests {
                         style: None,
                         anchor_id: None,
                         href: None,
+                        ruby: None,
                     }],
                     style: None,
                 },
@@ -2358,12 +2407,14 @@ mod tests {
                             style: None,
                             anchor_id: None,
                             href: None,
+                            ruby: None,
                         },
                         TextSpan {
                             text: "[1]".to_string(),
                             style: Some("noteref".to_string()),
                             anchor_id: Some("fnref1".to_string()),
                             href: Some("#fn1".to_string()),
+                            ruby: None,
                         },
                     ],
                     style: None,
@@ -2394,6 +2445,76 @@ mod tests {
         assert!(
             ad_entity.data.windows(fn_key_bytes.len()).any(|w| w == fn_key_bytes),
             "Auxiliary data entity ($597) must encode key 'fn1'"
+        );
+    }
+
+    #[test]
+    fn test_packager_emits_ruby_style_and_content() {
+        let mut book = BookIR::default();
+        book.metadata.title = "Ruby Test Book".to_string();
+        book.sections.push(Section {
+            id: "sec_ruby".to_string(),
+            title: "Ruby Chapter".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p_ruby".to_string(),
+                spans: vec![
+                    TextSpan {
+                        text: "振仮名: ".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "漢字".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: Some("かんじ".to_string()),
+                    },
+                ],
+                style: None,
+            }],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging with ruby failed");
+        assert!(size > 0);
+
+        // 1. Verify 20 style entities emitted including style_ruby
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let style_entities: Vec<_> = packager
+            .entities
+            .iter()
+            .filter(|e| e.chunk_type == sym_style)
+            .collect();
+        assert_eq!(style_entities.len(), 20, "Expected 20 style ($157) entities including style_ruby");
+        let ruby_style_entity = style_entities.last().expect("style_ruby entity");
+        assert!(!ruby_style_entity.data.is_empty());
+
+        // 2. Verify content entity ($145) contains the base text "振仮名: 漢字"
+        let content_entity = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == SYM_CONTENT)
+            .expect("Content ($145) entity missing");
+        let base_text_bytes = "振仮名: 漢字".as_bytes();
+        assert!(
+            content_entity.data.windows(base_text_bytes.len()).any(|w| w == base_text_bytes),
+            "Content entity ($145) must contain base text"
+        );
+
+        // 3. Verify storyline entity ($259) contains the ruby phonetic text "かんじ" in style_events
+        let storyline_entity = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == SYM_STORYLINE)
+            .expect("Storyline ($259) entity missing");
+        let furigana_bytes = "かんじ".as_bytes();
+        assert!(
+            storyline_entity.data.windows(furigana_bytes.len()).any(|w| w == furigana_bytes),
+            "Storyline entity ($259) must contain ruby_content furigana payload in style_events"
         );
     }
 }

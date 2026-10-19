@@ -876,6 +876,10 @@ pub const SYM_AUXILIARY_DATA: u32 = 597;
 pub const SYM_SECTION_POSITION_ID_MAP: u32 = 609;
 pub const SYM_YJ_NOTE: u32 = 617;
 pub const SYM_YJ_LOCATION_PID_MAP: u32 = 621;
+pub const SYM_RUBY_CONTENT: u32 = 756;
+pub const SYM_RUBY_TEXT_ALIGN: u32 = 765;
+pub const SYM_RUBY_BASE_ALIGN: u32 = 766;
+pub const SYM_RUBY_BASE_EDGE_ALIGN: u32 = 770;
 
 /// Get the symbol name for a given symbol ID.
 /// This is the preferred way to look up symbol names.

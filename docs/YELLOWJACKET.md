@@ -250,6 +250,7 @@ Standard publishing typography dictates that the opening paragraph of a chapter 
 | **`style_small_caps`** | `<abbr>`, `<acronym>`, `font-variant: small-caps` | `$14` (font_variant) | `$369` (small_caps) |
 | **`style_dropcap`** | `span.dropcap`, `p.has-dropcap` | `$16`, `$13`, `$42`, `$50`, `$125`, `$126` | `3.0em`, `$361` (bold), `0.9em`, `0.15em`, `3`, `1` |
 | **`style_uppercase`** | `text-transform: uppercase`, `.all-caps` | `$41` (text_transform) | `$372` (uppercase) |
+| **`style_ruby`** | `<ruby>`, `<rt>` | `$765` (ruby_text_align), `$766` (ruby_base_align), `$770` (ruby_base_edge_align) | `$773` (space_around), `$773` (space_around), `$771` (separate) |
 
 ### 8.5 Forced Page Break & Section Boundary Mechanics
 Kindle's e-ink rendering engine does not honor CSS `page-break-*` inside a single layout partition. To achieve guaranteed hardware page breaks:
@@ -306,6 +307,44 @@ $597 /* auxiliary_data */: {
 3. **Modal Dialog Rendering**: The `$444 popup_text` string is rendered into a transient modal dialog overlay without navigating away from the current page.
 4. **Backlink Sanitization**: EPUB footnotes typically feature return arrows (`↩`, `↵`, `^`) linking back to the text. `kfx-converter` strips these trailing glyphs so the pop-up modal contains clean, legible explanatory prose without dead-end return characters.
 
+---
 
+## 10. Ruby Text & East Asian Furigana Typography (`$756 ruby_content`)
 
+In East Asian typography (Japanese, Chinese, Korean), phonetic glosses (furigana, pinyin, zhuyin) are printed adjacent to base ideographs (Kanji, Hanja) to guide pronunciation without cluttering the reading line.
 
+### 10.1 Ingestion Invariants (`<ruby>`, `<rt>`, `<rb>`, `<rp>`)
+- `<rp>` (ruby parenthesis fallback) tags and their text content (e.g. `(`, `)`) are discarded completely during parsing. Kindle renders phonetic guides as dedicated superscript lines; including parenthesis text would cause duplicate brackets on screen.
+- Both compound grouping (`<ruby>漢字<rt>かんじ</rt></ruby>`) and per-character markup (`<ruby><rb>東</rb><rt>とう</rt><rb>京</rb><rt>きょう</rt></ruby>`) are parsed into normalized `TextSpan` elements with `ruby: Option<String>`.
+
+### 10.2 Yellowjacket `style_ruby` Entity
+`KfxPackager` defines a global typography entity `$157 style_ruby`:
+
+```ion
+$157 /* style */: {
+    $4 /* name */: $style_ruby,
+    $765 /* ruby_text_align */: $773 /* space_around */,
+    $766 /* ruby_base_align */: $773 /* space_around */,
+    $770 /* ruby_base_edge_align */: $771 /* separate */
+}
+```
+
+- `$765 ruby_text_align: $773 space_around`: Centers and distributes the phonetic glyphs evenly across the base glyph width.
+- `$766 ruby_base_align: $773 space_around`: Aligns the base character when ruby text is wider than the base ideograph.
+- `$770 ruby_base_edge_align: $771 separate`: Ensures ruby annotations across adjacent base words do not bleed together or collide at line wraps.
+
+### 10.3 Storyline Event Integration
+Inside each section's `$259 storyline`, reading blocks attach ruby annotations using `$142 style_events`:
+
+```ion
+$142 /* style_events */: [
+    {
+        $143 /* offset */: 0,
+        $144 /* length */: 2,
+        $157 /* style */: $style_ruby,
+        $756 /* ruby_content */: "かんじ"
+    }
+]
+```
+
+Kindle's e-ink layout engine renders this inline, maintaining precise alignment and line-spacing without disrupting font zoom sliders or dictionary lookups.
