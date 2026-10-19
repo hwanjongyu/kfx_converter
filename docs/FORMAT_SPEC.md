@@ -62,6 +62,7 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | :--- | :--- | :--- |
 | **`$1`** | `$ion` | Ion system symbol |
 | **`$3`** | `$ion_symbol_table` | Embedded symbol table annotation |
+| **`$14`** | `font_variant` | Font variant property (e.g. `$369` small_caps) |
 | **`$145`** | `content` | Text block and inline styling payloads |
 | **`$157`** | `style` | Formatting styles |
 | **`$161`** | `format` | Resource format descriptor (`$285` jpg, `$284` png) |
@@ -75,6 +76,7 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | **`$264`** | `position_map` | Mapping between positions and content elements |
 | **`$265`** | `position_id_map` | Mapping between IDs and positions |
 | **`$271`** | `image` | Storyline image block element type |
+| **`$369`** | `small_caps` | Small caps font variant value for `$14` |
 | **`$409`** | `bcContId` | Container ID descriptor |
 | **`$417`** | `bcRawMedia` | Binary media payload chunk |
 | **`$419`** | `container_entity_map` | Manifest of all entities contained in the file |
@@ -218,4 +220,21 @@ Publishing industry typographic convention requires that the opening paragraph o
 | `style_superscript` | `$157` | `$16`: 0.75em, `$31`: 0.35em | Inline superscript span |
 | `style_subscript` | `$157` | `$16`: 0.75em, `$31`: -0.20em | Inline subscript span |
 | `style_code` | `$157` | `$11`: `"monospace"`, `$16`: 0.9em | Inline code / preformatted text |
+| `style_small_caps` | `$157` | `$14`: `$369` (small_caps) | Inline small caps / `<abbr>` / `<acronym>` |
+
+---
+
+## 8. Forced Page Breaks & Section Partitioning Architecture
+
+Kindle's e-ink layout engine (`Hermes` / `KPPMainApp`) does not reliably execute CSS-based pagination properties (`page-break-before: always`, `break-before: page`, `page-break-after: always`) embedded within an individual `$260 section` container.
+
+### 8.1 Section-Level Page Partitioning
+In Yellowjacket, each `$260 section` represents an independent reading flow boundary:
+1. When navigating between `$260 section` entities, the Kindle e-ink screen always initiates an immediate page turn / hardware screen refresh.
+2. `kfx-converter` inspects EPUB styling tokens during IR section fragmentation (`fragment_large_sections`):
+   - `page-break-before: always` or `break-before: page` (or class `pagebreak` / `page-break`) on a block triggers a forced section break immediately before that block.
+   - `page-break-after: always` or `break-after: page` on a block triggers a forced section break immediately after that block.
+   - Self-closing or empty page break elements (`<div class="pagebreak"/>`, `<hr class="pagebreak"/>`) set a pending page break carried forward to the subsequent block.
+3. Partitioning at the Yellowjacket section level guarantees deterministic, hardware-native page breaks across all Kindle Paperwhite, Oasis, and Scribe devices without relying on unstable CSS emulation.
+
 

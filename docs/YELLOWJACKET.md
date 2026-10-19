@@ -247,4 +247,13 @@ Standard publishing typography dictates that the opening paragraph of a chapter 
 | **`style_superscript`** | `<sup>`, `vertical-align: super` | `$16` (font_size), `$31` (baseline_shift) | `0.75em`, `0.35em` |
 | **`style_subscript`** | `<sub>`, `vertical-align: sub` | `$16` (font_size), `$31` (baseline_shift) | `0.75em`, `-0.20em` |
 | **`style_code`** | `<code>`, `<pre>`, `<tt>` | `$11` (font_family), `$16` (font_size) | `"monospace"`, `0.9em` |
+| **`style_small_caps`** | `<abbr>`, `<acronym>`, `font-variant: small-caps` | `$14` (font_variant) | `$369` (small_caps) |
+
+### 8.5 Forced Page Break & Section Boundary Mechanics
+Kindle's e-ink rendering engine does not honor CSS `page-break-*` inside a single layout partition. To achieve guaranteed hardware page breaks:
+1. `EpubReader` extracts `page_break_before` and `page_break_after` tokens from CSS properties (`page-break-before`, `break-before`, `page-break-after`, `break-after`) and markup markers (`class="pagebreak"`, `<hr class="pagebreak"/>`, `<div class="pagebreak"/>`).
+2. `fragment_large_sections` checks `block.has_page_break_before()` and the preceding block's `has_page_break_after()` as strict partition boundaries.
+3. When encountered, a new Yellowjacket `$260 section` entity is spawned immediately.
+4. Because the Kindle e-ink display firmware unconditionally flushes the screen buffer and triggers a page turn between Yellowjacket sections, page breaks render identically to physical book leaf transitions.
+
 

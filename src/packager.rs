@@ -101,6 +101,7 @@ pub struct StyleSymMap {
     pub superscript: u32,
     pub subscript: u32,
     pub code: u32,
+    pub small_caps: u32,
 }
 
 /// Generates deterministic Amazon Content Repository container ID.
@@ -556,6 +557,10 @@ impl<'a> KfxPackager<'a> {
         let sup_sym = symbols.intern("style_superscript");
         let sub_sym = symbols.intern("style_subscript");
         let code_sym = symbols.intern("style_code");
+        let small_caps_sym = symbols.intern("style_small_caps");
+
+        let sym_font_variant = symbol_id("font_variant").unwrap_or(14);
+        let sym_small_caps = symbol_id("small_caps").unwrap_or(369);
 
         let make_em = |val: &str| {
             IonValue::Struct(vec![
@@ -692,6 +697,12 @@ impl<'a> KfxPackager<'a> {
             (sym_font_size, make_em("0.9")),
         ]);
 
+        // 17. inline small_caps style
+        let small_caps_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(small_caps_sym)),
+            (sym_font_variant, IonValue::Symbol(sym_small_caps)),
+        ]);
+
         let style_list = [
             (h1_sym, h1_val),
             (h2_sym, h2_val),
@@ -709,6 +720,7 @@ impl<'a> KfxPackager<'a> {
             (sup_sym, sup_val),
             (sub_sym, sub_val),
             (code_sym, code_val),
+            (small_caps_sym, small_caps_val),
         ];
 
         for (sym_id_val, val) in style_list {
@@ -739,6 +751,7 @@ impl<'a> KfxPackager<'a> {
             superscript: sup_sym,
             subscript: sub_sym,
             code: code_sym,
+            small_caps: small_caps_sym,
         }
     }
 
@@ -856,6 +869,13 @@ impl<'a> KfxPackager<'a> {
                                 (sym_offset, IonValue::Int(offset as i64)),
                                 (sym_length, IonValue::Int(span_len as i64)),
                                 (sym_style, IonValue::Symbol(styles.code)),
+                            ]));
+                        }
+                        if st.contains("small_caps") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.small_caps)),
                             ]));
                         }
                     }
@@ -1914,6 +1934,7 @@ mod tests {
                         anchor_id: None,
                         href: None,
                     }],
+                    style: None,
                 },
                 Block::Paragraph {
                     id: "p_styled".to_string(),
@@ -1965,8 +1986,8 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
-        // We register 16 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code
-        assert_eq!(style_entities.len(), 16, "Expected 16 style ($157) entities in KFX container");
+        // We register 17 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps
+        assert_eq!(style_entities.len(), 17, "Expected 17 style ($157) entities in KFX container");
     }
 
     #[test]
@@ -1985,6 +2006,7 @@ mod tests {
                         anchor_id: None,
                         href: None,
                     }],
+                    style: None,
                 },
                 Block::Paragraph {
                     id: "p_1".to_string(),
@@ -2050,7 +2072,7 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
-        assert_eq!(style_count, 16);
+        assert_eq!(style_count, 17);
     }
 
     #[test]

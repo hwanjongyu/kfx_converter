@@ -34,6 +34,7 @@ pub enum Block {
         id: String,
         level: u8,
         spans: Vec<TextSpan>,
+        style: Option<String>,
     },
     Image {
         id: String,
@@ -140,6 +141,22 @@ impl Block {
             Block::HorizontalRule => 3,
         }
     }
+
+    pub fn has_page_break_before(&self) -> bool {
+        match self {
+            Block::Paragraph { style: Some(st), .. } => st.contains("page_break_before"),
+            Block::Heading { style: Some(st), .. } => st.contains("page_break_before"),
+            _ => false,
+        }
+    }
+
+    pub fn has_page_break_after(&self) -> bool {
+        match self {
+            Block::Paragraph { style: Some(st), .. } => st.contains("page_break_after"),
+            Block::Heading { style: Some(st), .. } => st.contains("page_break_after"),
+            _ => false,
+        }
+    }
 }
 
 /// Chapter-First Hybrid Fragmentation Thresholds:
@@ -163,7 +180,9 @@ impl BookIR {
             }
 
             let total_chars: usize = section.blocks.iter().map(|b| b.char_count()).sum();
-            if total_chars <= max_chars && section.blocks.len() <= max_blocks {
+            let has_forced_break = section.blocks.iter().any(|b| b.has_page_break_before() || b.has_page_break_after());
+
+            if !has_forced_break && total_chars <= max_chars && section.blocks.len() <= max_blocks {
                 // Not fragmented: map anchors directly
                 for block in &section.blocks {
                     for anchor in extract_anchors_from_block(block) {
@@ -182,8 +201,11 @@ impl BookIR {
 
             for block in section.blocks {
                 let block_chars = block.char_count();
+                let is_forced_break = block.has_page_break_before()
+                    || (!current_blocks.is_empty() && current_blocks.last().map_or(false, |b: &Block| b.has_page_break_after()));
+
                 if !current_blocks.is_empty()
-                    && (current_chars + block_chars > max_chars || current_blocks.len() >= max_blocks)
+                    && (is_forced_break || current_chars + block_chars > max_chars || current_blocks.len() >= max_blocks)
                 {
                     let part_id = format!("{}_p{}", orig_id, part_idx);
                     for b in &current_blocks {
@@ -388,6 +410,46 @@ mod tests {
         assert_eq!(book.toc[0].children[0].target_section, "chapter_1_p2");
         // Page list should point to chapter_1_p1
         assert_eq!(book.page_list[0].target_section, "chapter_1_p1");
+    }
+
+    #[test]
+    fn test_forced_page_break_section_fragmentation() {
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "chapter_scene".to_string(),
+            title: "Chapter Scene".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "p_1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Scene 1 content.".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                    }],
+                    style: None,
+                },
+                Block::Paragraph {
+                    id: "p_2".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Scene 2 content starting on a fresh page.".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                    }],
+                    style: Some("page_break_before".to_string()),
+                },
+            ],
+        });
+
+        // Even with huge max_chars and max_blocks, forced page break must partition into 2 sections
+        book.fragment_large_sections(100_000, 100);
+
+        assert_eq!(book.sections.len(), 2, "Expected 2 sections partitioned by forced page break");
+        assert_eq!(book.sections[0].id, "chapter_scene_p1");
+        assert_eq!(book.sections[1].id, "chapter_scene_p2");
+        assert_eq!(book.sections[0].blocks.len(), 1);
+        assert_eq!(book.sections[1].blocks.len(), 1);
     }
 }
 

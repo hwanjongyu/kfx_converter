@@ -612,6 +612,8 @@ impl EpubReader {
         let mut p_style: Option<String> = None;
         let mut in_heading = false;
         let mut heading_level = 1u8;
+        let mut heading_style: Option<String> = None;
+        let mut pending_page_break = false;
         let mut ignore_depth = 0usize;
         let mut first_paragraph_seen = false;
 
@@ -741,6 +743,21 @@ impl EpubReader {
                                     }
                                     in_p = false;
                                 }
+                                for attr in e.attributes().flatten() {
+                                    let key = attr.key.as_ref();
+                                    if key == b"class" {
+                                        let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                        if val.contains("pagebreak") || val.contains("page-break") {
+                                            pending_page_break = true;
+                                        }
+                                    } else if key == b"style" {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        let tokens = Self::sanitize_css_style(&val);
+                                        if tokens.contains(&"page_break_before".to_string()) {
+                                            pending_page_break = true;
+                                        }
+                                    }
+                                }
                             }
                             b"p" | b"blockquote" => {
                                 if in_p {
@@ -771,6 +788,14 @@ impl EpubReader {
                                     if key == b"style" {
                                         let val = String::from_utf8_lossy(&attr.value);
                                         p_tokens.extend(Self::sanitize_css_style(&val));
+                                    } else if key == b"class" {
+                                        let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                        if val.contains("pagebreak") || val.contains("page-break") {
+                                            p_tokens.push("page_break_before".to_string());
+                                        }
+                                        if val.contains("small-caps") || val.contains("smallcaps") {
+                                            p_tokens.push("small_caps".to_string());
+                                        }
                                     } else if key == b"align" {
                                         let val = String::from_utf8_lossy(&attr.value).to_lowercase();
                                         if val == "center" {
@@ -781,6 +806,10 @@ impl EpubReader {
                                             p_tokens.push("align_justify".to_string());
                                         }
                                     }
+                                }
+                                if pending_page_break {
+                                    p_tokens.push("page_break_before".to_string());
+                                    pending_page_break = false;
                                 }
                                 p_style = if p_tokens.is_empty() { None } else { Some(p_tokens.join(" ")) };
                                 current_span_text.clear();
@@ -814,6 +843,27 @@ impl EpubReader {
                                 }
                                 in_heading = true;
                                 heading_level = local_bytes[1].saturating_sub(b'0');
+                                let mut h_tokens = Vec::new();
+                                for attr in e.attributes().flatten() {
+                                    let key = attr.key.as_ref();
+                                    if key == b"style" {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        h_tokens.extend(Self::sanitize_css_style(&val));
+                                    } else if key == b"class" {
+                                        let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                        if val.contains("pagebreak") || val.contains("page-break") {
+                                            h_tokens.push("page_break_before".to_string());
+                                        }
+                                        if val.contains("small-caps") || val.contains("smallcaps") {
+                                            h_tokens.push("small_caps".to_string());
+                                        }
+                                    }
+                                }
+                                if pending_page_break {
+                                    h_tokens.push("page_break_before".to_string());
+                                    pending_page_break = false;
+                                }
+                                heading_style = if h_tokens.is_empty() { None } else { Some(h_tokens.join(" ")) };
                                 current_span_text.clear();
                                 current_spans.clear();
                             }
@@ -855,15 +905,23 @@ impl EpubReader {
                                     }
                                 }
                             }
-                            b"span" => {
+                            b"span" | b"abbr" | b"acronym" => {
                                 flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 let mut span_tokens = Vec::new();
+                                if local_bytes == b"abbr" || local_bytes == b"acronym" {
+                                    span_tokens.push("small_caps".to_string());
+                                }
                                 for attr in e.attributes().flatten() {
                                     if attr.key.as_ref() == b"style" {
                                         let val = String::from_utf8_lossy(&attr.value);
                                         span_tokens.extend(Self::sanitize_css_style(&val));
                                     } else if attr.key.as_ref() == b"class" {
-                                        span_tokens.push(String::from_utf8_lossy(&attr.value).to_string());
+                                        let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                        if val.contains("small-caps") || val.contains("smallcaps") {
+                                            span_tokens.push("small_caps".to_string());
+                                        } else {
+                                            span_tokens.push(val);
+                                        }
                                     }
                                 }
                                 current_style = if span_tokens.is_empty() { None } else { Some(span_tokens.join(" ")) };
@@ -924,8 +982,27 @@ impl EpubReader {
                     let local_bytes = local.as_ref();
                     if ignore_depth == 0 {
                         match local_bytes {
-                            b"hr" => {
-                                blocks.push(Block::HorizontalRule);
+                            b"hr" | b"div" | b"section" => {
+                                let mut is_page_break = false;
+                                for attr in e.attributes().flatten() {
+                                    if attr.key.as_ref() == b"class" {
+                                        let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                        if val.contains("pagebreak") || val.contains("page-break") {
+                                            is_page_break = true;
+                                        }
+                                    } else if attr.key.as_ref() == b"style" {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        let tokens = Self::sanitize_css_style(&val);
+                                        if tokens.contains(&"page_break_before".to_string()) || tokens.contains(&"page_break_after".to_string()) {
+                                            is_page_break = true;
+                                        }
+                                    }
+                                }
+                                if is_page_break {
+                                    pending_page_break = true;
+                                } else if local_bytes == b"hr" {
+                                    blocks.push(Block::HorizontalRule);
+                                }
                             }
                             b"br" => {
                                 current_span_text.push('\n');
@@ -1008,6 +1085,7 @@ impl EpubReader {
                                             id: format!("h_{}", blocks.len() + 1),
                                             level: heading_level,
                                             spans: std::mem::take(&mut current_spans),
+                                            style: heading_style.take(),
                                         };
                                         if in_li {
                                             current_list_item_blocks.push(h_block);
@@ -1051,7 +1129,7 @@ impl EpubReader {
                                 current_href = None;
                                 current_anchor = None;
                             }
-                            b"span" => {
+                            b"span" | b"abbr" | b"acronym" => {
                                 flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 current_style = None;
                             }
@@ -1124,6 +1202,7 @@ impl EpubReader {
                                 id: format!("h_{}", blocks.len() + 1),
                                 level: heading_level,
                                 spans: std::mem::take(&mut current_spans),
+                                style: heading_style.take(),
                             };
                             if in_li {
                                 current_list_item_blocks.push(h_block);
@@ -1236,6 +1315,16 @@ impl EpubReader {
                     "page-break-before" | "break-before" => {
                         if v.contains("page") || v.contains("always") {
                             tokens.push("page_break_before".to_string());
+                        }
+                    }
+                    "page-break-after" | "break-after" => {
+                        if v.contains("page") || v.contains("always") {
+                            tokens.push("page_break_after".to_string());
+                        }
+                    }
+                    "font-variant" | "font-variant-caps" => {
+                        if v.contains("small-caps") {
+                            tokens.push("small_caps".to_string());
                         }
                     }
                     _ => {}
@@ -1524,6 +1613,65 @@ mod tests {
             assert!(has_code, "Expected code span");
         } else {
             panic!("Expected paragraph for block 2");
+        }
+    }
+
+    #[test]
+    fn test_parse_xhtml_small_caps_and_page_break() {
+        let manifest = HashMap::new();
+        let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+    <p>We work with <abbr>NASA</abbr> and <span style="font-variant: small-caps">ESA</span> or <span class="small-caps">JAXA</span>.</p>
+    <div class="pagebreak"/>
+    <h2 style="page-break-before: always; font-variant: small-caps">Chapter Two</h2>
+    <p style="page-break-after: always">End of section text.</p>
+    <hr class="page-break" />
+    <p>Start of next section.</p>
+</body>
+</html>"#;
+        let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
+        assert_eq!(blocks.len(), 4, "Expected 4 blocks (p, h2, p, p) with hr/div page breaks absorbed into pending");
+
+        // 1. Check small-caps spans in first paragraph
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            let abbr_span = spans.iter().find(|s| s.text == "NASA").expect("NASA span");
+            assert_eq!(abbr_span.style.as_deref(), Some("small_caps"));
+            let esa_span = spans.iter().find(|s| s.text == "ESA").expect("ESA span");
+            assert_eq!(esa_span.style.as_deref(), Some("small_caps"));
+            let jaxa_span = spans.iter().find(|s| s.text == "JAXA").expect("JAXA span");
+            assert_eq!(jaxa_span.style.as_deref(), Some("small_caps"));
+        } else {
+            panic!("Expected paragraph 0");
+        }
+
+        // 2. Check heading 2 with page-break-before and small-caps
+        if let Block::Heading { level, style, .. } = &blocks[1] {
+            assert_eq!(*level, 2);
+            let s = style.as_ref().expect("Heading style");
+            assert!(s.contains("page_break_before"), "Heading must have page_break_before");
+            assert!(s.contains("small_caps"), "Heading must have small_caps");
+            assert!(blocks[1].has_page_break_before());
+        } else {
+            panic!("Expected heading 1");
+        }
+
+        // 3. Check paragraph with page-break-after
+        if let Block::Paragraph { style, .. } = &blocks[2] {
+            let s = style.as_ref().expect("Paragraph style");
+            assert!(s.contains("page_break_after"), "Paragraph must have page_break_after");
+            assert!(blocks[2].has_page_break_after());
+        } else {
+            panic!("Expected paragraph 2");
+        }
+
+        // 4. Check paragraph following <hr class="page-break"/>
+        if let Block::Paragraph { style, .. } = &blocks[3] {
+            let s = style.as_ref().expect("Paragraph style");
+            assert!(s.contains("page_break_before"), "Paragraph must inherit pending page_break_before");
+            assert!(blocks[3].has_page_break_before());
+        } else {
+            panic!("Expected paragraph 3");
         }
     }
 }
