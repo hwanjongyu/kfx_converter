@@ -15,20 +15,22 @@ This document outlines the internal architecture, design patterns, and subsystem
 
 ## 2. Pipeline Subsystems
 
-The conversion pipeline consists of six primary subsystems:
+The conversion pipeline is unified under `ConversionPipeline` (`src/pipeline.rs`) and consists of six primary subsystems:
 
 ```mermaid
-flowchart LR
-    A[EPUB Archive] --> B[EpubReader]
-    B --> C[BookIR]
-    C --> D[Section Fragmenter]
-    D --> E[KfxPackager]
-    E --> F[KfxContainer]
-    F --> G[.kfx Output File]
-    C -.-> H[WordWiseBuilder]
-    C -.-> I[CoverOptimizer]
-    H -.-> J[.kll Sidecar]
-    I -.-> K[Cover Thumbnail]
+flowchart TD
+    subgraph Facade["ConversionPipeline (src/pipeline.rs)"]
+        A[EPUB Archive] --> B[EpubReader]
+        B --> C[BookIR]
+        C --> D[Section Fragmenter]
+        D --> E[KfxPackager]
+        E --> F[KfxContainer]
+        F --> G[.kfx Output File]
+        C -.-> H[WordWiseBuilder]
+        C -.-> I[CoverOptimizer]
+        H -.-> J[.kll Sidecar]
+        I -.-> K[Cover Thumbnail]
+    end
     G --> L[KindleSync]
     J --> L
     K --> L
@@ -42,7 +44,7 @@ flowchart LR
 
 ### 2.2 Intermediate Representation & Section Fragmentation (`src/ir.rs`)
 - **`BookIR` Structure**: Standardizes metadata, ordered sections, plain text spans, and raw asset buffers.
-- **Hybrid Chapter Fragmentation**: Standard chapters are maintained 1:1. Oversized chapters or appendices exceeding thresholds (7,500 characters or 25 blocks) are automatically partitioned into sequential sub-sections (`sec_p1`, `sec_p2`). This guarantees the Kindle reader engine (`KPPMainApp` / Hermes JS) never exceeds its memory threshold.
+- **Hybrid Chapter Fragmentation**: Standard chapters are maintained 1:1. Oversized chapters or appendices exceeding calibrated thresholds (3,500 characters or 15 blocks) are automatically partitioned into sequential sub-sections (`sec_p1`, `sec_p2`). TOC navigation links and page lists are dynamically remapped to target fragmented parts (`_p1` or exact anchor-holding sub-fragments). This guarantees low-RAM Kindle devices (such as 512MB Paperwhite models) never crash the reader engine (`KPPMainApp` / Hermes JS) or trip the 240MB `pmond` memory threshold.
 
 ### 2.3 Binary Amazon Ion Serializer (`src/ion.rs`)
 - **Ion 1.0 Specification**: Generates valid binary Ion streams beginning with the Binary Version Marker (`0xE0 0x01 0x00 0xEA`).

@@ -14,7 +14,7 @@ High-performance native EPUB to Amazon KFX (Yellowjacket / Enhanced Typesetting)
 - **Pure-Rust Amazon Ion Serializer**: Custom implementation of binary Amazon Ion 1.0 (Binary Version Marker `0xE0 0x01 0x00 0xEA`, 7-bit `VarUInt`/`VarInt`, and type descriptors).
 - **Yellowjacket (YJ) Container Packaging**: Complete adherence to the 18-byte `CONT` header, `bcIndexTab` chunk indexing, and `ENTY` envelope wrapping.
 - **Full Locator & Position Mapping**: Emits Amazon Kindle internal locator suites including `$609` (section position ID map), `$264` (position map), `$265` (position ID map), `$550` (350 chars/location map), and `$621` (`yj.location_pid_map`).
-- **Kindle OS Crash Mitigation (Chapter Fragmentation)**: Automatically splits oversized sections exceeding thresholds (7,500 characters or 25 blocks) to prevent reader engines from hitting Kindle's 240MB `pmond` memory ceiling.
+- **Kindle OS Crash Mitigation (Chapter Fragmentation)**: Automatically splits oversized sections exceeding calibrated thresholds (3,500 characters or 15 blocks) with full TOC/Page-List remapping to prevent reader engines from hitting Kindle's 240MB `pmond` memory ceiling.
 - **Reading Enhancements**:
   - **Word Wise Sidecars (`.kll`)**: Automatically builds Amazon LanguageLayer SQLite databases with a curated built-in CEFR B2–C2 academic lemma dictionary.
   - **Cover Thumbnails**: Generates baseline JPEG thumbnails matching Kindle display requirements.

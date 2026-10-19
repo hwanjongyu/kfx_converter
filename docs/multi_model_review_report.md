@@ -84,15 +84,15 @@ However, cross-perspective analysis by Gemini Pro, Claude Sonnet, and Claude Opu
 
 ### 💡 Minor Severity (P2 — Performance, Flash Endurance & Maintainability)
 
-- [ ] **Zero-Allocation Stack Buffer for `int_to_big_endian` & Ion Heap Churn ([`src/ion.rs#L260-L302`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/ion.rs#L260-L302))**:
+- [x] **Zero-Allocation Stack Buffer for `int_to_big_endian` & Ion Heap Churn ([`src/ion.rs#L260-L302`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/ion.rs#L260-L302))**:
   - Return `([u8; 8], usize)` stack array instead of allocating a `Vec<u8>` for every integer and symbol ID serialization.
-- [ ] **eMMC NAND Flash Wear Mitigation in Word Wise SQLite ([`src/enhancements/word_wise.rs#L233-L237`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/enhancements/word_wise.rs#L233-L237))**:
+- [x] **eMMC NAND Flash Wear Mitigation in Word Wise SQLite ([`src/enhancements/word_wise.rs#L233-L237`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/enhancements/word_wise.rs#L233-L237))**:
   - Use `PRAGMA journal_mode = OFF;` and `PRAGMA synchronous = OFF;` for newly built sidecar databases to eliminate FAT directory write amplification.
-- [ ] **Cross-Platform Portability & Mount Discovery Gaps ([`src/sync.rs#L74-L188`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L74-L188))**:
+- [x] **Cross-Platform Portability & Mount Discovery Gaps ([`src/sync.rs#L74-L188`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L74-L188))**:
   - Gate `libc::statvfs` and `libc::getuid()` behind `#[cfg(unix)]`. Add macOS `/Volumes/Kindle` candidate and Windows drive letter scanning.
-- [ ] **Documentation Synchronization**:
+- [x] **Documentation Synchronization**:
   - Update `docs/ARCHITECTURE.md` and `README.md` to document the calibrated 3,500 character / 15 block section fragmentation thresholds for 512MB Kindle OS devices.
-- [ ] **Replace Linear Symbol Table Lookup with Static Hashes ([`src/symbols.rs#L886-L891`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/symbols.rs#L886-L891))**:
+- [x] **Replace Linear Symbol Table Lookup with Static Hashes ([`src/symbols.rs#L886-L891`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/symbols.rs#L886-L891))**:
   - Predefine constants for hot symbols or generate a compile-time PHF map to eliminate $O(N)$ linear scans over the 852-item table.
 
 ---

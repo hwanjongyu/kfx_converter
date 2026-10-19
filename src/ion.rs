@@ -18,23 +18,34 @@ pub const ENTY_HEADER_ION: [u8; 11] = [0xe0, 0x01, 0x00, 0xea, 0xd6, 0x03, 0x9a,
 /// Fixed total header length for ENTY wrapper (10 bytes header + 11 bytes Ion = 21 bytes)
 pub const ENTY_HEADER_LEN: u32 = 10 + ENTY_HEADER_ION.len() as u32;
 
-/// Encodes an unsigned integer into Ion 7-bit variable-length unsigned integer (VarUInt).
-pub fn encode_varuint(mut val: u64) -> Vec<u8> {
+/// Encodes an unsigned integer into Ion 7-bit variable-length unsigned integer (VarUInt)
+/// using a zero-allocation fixed stack array `([u8; 10], usize)`.
+#[inline]
+pub fn encode_varuint_buf(mut val: u64) -> ([u8; 10], usize) {
     if val == 0 {
-        return vec![0x80];
+        return ([0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1);
     }
 
-    let mut buf = Vec::with_capacity(10);
+    let mut tmp = [0u8; 10];
+    let mut count = 0;
     while val > 0 {
-        buf.push((val & 0x7F) as u8);
+        tmp[count] = (val & 0x7F) as u8;
         val >>= 7;
+        count += 1;
     }
 
-    buf.reverse();
-    if let Some(last) = buf.last_mut() {
-        *last |= 0x80; // Terminal byte has high bit set
+    let mut out = [0u8; 10];
+    for i in 0..count {
+        out[i] = tmp[count - 1 - i];
     }
-    buf
+    out[count - 1] |= 0x80; // Terminal byte has high bit set
+    (out, count)
+}
+
+/// Encodes an unsigned integer into Ion 7-bit variable-length unsigned integer (VarUInt).
+pub fn encode_varuint(val: u64) -> Vec<u8> {
+    let (buf, len) = encode_varuint_buf(val);
+    buf[..len].to_vec()
 }
 
 /// Encodes a signed integer into Ion variable-length signed integer (VarInt).
@@ -231,13 +242,13 @@ impl IonWriter {
             self.buf.push(0x20);
             return;
         }
-        let bytes = Self::int_to_big_endian(val);
-        self.write_typed_bytes(0x20, &bytes);
+        let (bytes, len) = Self::int_to_big_endian_buf(val);
+        self.write_typed_bytes(0x20, &bytes[..len]);
     }
 
     fn write_negint(&mut self, magnitude: u64) {
-        let bytes = Self::int_to_big_endian(magnitude);
-        self.write_typed_bytes(0x30, &bytes);
+        let (bytes, len) = Self::int_to_big_endian_buf(magnitude);
+        self.write_typed_bytes(0x30, &bytes[..len]);
     }
 
     fn write_string(&mut self, text: &str) {
@@ -253,8 +264,8 @@ impl IonWriter {
             self.buf.push(0x70);
             return;
         }
-        let bytes = Self::int_to_big_endian(sid as u64);
-        self.write_typed_bytes(0x70, &bytes);
+        let (bytes, len) = Self::int_to_big_endian_buf(sid as u64);
+        self.write_typed_bytes(0x70, &bytes[..len]);
     }
 
     fn write_list(&mut self, items: &[IonValue]) {
@@ -269,7 +280,8 @@ impl IonWriter {
         let mut inner = Vec::new();
         for (sid, val) in fields {
             // Field SID as VarUInt
-            inner.extend_from_slice(&encode_varuint(*sid as u64));
+            let (sid_bytes, sid_len) = encode_varuint_buf(*sid as u64);
+            inner.extend_from_slice(&sid_bytes[..sid_len]);
             // Field Value
             let mut val_writer = IonWriter::new();
             val_writer.write_value(val);
@@ -285,19 +297,30 @@ impl IonWriter {
             self.buf.extend_from_slice(payload);
         } else {
             self.buf.push(type_nibble | 0x0E);
-            self.buf.extend_from_slice(&encode_varuint(length as u64));
+            let (len_bytes, len_count) = encode_varuint_buf(length as u64);
+            self.buf.extend_from_slice(&len_bytes[..len_count]);
             self.buf.extend_from_slice(payload);
         }
     }
 
-    fn int_to_big_endian(val: u64) -> Vec<u8> {
+    /// Encodes a u64 into a zero-allocation fixed stack buffer `([u8; 8], usize)` in big-endian order.
+    #[inline]
+    pub fn int_to_big_endian_buf(val: u64) -> ([u8; 8], usize) {
         let be_bytes = val.to_be_bytes();
         let leading_zeros = be_bytes.iter().take_while(|&&b| b == 0).count();
         if leading_zeros == 8 {
-            vec![0]
+            ([0; 8], 1)
         } else {
-            be_bytes[leading_zeros..].to_vec()
+            let mut out = [0u8; 8];
+            let len = 8 - leading_zeros;
+            out[..len].copy_from_slice(&be_bytes[leading_zeros..]);
+            (out, len)
         }
+    }
+
+    pub fn int_to_big_endian(val: u64) -> Vec<u8> {
+        let (buf, len) = Self::int_to_big_endian_buf(val);
+        buf[..len].to_vec()
     }
 }
 

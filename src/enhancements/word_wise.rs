@@ -244,11 +244,12 @@ impl WordWiseBuilder {
 
     /// Populates tables and metadata into a SQLite connection.
     pub fn populate_connection(&self, conn: &mut Connection) -> SqlResult<()> {
-        // Optimize PRAGMAs for Kindle OS flash memory & cache
+        // Optimize PRAGMAs for Kindle OS eMMC flash memory & write amplification mitigation
         conn.execute_batch(
             "PRAGMA page_size = 4096;
-             PRAGMA journal_mode = DELETE;
-             PRAGMA synchronous = NORMAL;
+             PRAGMA journal_mode = OFF;
+             PRAGMA synchronous = OFF;
+             PRAGMA temp_store = MEMORY;
 
              CREATE TABLE metadata (
                  key TEXT,

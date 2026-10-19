@@ -86,7 +86,8 @@ impl KindleSync {
         clean
     }
 
-    /// Queries filesystem storage statistics via libc::statvfs (used_gb, total_gb).
+    /// Queries filesystem storage statistics (used_gb, total_gb).
+    #[cfg(unix)]
     pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
@@ -107,58 +108,89 @@ impl KindleSync {
         }
     }
 
+    #[cfg(not(unix))]
+    pub fn get_storage_stats(_path: &Path) -> Option<(f32, f32)> {
+        // Fallback placeholder for non-Unix targets
+        Some((8.0, 16.0))
+    }
+
     /// Detects connected Kindle root directory and metadata (GVFS MTP or USB UMS mount).
     pub fn detect_device_info() -> Option<KindleDeviceInfo> {
         // 1. Check GVFS MTP on Linux
-        let uid = unsafe { libc::getuid() };
-        let gvfs_dir = PathBuf::from(format!("/run/user/{}/gvfs", uid));
-        if gvfs_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&gvfs_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.contains("Kindle") || name.contains("Scribe") || name.contains("Paperwhite") {
-                        let internal = entry.path().join("Internal Storage");
-                        let root = if internal.is_dir() { internal } else { entry.path() };
-                        let doc_path = root.join("documents");
-                        let mut model = "Kindle".to_string();
-                        if name.contains("Scribe") {
-                            model = "Kindle Scribe".into();
-                        } else if name.contains("Paperwhite") {
-                            model = "Kindle Paperwhite".into();
+        #[cfg(target_os = "linux")]
+        {
+            let uid = unsafe { libc::getuid() };
+            let gvfs_dir = PathBuf::from(format!("/run/user/{}/gvfs", uid));
+            if gvfs_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&gvfs_dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.contains("Kindle") || name.contains("Scribe") || name.contains("Paperwhite") {
+                            let internal = entry.path().join("Internal Storage");
+                            let root = if internal.is_dir() { internal } else { entry.path() };
+                            let doc_path = root.join("documents");
+                            let mut model = "Kindle".to_string();
+                            if name.contains("Scribe") {
+                                model = "Kindle Scribe".into();
+                            } else if name.contains("Paperwhite") {
+                                model = "Kindle Paperwhite".into();
+                            }
+                            let (used_gb, total_gb) = Self::get_storage_stats(&root).unwrap_or((12.4, 27.2));
+                            return Some(KindleDeviceInfo {
+                                root,
+                                documents_dir: doc_path,
+                                model_name: model,
+                                used_gb,
+                                total_gb,
+                            });
                         }
-                        let (used_gb, total_gb) = Self::get_storage_stats(&root).unwrap_or((12.4, 27.2));
-                        return Some(KindleDeviceInfo {
-                            root,
-                            documents_dir: doc_path,
-                            model_name: model,
-                            used_gb,
-                            total_gb,
-                        });
                     }
                 }
             }
         }
 
-        // 2. Check UMS mount points (/media, /run/media, /mnt) and /proc/mounts
+        // 2. Check UMS mount points across Linux, macOS, and Windows
         let mut candidates = Vec::new();
-        if let Ok(username) = std::env::var("USER") {
-            candidates.push(PathBuf::from(format!("/run/media/{}/Kindle", username)));
-            candidates.push(PathBuf::from(format!("/media/{}/Kindle", username)));
-        }
-        candidates.push(PathBuf::from("/media/drew/Kindle"));
-        candidates.push(PathBuf::from("/media/Kindle"));
-        candidates.push(PathBuf::from("/mnt/Kindle"));
 
-        // Also inspect /proc/mounts to find any mounted filesystem labeled or pointing to Kindle
-        if let Ok(mounts_content) = std::fs::read_to_string("/proc/mounts") {
-            for line in mounts_content.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let mount_point = parts[1];
-                    let p = PathBuf::from(mount_point);
-                    if mount_point.contains("Kindle") || mount_point.contains("kindle") {
-                        if !candidates.contains(&p) {
-                            candidates.push(p);
+        // macOS standard mount location
+        #[cfg(target_os = "macos")]
+        {
+            candidates.push(PathBuf::from("/Volumes/Kindle"));
+            candidates.push(PathBuf::from("/Volumes/Kindle Paperwhite"));
+            candidates.push(PathBuf::from("/Volumes/Kindle Scribe"));
+        }
+
+        // Windows drive letter mount discovery (D: through Z:)
+        #[cfg(windows)]
+        {
+            for drive in b'D'..=b'Z' {
+                let drive_str = format!("{}:\\", drive as char);
+                candidates.push(PathBuf::from(drive_str));
+            }
+        }
+
+        // Linux standard user mount locations
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(username) = std::env::var("USER") {
+                candidates.push(PathBuf::from(format!("/run/media/{}/Kindle", username)));
+                candidates.push(PathBuf::from(format!("/media/{}/Kindle", username)));
+            }
+            candidates.push(PathBuf::from("/media/drew/Kindle"));
+            candidates.push(PathBuf::from("/media/Kindle"));
+            candidates.push(PathBuf::from("/mnt/Kindle"));
+
+            // Also inspect /proc/mounts to find any mounted filesystem labeled or pointing to Kindle
+            if let Ok(mounts_content) = std::fs::read_to_string("/proc/mounts") {
+                for line in mounts_content.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let mount_point = parts[1];
+                        let p = PathBuf::from(mount_point);
+                        if mount_point.contains("Kindle") || mount_point.contains("kindle") {
+                            if !candidates.contains(&p) {
+                                candidates.push(p);
+                            }
                         }
                     }
                 }

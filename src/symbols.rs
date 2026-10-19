@@ -882,12 +882,21 @@ pub fn symbol_name(id: u64) -> Option<&'static str> {
     KFX_SYMBOL_TABLE.get(usize::try_from(id).ok()?).copied()
 }
 
-/// Looks up symbol ID from symbol name.
+/// Looks up symbol ID from symbol name in O(1) time via static hash index.
 pub fn symbol_id(name: &str) -> Option<u32> {
-    KFX_SYMBOL_TABLE
-        .iter()
-        .position(|&s| s == name)
-        .map(|idx| idx as u32)
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    static SYMBOL_MAP: OnceLock<HashMap<&'static str, u32>> = OnceLock::new();
+    let map = SYMBOL_MAP.get_or_init(|| {
+        let mut m = HashMap::with_capacity(KFX_SYMBOL_TABLE.len());
+        for (idx, &sym) in KFX_SYMBOL_TABLE.iter().enumerate() {
+            m.insert(sym, idx as u32);
+        }
+        m
+    });
+
+    map.get(name).copied()
 }
 
 /// KFX symbol enum with values matching KFX_SYMBOL_TABLE indices.
@@ -1749,4 +1758,22 @@ pub enum KfxSymbol {
     EndX = 849,
     EndY = 850,
     VertexList = 851,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_symbol_id_lookups() {
+        assert_eq!(symbol_id("kProperty_Invalid"), Some(0));
+        assert_eq!(symbol_id("$ion"), Some(1));
+        assert_eq!(symbol_id("name"), Some(4));
+        assert_eq!(symbol_id("max_id"), Some(8));
+        assert_eq!(symbol_id("content_list"), Some(146));
+        assert_eq!(symbol_id("position_id_map"), Some(265));
+        assert_eq!(symbol_id("book_navigation"), Some(389));
+        assert_eq!(symbol_id("vertex_list"), Some(851));
+        assert_eq!(symbol_id("non_existent_symbol"), None);
+    }
 }
