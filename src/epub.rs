@@ -17,6 +17,7 @@ use crate::ir::{Block, BookIR, BookMetadata, ResourceAsset, Section, TextSpan, T
 pub const MAX_EPUB_FILES: usize = 10_000;
 pub const MAX_EPUB_UNCOMPRESSED_TOTAL: u64 = 1024 * 1024 * 1024; // 1 GB
 pub const MAX_EPUB_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
+pub const MAX_METADATA_BYTES: u64 = 10 * 1024 * 1024; // 10 MB limit for XML/NCX/NAV metadata
 pub const MAX_COMPRESSION_RATIO: f64 = 100.0;
 
 #[derive(Error, Debug)]
@@ -105,7 +106,7 @@ impl EpubReader {
                 .by_name(&opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
             let mut s = String::new();
-            entry.read_to_string(&mut s)?;
+            (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s)?;
             s
         };
 
@@ -208,7 +209,7 @@ impl EpubReader {
             .map_err(|_| EpubError::Invalid("META-INF/container.xml not found".to_string()))?;
 
         let mut content = String::new();
-        entry.read_to_string(&mut content)?;
+        (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut content)?;
 
         let mut xml_reader = XmlReader::from_str(&content);
         let mut buf = Vec::new();
@@ -358,7 +359,7 @@ impl EpubReader {
                 let full_path = Self::resolve_zip_path(opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut s = String::new();
-                    if entry.read_to_string(&mut s).is_ok() {
+                    if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
                         let toc = Self::parse_nav_xhtml(&s, href_to_section);
                         if !toc.is_empty() {
                             return toc;
@@ -377,7 +378,7 @@ impl EpubReader {
                 let full_path = Self::resolve_zip_path(opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut s = String::new();
-                    if entry.read_to_string(&mut s).is_ok() {
+                    if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
                         let toc = Self::parse_ncx(&s, href_to_section);
                         if !toc.is_empty() {
                             return toc;
@@ -650,7 +651,40 @@ impl EpubReader {
                         // ignore inside script/style
                     } else {
                         match local_bytes {
+                            b"div" | b"section" | b"article" | b"main" | b"aside" => {
+                                if in_p {
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    if !current_spans.is_empty() {
+                                        let p_block = Block::Paragraph {
+                                            id: format!("p_{}", blocks.len() + 1),
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: p_style.take(),
+                                        };
+                                        if in_li {
+                                            current_list_item_blocks.push(p_block);
+                                        } else {
+                                            blocks.push(p_block);
+                                        }
+                                    }
+                                    in_p = false;
+                                }
+                            }
                             b"p" | b"blockquote" => {
+                                if in_p {
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    if !current_spans.is_empty() {
+                                        let p_block = Block::Paragraph {
+                                            id: format!("p_{}", blocks.len() + 1),
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: p_style.take(),
+                                        };
+                                        if in_li {
+                                            current_list_item_blocks.push(p_block);
+                                        } else {
+                                            blocks.push(p_block);
+                                        }
+                                    }
+                                }
                                 in_p = true;
                                 p_style = if local_bytes == b"blockquote" {
                                     Some("blockquote".to_string())
@@ -661,6 +695,22 @@ impl EpubReader {
                                 current_spans.clear();
                             }
                             b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
+                                if in_p {
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                    if !current_spans.is_empty() {
+                                        let p_block = Block::Paragraph {
+                                            id: format!("p_{}", blocks.len() + 1),
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: p_style.take(),
+                                        };
+                                        if in_li {
+                                            current_list_item_blocks.push(p_block);
+                                        } else {
+                                            blocks.push(p_block);
+                                        }
+                                    }
+                                    in_p = false;
+                                }
                                 in_heading = true;
                                 heading_level = local_bytes[1].saturating_sub(b'0');
                                 current_span_text.clear();
@@ -778,6 +828,11 @@ impl EpubReader {
                             current_cell.push_str(&text);
                         } else if in_p || in_heading || in_li {
                             current_span_text.push_str(&text);
+                        } else if !text.trim().is_empty() {
+                            // Implicit paragraph for text directly in <div>, <section>, <body>, etc.
+                            in_p = true;
+                            p_style = None;
+                            current_span_text.push_str(&text);
                         }
                     }
                 }
@@ -789,7 +844,7 @@ impl EpubReader {
                         ignore_depth -= 1;
                     } else if ignore_depth == 0 {
                         match local_bytes {
-                            b"p" | b"blockquote" => {
+                            b"p" | b"blockquote" | b"div" | b"section" | b"article" | b"main" | b"aside" => {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
@@ -897,7 +952,38 @@ impl EpubReader {
                         }
                     }
                 }
-                Ok(Event::Eof) => break,
+                Ok(Event::Eof) => {
+                    if in_p {
+                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                        if !current_spans.is_empty() {
+                            let p_block = Block::Paragraph {
+                                id: format!("p_{}", blocks.len() + 1),
+                                spans: std::mem::take(&mut current_spans),
+                                style: p_style.take(),
+                            };
+                            if in_li {
+                                current_list_item_blocks.push(p_block);
+                            } else {
+                                blocks.push(p_block);
+                            }
+                        }
+                    } else if in_heading {
+                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                        if !current_spans.is_empty() {
+                            let h_block = Block::Heading {
+                                id: format!("h_{}", blocks.len() + 1),
+                                level: heading_level,
+                                spans: std::mem::take(&mut current_spans),
+                            };
+                            if in_li {
+                                current_list_item_blocks.push(h_block);
+                            } else {
+                                blocks.push(h_block);
+                            }
+                        }
+                    }
+                    break;
+                }
                 _ => {}
             }
             buf.clear();
@@ -1077,6 +1163,34 @@ mod tests {
         assert_eq!(nav_toc[0].target_section, "section_1");
         assert_eq!(nav_toc[1].title, "2. Next");
         assert_eq!(nav_toc[1].target_section, "section_2");
+    }
+
+    #[test]
+    fn test_parse_xhtml_div_section_article_blocks() {
+        let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+        <!DOCTYPE html>
+        <html xmlns="http://www.w3.org/1999/xhtml">
+            <body>
+                <div class="intro">Text inside div without p tags</div>
+                <section>
+                    Text inside section
+                    <p>Paragraph inside section</p>
+                    Text after paragraph in section
+                </section>
+                <article>Text inside article</article>
+                Bare text directly inside body without enclosing tags
+            </body>
+        </html>"#;
+
+        let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &HashMap::new());
+        assert!(!blocks.is_empty());
+        let all_text: Vec<String> = blocks.iter().map(|b| b.plain_text()).collect();
+        assert!(all_text.iter().any(|t| t.contains("Text inside div without p tags")));
+        assert!(all_text.iter().any(|t| t.contains("Text inside section")));
+        assert!(all_text.iter().any(|t| t.contains("Paragraph inside section")));
+        assert!(all_text.iter().any(|t| t.contains("Text after paragraph in section")));
+        assert!(all_text.iter().any(|t| t.contains("Text inside article")));
+        assert!(all_text.iter().any(|t| t.contains("Bare text directly inside body")));
     }
 }
 

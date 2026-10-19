@@ -9,6 +9,7 @@ pub mod epub;
 pub mod packager;
 pub mod enhancements;
 pub mod sync;
+pub mod pipeline;
 
 pub use container::{KfxContainer, ContainerError, ContainerHeader, KfxEntity, ChunkEntry};
 pub use symbols::{symbol_name, symbol_id, KfxSymbol, KFX_SYMBOL_TABLE};
@@ -18,6 +19,7 @@ pub use epub::{EpubReader, EpubError};
 pub use packager::{KfxPackager, PackagerError};
 pub use enhancements::{CoverOptimizer, CoverError, WordWiseBuilder, WordWiseGloss};
 pub use sync::{KindleSync, SyncError};
+pub use pipeline::{ConversionPipeline, ConversionOptions, ConversionReport, PipelineError};
 
 #[cfg(test)]
 mod tests {

@@ -93,31 +93,40 @@ impl KindleStudio {
 
         self.device = detect_kindle_device();
 
-        match super::state::convert_epub_file(&path.to_path_buf(), &self.settings, &self.device) {
-            Ok(res) => {
-                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
+        let path_buf = path.to_path_buf();
+        let settings = self.settings.clone();
+        let device = self.device.clone();
+
+        cx.spawn(async move |this, cx| {
+            let task = cx.background_executor().spawn(async move {
+                super::state::convert_epub_file(&path_buf, &settings, &device)
+            });
+            let res = task.await;
+
+            this.update(cx, |this, cx| {
+                if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
                     t.progress = 1.0;
-                    if res.synced_to_device {
-                        t.status = TaskStatus::Completed;
-                    } else if let Some(err) = res.sync_error {
-                        t.status = TaskStatus::SyncFailed(err);
-                    } else {
-                        t.status = TaskStatus::ConvertedLocalOnly;
+                    match res {
+                        Ok(res) => {
+                            if res.synced_to_device {
+                                t.status = TaskStatus::Completed;
+                            } else if let Some(err) = res.sync_error {
+                                t.status = TaskStatus::SyncFailed(err);
+                            } else {
+                                t.status = TaskStatus::ConvertedLocalOnly;
+                            }
+                            if res.synced_to_device {
+                                this.files = super::state::load_device_files(&this.device);
+                            }
+                        }
+                        Err(err) => {
+                            t.status = TaskStatus::Failed(err);
+                        }
                     }
                 }
-
-                // If file was truly synced to the device, reload the real Kindle files list
-                if res.synced_to_device {
-                    self.files = super::state::load_device_files(&self.device);
-                }
-            }
-            Err(err) => {
-                if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id) {
-                    t.status = TaskStatus::Failed(err);
-                }
-            }
-        }
-        cx.notify();
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
 

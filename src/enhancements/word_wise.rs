@@ -172,9 +172,21 @@ impl WordWiseBuilder {
         let dict = super::dictionary::LemmaDictionary::new();
         let initial_count = self.glosses.len();
 
-        let mut abs_pos = 0usize;
+        let mut temp_book = crate::ir::BookIR {
+            sections: book.sections.clone(),
+            ..Default::default()
+        };
+        temp_book.fragment_large_sections(
+            crate::ir::DEFAULT_MAX_SECTION_CHARS,
+            crate::ir::DEFAULT_MAX_SECTION_BLOCKS,
+        );
 
-        for section in &book.sections {
+        let mut pid = 0usize;
+
+        for section in &temp_book.sections {
+            // Section root element occupies 1 PID position in Yellowjacket position_id_map ($265)
+            pid += 1;
+
             for block in &section.blocks {
                 let text = block.plain_text();
                 let mut word_char_start = None;
@@ -182,7 +194,10 @@ impl WordWiseBuilder {
                 let mut char_idx = 0usize;
 
                 for ch in text.chars() {
-                    if ch.is_alphabetic() {
+                    let is_word_char = ch.is_alphabetic()
+                        || ((ch == '\'' || ch == '’' || ch == '-') && word_char_start.is_some());
+
+                    if is_word_char {
                         if word_char_start.is_none() {
                             word_char_start = Some(char_idx);
                         }
@@ -190,7 +205,7 @@ impl WordWiseBuilder {
                     } else if let Some(start_c) = word_char_start.take() {
                         if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
                             self.add_gloss_paced(
-                                abs_pos + start_c,
+                                pid + start_c,
                                 None,
                                 difficulty,
                                 sense_id,
@@ -205,7 +220,7 @@ impl WordWiseBuilder {
                 if let Some(start_c) = word_char_start.take() {
                     if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
                         self.add_gloss_paced(
-                            abs_pos + start_c,
+                            pid + start_c,
                             None,
                             difficulty,
                             sense_id,
@@ -214,7 +229,7 @@ impl WordWiseBuilder {
                     }
                 }
 
-                abs_pos += char_idx + 1; // account for newline between blocks
+                pid += char_idx;
             }
         }
 
@@ -426,5 +441,48 @@ mod tests {
         let count = builder.generate_from_book(&ir);
         assert!(count >= 2, "Expected at least 2 glosses (abstruse, elucidate), got {}", count);
         assert_eq!(builder.gloss_count(), count);
+    }
+
+    #[test]
+    fn test_word_wise_apostrophe_and_hyphen_tokenization() {
+        use crate::ir::{Block, BookIR, BookMetadata, Section, TextSpan};
+
+        let ir = BookIR {
+            metadata: BookMetadata::default(),
+            sections: vec![Section {
+                id: "sec1".to_string(),
+                title: "Chapter 1".to_string(),
+                blocks: vec![
+                    Block::Paragraph {
+                        id: "p1".to_string(),
+                        spans: vec![TextSpan {
+                            text: "The author's abstruse's explanation did not elucidate the dilemma.".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        }],
+                        style: None,
+                    },
+                ],
+            }],
+            resources: std::collections::HashMap::new(),
+            toc: Vec::new(),
+            page_list: Vec::new(),
+        };
+
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
+            .with_pacing(WordWisePacingConfig {
+                min_difficulty: 3,
+                target_difficulty: 5,
+                min_distance: 1,
+                max_glosses_per_window: 10,
+                window_size: 500,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 100,
+            });
+
+        let count = builder.generate_from_book(&ir);
+        // "abstruse's" has 's stripped by dictionary and matches abstruse
+        assert!(count >= 2, "Expected at least 2 glosses, got {}", count);
     }
 }

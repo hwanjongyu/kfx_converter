@@ -108,100 +108,24 @@ pub fn convert_epub_file(
     settings: &ConversionSettings,
     device: &DeviceStatus,
 ) -> Result<ConversionResult, String> {
-    if !input_path.exists() {
-        return Err(format!("File not found: {:?}", input_path));
-    }
+    let options = kfx_converter::ConversionOptions {
+        content_type: settings.content_type.clone(),
+        word_wise: settings.word_wise,
+        auto_deploy: settings.auto_deploy && device.connected,
+        device_root: None,
+    };
 
-    // 1. Read EPUB into BookIR
-    let ir = kfx_converter::EpubReader::read_from_file(input_path)
-        .map_err(|e| format!("Failed to read EPUB: {}", e))?;
-
-    let output_path = input_path.with_extension("kfx");
-
-    // 2. Package into Amazon KFX container
-    let mut packager = kfx_converter::KfxPackager::new(&ir, &settings.content_type);
-    let content_id = kfx_converter::packager::generate_content_id(
-        if !ir.metadata.identifier.is_empty() {
-            &ir.metadata.identifier
-        } else {
-            &ir.metadata.title
-        },
-    );
-    let container_id = kfx_converter::packager::generate_container_id(
-        if !ir.metadata.identifier.is_empty() {
-            &ir.metadata.identifier
-        } else {
-            &ir.metadata.title
-        },
-    );
-
-    packager
-        .package_to_file(&output_path)
-        .map_err(|e| format!("Failed to package KFX: {}", e))?;
-
-    // 3. Normalize Cover Thumbnail
-    let mut cover_jpeg = None;
-    if let Some(cover_id) = &ir.metadata.cover_image_id {
-        if let Some(asset) = ir.resources.get(cover_id) {
-            if let Ok(optimized) = kfx_converter::CoverOptimizer::optimize_thumbnail(&asset.data) {
-                cover_jpeg = Some(optimized);
-            }
-        }
-    }
-
-    // 4. Generate Word Wise Sidecar (.kll) if enabled
-    let mut kll_bytes = None;
-    if settings.word_wise {
-        let mut ww_builder = kfx_converter::WordWiseBuilder::new(
-            &content_id,
-            &container_id,
-            "en",
-            "en",
-            "1",
-        );
-        ww_builder.generate_from_book(&ir);
-        if let Ok(tmp_kll) = tempfile::NamedTempFile::new() {
-            if ww_builder.write_to_file(tmp_kll.path()).is_ok() {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                if let Ok(mut f) = tmp_kll.reopen() {
-                    let _ = f.read_to_end(&mut buf);
-                    kll_bytes = Some(buf);
-                }
-            }
-        }
-    }
-
-    let mut synced_to_device = false;
-    let mut sync_error = None;
-
-    // 5. Automatic Device Sync if enabled and device connected
-    if settings.auto_deploy && device.connected {
-        if let Some(device_root) = kfx_converter::KindleSync::detect_kindle_root() {
-            match kfx_converter::KindleSync::sync_to_device(
-                &device_root,
-                &output_path,
-                &ir.metadata.title,
-                &content_id,
-                cover_jpeg.as_deref(),
-                kll_bytes.as_deref(),
-            ) {
-                Ok(_) => {
-                    synced_to_device = true;
-                }
-                Err(err) => {
-                    sync_error = Some(err.to_string());
-                }
-            }
-        } else {
-            sync_error = Some("Kindle 장치 루트 경로를 찾을 수 없습니다.".to_string());
-        }
-    }
+    let report = kfx_converter::ConversionPipeline::run(
+        input_path,
+        None,
+        &options,
+        None::<fn(f32, &str)>,
+    ).map_err(|e| e.to_string())?;
 
     Ok(ConversionResult {
-        output_path,
-        synced_to_device,
-        sync_error,
+        output_path: report.output_path,
+        synced_to_device: report.synced_to_device,
+        sync_error: report.sync_error,
     })
 }
 

@@ -60,122 +60,57 @@ fn main() {
             }
         }
     } else {
-        let output_path = match args.output {
-            Some(p) => p,
-            None => {
-                let mut out = args.input.clone();
-                out.set_extension("kfx");
-                out
-            }
-        };
-
         println!("-> Converting EPUB to KFX...");
-        let start = std::time::Instant::now();
 
-        let ir = match kfx_converter::EpubReader::read_from_file(&args.input) {
-            Ok(book) => {
-                println!("  [EPUB] Title: '{}', Author(s): '{}', Sections: {}, Resources: {}",
-                    book.metadata.title,
-                    book.metadata.creators.join(", "),
-                    book.sections.len(),
-                    book.resources.len());
-                book
-            }
-            Err(e) => {
-                eprintln!("[ERROR] Failed to read EPUB: {}", e);
-                std::process::exit(1);
-            }
+        let options = kfx_converter::ConversionOptions {
+            content_type: "EBOK".to_string(),
+            word_wise: args.word_wise,
+            auto_deploy: args.sync,
+            device_root: None,
         };
 
-        let mut packager = kfx_converter::KfxPackager::new(&ir, "EBOK");
-        let content_id = kfx_converter::packager::generate_content_id(
-            if !ir.metadata.identifier.is_empty() {
-                &ir.metadata.identifier
-            } else {
-                &ir.metadata.title
-            },
-        );
-        let container_id = kfx_converter::packager::generate_container_id(
-            if !ir.metadata.identifier.is_empty() {
-                &ir.metadata.identifier
-            } else {
-                &ir.metadata.title
-            },
-        );
-
-        match packager.package_to_file(&output_path) {
-            Ok(total_bytes) => {
-                let elapsed = start.elapsed();
-                println!("-> [SUCCESS] KFX Created: {:?} ({:.2} KB in {:.2?})",
-                    output_path,
-                    (total_bytes as f64) / 1024.0,
-                    elapsed);
-
-                // 1. Optimize Cover Thumbnail
-                let mut cover_jpeg = None;
-                if let Some(cover_id) = &ir.metadata.cover_image_id {
-                    if let Some(asset) = ir.resources.get(cover_id) {
-                        if let Ok(optimized) = kfx_converter::CoverOptimizer::optimize_thumbnail(&asset.data) {
-                            println!("  [ENHANCEMENT] Cover normalized to baseline JPEG ({} bytes)", optimized.len());
-                            cover_jpeg = Some(optimized);
-                        }
-                    }
+        match kfx_converter::ConversionPipeline::run(
+            &args.input,
+            args.output.as_deref(),
+            &options,
+            Some(|pct: f32, msg: &str| {
+                println!("  [{:.0}%] {}", pct * 100.0, msg);
+            }),
+        ) {
+            Ok(report) => {
+                println!(
+                    "  [EPUB] Title: '{}', Author(s): '{}', Sections: {}, Resources: {}",
+                    report.book_title,
+                    report.creators.join(", "),
+                    report.sections_count,
+                    report.resources_count
+                );
+                println!(
+                    "-> [SUCCESS] KFX Created: {:?} ({:.2} KB in {:.2?})",
+                    report.output_path,
+                    (report.total_bytes as f64) / 1024.0,
+                    report.duration
+                );
+                if report.cover_optimized {
+                    println!("  [ENHANCEMENT] Cover normalized to baseline JPEG");
                 }
-
-                // 2. Generate Word Wise Sidecar (.kll) if requested
-                let mut kll_bytes = None;
-                if args.word_wise {
-                    let mut ww_builder = kfx_converter::WordWiseBuilder::new(
-                        &content_id,
-                        &container_id,
-                        "en",
-                        "en",
-                        "1",
-                    );
-                    let gloss_count = ww_builder.generate_from_book(&ir);
-                    let mut tmp_kll = tempfile::NamedTempFile::new().expect("Create tmp kll");
-                    if ww_builder.write_to_file(tmp_kll.path()).is_ok() {
-                        use std::io::Read;
-                        let mut buf = Vec::new();
-                        let _ = tmp_kll.read_to_end(&mut buf);
-                        println!(
-                            "  [ENHANCEMENT] Word Wise sidecar generated ({} glosses, {} bytes)",
-                            gloss_count,
-                            buf.len()
-                        );
-                        kll_bytes = Some(buf);
-                    }
+                if let Some(gloss_count) = report.word_wise_glosses {
+                    println!("  [ENHANCEMENT] Word Wise sidecar generated ({} glosses)", gloss_count);
                 }
-
-                // 3. Kindle Device Synchronization
                 if args.sync {
-                    match kfx_converter::KindleSync::detect_kindle_root() {
-                        Some(device_root) => {
-                            println!("-> [SYNC] Detected Kindle at {:?}", device_root);
-                            match kfx_converter::KindleSync::sync_to_device(
-                                &device_root,
-                                &output_path,
-                                &ir.metadata.title,
-                                &content_id,
-                                cover_jpeg.as_deref(),
-                                kll_bytes.as_deref(),
-                            ) {
-                                Ok(dest) => {
-                                    println!("-> [SYNC SUCCESS] Sideloaded to Kindle: {:?}", dest);
-                                }
-                                Err(e) => {
-                                    eprintln!("-> [SYNC WARNING] Failed to transfer to device: {}", e);
-                                }
-                            }
+                    if report.synced_to_device {
+                        if let Some(dest) = report.synced_device_path {
+                            println!("-> [SYNC SUCCESS] Sideloaded to Kindle: {:?}", dest);
                         }
-                        None => {
-                            println!("-> [SYNC NOTICE] No Kindle device detected (USB / MTP).");
-                        }
+                    } else if let Some(err) = report.sync_error {
+                        eprintln!("-> [SYNC WARNING] Failed to transfer to device: {}", err);
+                    } else {
+                        println!("-> [SYNC NOTICE] No Kindle device detected (USB / MTP).");
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[ERROR] Failed to package KFX: {}", e);
+                eprintln!("[ERROR] Conversion failed: {}", e);
                 std::process::exit(1);
             }
         }

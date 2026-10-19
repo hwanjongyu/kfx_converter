@@ -50,10 +50,24 @@ impl KindleSync {
         if clean.is_empty() {
             clean = "book".to_string();
         }
-        if clean.len() > 128 {
-            clean = clean.chars().take(128).collect();
+
+        // Guard against FAT32 DOS device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+        let uppercase = clean.to_ascii_uppercase();
+        let base_name = uppercase.split('.').next().unwrap_or("");
+        let dos_devices = [
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ];
+        if dos_devices.contains(&base_name) {
+            clean = format!("{}_book", clean);
         }
-        clean
+
+        // Clamp UTF-8 byte length to <= 128 bytes without breaking UTF-8 char boundary
+        while clean.len() > 128 {
+            clean.pop();
+        }
+        clean.trim_end_matches(['.', '_', ' ']).to_string()
     }
 
     /// Sanitizes an ASIN identifier against path traversal and special characters.
@@ -66,7 +80,9 @@ impl KindleSync {
         if clean.is_empty() {
             clean = "UNKNOWN_ASIN".to_string();
         }
-        clean.truncate(64);
+        if let Some((idx, _)) = clean.char_indices().nth(64) {
+            clean.truncate(idx);
+        }
         clean
     }
 
@@ -400,10 +416,30 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_filename_dos_devices() {
+        assert_eq!(KindleSync::sanitize_filename("CON"), "CON_book");
+        assert_eq!(KindleSync::sanitize_filename("aux.kfx"), "aux.kfx_book");
+        assert_eq!(KindleSync::sanitize_filename("nul"), "nul_book");
+        assert_eq!(KindleSync::sanitize_filename("COM1.epub"), "COM1.epub_book");
+        assert_eq!(KindleSync::sanitize_filename("PRN"), "PRN_book");
+
+        // Long string with multi-byte characters capped at <= 128 bytes
+        let long_korean = "한".repeat(100); // 300 bytes in UTF-8
+        let sanitized = KindleSync::sanitize_filename(&long_korean);
+        assert!(sanitized.len() <= 128);
+        assert!(std::str::from_utf8(sanitized.as_bytes()).is_ok());
+    }
+
+    #[test]
     fn test_sanitize_asin_basic() {
         assert_eq!(KindleSync::sanitize_asin("B000JML542"), "B000JML542");
         assert_eq!(KindleSync::sanitize_asin("../../root/key"), "rootkey");
         assert_eq!(KindleSync::sanitize_asin(""), "UNKNOWN_ASIN");
+
+        // Non-ASCII Unicode characters past 64 scalar chars should not panic
+        let long_unicode = "가".repeat(100);
+        let sanitized_asin = KindleSync::sanitize_asin(&long_unicode);
+        assert_eq!(sanitized_asin.chars().count(), 64);
     }
 
     #[test]
