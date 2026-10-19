@@ -120,8 +120,18 @@ impl EpubReader {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| item.href.clone());
+            let clean_href = item.href.trim_start_matches("./").to_string();
+            let decoded_href = Self::decode_percent(&item.href);
+            let decoded_clean_href = Self::decode_percent(&clean_href);
+            let decoded_file_name = Self::decode_percent(&file_name);
+
             href_to_id.insert(item.href.clone(), item.id.clone());
+            href_to_id.insert(clean_href, item.id.clone());
+            href_to_id.insert(decoded_href, item.id.clone());
+            href_to_id.insert(decoded_clean_href, item.id.clone());
             href_to_id.insert(file_name, item.id.clone());
+            href_to_id.insert(decoded_file_name, item.id.clone());
+            href_to_id.insert(item.id.clone(), item.id.clone());
 
             if item.media_type.starts_with("image/") || item.media_type.starts_with("font/") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
@@ -639,6 +649,59 @@ impl EpubReader {
             }
         };
 
+        let parse_image_block = |e: &quick_xml::events::BytesStart, total_blocks: usize| -> Option<Block> {
+            let mut src = String::new();
+            let mut alt = None;
+            for attr in e.attributes().flatten() {
+                let key = attr.key.as_ref();
+                if key == b"src" || key == b"xlink:href" || key == b"href" {
+                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                    if src.is_empty() || key == b"src" || key == b"xlink:href" {
+                        src = val;
+                    }
+                } else if key == b"alt" {
+                    alt = Some(String::from_utf8_lossy(&attr.value).to_string());
+                }
+            }
+            if !src.is_empty() {
+                let img_id = format!("img_{}", total_blocks + 1);
+                let mut clean_src = src.as_str();
+                while let Some(stripped) = clean_src
+                    .strip_prefix("../")
+                    .or_else(|| clean_src.strip_prefix("./"))
+                {
+                    clean_src = stripped;
+                }
+                let decoded_src = Self::decode_percent(clean_src);
+                let decoded_raw_src = Self::decode_percent(&src);
+                let file_name = Path::new(&src)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| src.clone());
+                let decoded_file_name = Self::decode_percent(&file_name);
+
+                let res_id = href_to_id
+                    .get(&src)
+                    .or_else(|| href_to_id.get(clean_src))
+                    .or_else(|| href_to_id.get(&decoded_src))
+                    .or_else(|| href_to_id.get(&decoded_raw_src))
+                    .or_else(|| href_to_id.get(&file_name))
+                    .or_else(|| href_to_id.get(&decoded_file_name))
+                    .cloned()
+                    .unwrap_or(file_name);
+
+                Some(Block::Image {
+                    id: img_id,
+                    resource_id: res_id,
+                    alt,
+                    width: None,
+                    height: None,
+                })
+            } else {
+                None
+            }
+        };
+
         loop {
             match xml_reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
@@ -772,6 +835,31 @@ impl EpubReader {
                                 current_span_text.clear();
                                 current_spans.clear();
                             }
+                            b"img" | b"image" => {
+                                if let Some(img_block) = parse_image_block(e, blocks.len()) {
+                                    if in_p || in_heading || in_li {
+                                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                        if !current_spans.is_empty() {
+                                            let p_id = format!("p_{}", blocks.len() + 1);
+                                            let p_block = Block::Paragraph {
+                                                id: p_id,
+                                                spans: std::mem::take(&mut current_spans),
+                                                style: p_style.clone(),
+                                            };
+                                            if in_li {
+                                                current_list_item_blocks.push(p_block);
+                                            } else {
+                                                blocks.push(p_block);
+                                            }
+                                        }
+                                    }
+                                    if in_li {
+                                        current_list_item_blocks.push(img_block);
+                                    } else {
+                                        blocks.push(img_block);
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -787,34 +875,29 @@ impl EpubReader {
                             b"br" => {
                                 current_span_text.push('\n');
                             }
-                            b"img" => {
-                                let mut src = String::new();
-                                let mut alt = None;
-                                for attr in e.attributes().flatten() {
-                                    if attr.key.as_ref() == b"src" {
-                                        src = String::from_utf8_lossy(&attr.value).to_string();
-                                    } else if attr.key.as_ref() == b"alt" {
-                                        alt = Some(String::from_utf8_lossy(&attr.value).to_string());
+                            b"img" | b"image" => {
+                                if let Some(img_block) = parse_image_block(e, blocks.len()) {
+                                    if in_p || in_heading || in_li {
+                                        flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, &current_href, &current_anchor, &current_style);
+                                        if !current_spans.is_empty() {
+                                            let p_id = format!("p_{}", blocks.len() + 1);
+                                            let p_block = Block::Paragraph {
+                                                id: p_id,
+                                                spans: std::mem::take(&mut current_spans),
+                                                style: p_style.clone(),
+                                            };
+                                            if in_li {
+                                                current_list_item_blocks.push(p_block);
+                                            } else {
+                                                blocks.push(p_block);
+                                            }
+                                        }
                                     }
-                                }
-                                if !src.is_empty() {
-                                    let img_id = format!("img_{}", blocks.len() + 1);
-                                    let file_name = Path::new(&src)
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| src.clone());
-                                    let res_id = href_to_id
-                                        .get(&src)
-                                        .or_else(|| href_to_id.get(&file_name))
-                                        .cloned()
-                                        .unwrap_or(file_name);
-                                    blocks.push(Block::Image {
-                                        id: img_id,
-                                        resource_id: res_id,
-                                        alt,
-                                        width: None,
-                                        height: None,
-                                    });
+                                    if in_li {
+                                        current_list_item_blocks.push(img_block);
+                                    } else {
+                                        blocks.push(img_block);
+                                    }
                                 }
                             }
                             _ => {}
@@ -1010,6 +1093,24 @@ impl EpubReader {
             parts.join("/")
         }
     }
+
+    pub fn decode_percent(s: &str) -> String {
+        let mut result = Vec::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    result.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+            result.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&result).to_string()
+    }
 }
 
 #[cfg(test)]
@@ -1191,6 +1292,41 @@ mod tests {
         assert!(all_text.iter().any(|t| t.contains("Text after paragraph in section")));
         assert!(all_text.iter().any(|t| t.contains("Text inside article")));
         assert!(all_text.iter().any(|t| t.contains("Bare text directly inside body")));
+    }
+
+    #[test]
+    fn test_parse_xhtml_img_and_svg_images() {
+        let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml">
+            <body>
+                <p>Paragraph 1</p>
+                <img src="../images/fig%201.jpg" alt="Figure 1" />
+                <p>Paragraph 2</p>
+                <img src="images/fig2.png" alt="Figure 2"></img>
+                <svg>
+                    <image xlink:href="images/cover.jpg" />
+                </svg>
+            </body>
+        </html>"#;
+
+        let mut href_to_id = HashMap::new();
+        href_to_id.insert("images/fig 1.jpg".to_string(), "res_fig1".to_string());
+        href_to_id.insert("images/fig2.png".to_string(), "res_fig2".to_string());
+        href_to_id.insert("images/cover.jpg".to_string(), "res_cover".to_string());
+
+        let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &href_to_id);
+        let img_blocks: Vec<_> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Image { resource_id, alt, .. } => Some((resource_id.as_str(), alt.as_deref())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(img_blocks.len(), 3, "Expected 3 image blocks to be parsed");
+        assert_eq!(img_blocks[0], ("res_fig1", Some("Figure 1")));
+        assert_eq!(img_blocks[1], ("res_fig2", Some("Figure 2")));
+        assert_eq!(img_blocks[2], ("res_cover", None));
     }
 }
 

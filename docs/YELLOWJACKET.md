@@ -168,3 +168,40 @@ Unlike physical books with static pages, Yellowjacket books reflow across varyin
 4. **Sidecar Generation**:
    - Compiles Word Wise glosses into SQLite `.kll` databases keyed to the deterministic `ContentID`.
    - Normalizes cover images to non-progressive baseline JPEGs keyed to `thumbnail_<ContentID>_EBOK_portrait.jpg`.
+
+---
+
+## 7. Image & External Resource Architecture (`$164`, `$417`, `$271`)
+
+Images in Yellowjacket follow a split-entity model decoupled from storyline flow. The rendering engine coordinates three separate components:
+
+```mermaid
+flowchart LR
+    STORY["Storyline Element ($259)<br/>type: $271 (image)<br/>resource_name: $175 ('res_id')<br/>alt_text: $584 ('Alt Text')"]
+    EXT_RES["External Resource ($164)<br/>resource_name: $175 ('res_id')<br/>location: $165 ('resource/res_id')<br/>format: $161 ($285 jpg / $284 png)<br/>mime: $162 ('image/jpeg')<br/><b>resource_width: $422 (px)</b><br/><b>resource_height: $423 (px)</b>"]
+    RAW_MEDIA["Raw Media Payload ($417)<br/>bcRawMedia Chunk: 'resource/res_id'<br/><i>Optimized Binary JPEG/PNG</i>"]
+
+    STORY -->|Resolves by $175| EXT_RES
+    EXT_RES -->|Maps location to $417| RAW_MEDIA
+```
+
+### 7.1 Critical Layout Invariants (Do Not Omit)
+
+1. **Mandatory Pixel Dimensions (`$422 resource_width` & `$423 resource_height`)**:
+   > [!IMPORTANT]
+   > The Kindle OS e-ink layout engine (`KPPMainApp` / Hermes JS) computes page breaks, line justification, and bounding box geometry strictly ahead of rendering. 
+   > Without `$422` and `$423` in the `$164` entity, the layout engine defaults the image bounding box height to `0px`, causing images to completely vanish on Kindle Paperwhite/Oasis/Scribe hardware.
+
+2. **Storyline Link Symbol Contract (`$175 resource_name` vs `$162 mime`)**:
+   - In Yellowjacket storyline elements (`$259`), the image block **MUST** use symbol `$175` (`resource_name`) pointing directly to the string identifier (e.g., `"img_001"`).
+   - **Never** use `$162` (`mime`) or prefix paths like `"resource/img_001"` in the storyline block. Symbol `$162` is `"mime"`, which confuses the renderer and breaks the entity lookup graph.
+
+3. **Content Image Memory Guardrail (2560x2560 Max Dimension)**:
+   - High-resolution illustrations (e.g., 4K/8K scans) can cause memory allocation spikes exceeding the 240MB `pmond` ceiling during e-ink page composition.
+   - `kfx-converter` automatically downscales content images exceeding 2560px on either axis via `CoverOptimizer::optimize_content_image`.
+
+4. **EPUB Ingestion Invariants**:
+   - Support both self-closing `<img ... />` (`Event::Empty`) and split `<img></img>` (`Event::Start`).
+   - Support SVG image tags (`<image xlink:href="..." />` and `<image href="..." />`).
+   - Decode percent-encoded URLs (e.g. `%20` -> space) and recursively strip relative prefixes (`../`, `./`) so chapter references cleanly match OPF manifest identifiers.
+

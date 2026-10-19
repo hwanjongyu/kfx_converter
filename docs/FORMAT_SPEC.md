@@ -64,17 +64,25 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | **`$3`** | `$ion_symbol_table` | Embedded symbol table annotation |
 | **`$145`** | `content` | Text block and inline styling payloads |
 | **`$157`** | `style` | Formatting styles |
+| **`$161`** | `format` | Resource format descriptor (`$285` jpg, `$284` png) |
+| **`$162`** | `mime` | MIME type string (e.g. `"image/jpeg"`) |
 | **`$164`** | `external_resource` | External image and media descriptors |
+| **`$165`** | `location` | Location URI in container (`"resource/{id}"`) |
+| **`$175`** | `resource_name` | Resource identifier string for storyline links |
 | **`$258`** | `metadata` | Publication and reading metadata |
 | **`$259`** | `storyline` | Structural storyline chunk |
 | **`$260`** | `section` | Chapter/section template and block container |
 | **`$264`** | `position_map` | Mapping between positions and content elements |
 | **`$265`** | `position_id_map` | Mapping between IDs and positions |
+| **`$271`** | `image` | Storyline image block element type |
 | **`$409`** | `bcContId` | Container ID descriptor |
+| **`$417`** | `bcRawMedia` | Binary media payload chunk |
 | **`$419`** | `container_entity_map` | Manifest of all entities contained in the file |
+| **`$422`** | `resource_width` | Pixel width required by Kindle layout engine |
+| **`$423`** | `resource_height` | Pixel height required by Kindle layout engine |
 | **`$490`** | `book_metadata` | High-level book title, author, and language |
 | **`$538`** | `document_data` | Document layout and baseline typographical rules |
-| **`$550`** | `location_map` | Kindle reading location calibration (350 chars/loc) |
+| **`$584`** | `alt_text` | Storyline image accessibility/alt text |
 | **`$585`** | `content_features` | Declared typesetting engine feature flags |
 | **`$593`** | `format_capabilities` | Container capabilities header |
 | **`$597`** | `auxiliary_data` | Supplemental per-section reading data |
@@ -127,3 +135,39 @@ CREATE TABLE glosses (
 - **`start_pos` / `end_pos`**: Character offsets within the reading text.
 - **`difficulty`**: Integer rating (1 = Basic, 3 = Intermediate B2, 4 = Advanced C1, 5 = Rare C2).
 - **`sense_id`**: Reference index into Kindle's internal Word Wise definitions database.
+
+---
+
+## 6. External Resource & Image Payloads (`$164`, `$417`, `$271`)
+
+Kindle Yellowjacket decouples storyline references from the physical image payload using a two-tier entity pairing.
+
+### 6.1 Storyline Image Element Struct
+Embedded inside `$259` (`storyline`) under `$146` (`content_list`):
+```ion
+{
+    $155: 102,                  // id (uint)
+    $159: $271,                 // type = image
+    $175: "img_chapter1",       // resource_name (String or Symbol)
+    $584: "Figure 1.1 Diagram"  // alt_text (String, optional)
+}
+```
+> **Warning**: Never use `$162` (`mime`) or prefix `"resource/"` inside the storyline struct. The identifier in `$175` must match the `$175` field in the corresponding `$164` entity.
+
+### 6.2 External Resource Entity (`$164`) Struct
+Descriptive metadata registered in `bcIndexTab` under chunk type `$164`:
+```ion
+{
+    $175: "img_chapter1",       // resource_name
+    $165: "resource/img_ch1",   // location (maps to $417 bcRawMedia payload)
+    $161: $285,                 // format ($285 = jpg, $284 = png)
+    $162: "image/jpeg",         // mime
+    $422: 1200,                 // resource_width (MANDATORY for e-ink pagination)
+    $423: 800                   // resource_height (MANDATORY for e-ink pagination)
+}
+```
+> **Critical Requirement**: `$422` (`resource_width`) and `$423` (`resource_height`) are required by the Kindle OS layout engine to compute page breaks and layout boxes. If omitted, the engine defaults height to 0px, causing the image to disappear.
+
+### 6.3 Raw Media Payload Entity (`$417`)
+The raw binary image byte stream (JPEG/PNG) stored in `bcIndexTab` under chunk type `$417` (`bcRawMedia`) with entity ID matching `symbols.intern("resource/img_chapter1")`.
+

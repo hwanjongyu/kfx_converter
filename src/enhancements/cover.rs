@@ -56,6 +56,18 @@ impl CoverOptimizer {
         Ok(out.into_inner())
     }
 
+    /// Extracts pixel dimensions (width, height) efficiently without decoding full raster pixels.
+    pub fn get_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+        if data.is_empty() {
+            return None;
+        }
+        image::ImageReader::new(Cursor::new(data))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()
+    }
+
     /// Normalizes raw image bytes into a Kindle-compliant baseline JPEG thumbnail.
     pub fn optimize_thumbnail(data: &[u8]) -> Result<Vec<u8>, CoverError> {
         if data.is_empty() {

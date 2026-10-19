@@ -658,7 +658,8 @@ impl<'a> KfxPackager<'a> {
         let sym_type = symbol_id("type").unwrap_or(159);
         let sym_type_text = symbol_id("text").unwrap_or(269);
         let sym_type_image = symbol_id("image").unwrap_or(271);
-        let sym_resource = symbol_id("resource").unwrap_or(162);
+        let sym_resource_name = symbol_id("resource_name").unwrap_or(175);
+        let sym_alt_text = symbol_id("alt_text").unwrap_or(584);
         let sym_style = symbol_id("style").unwrap_or(157);
         let sym_style_events = symbol_id("style_events").unwrap_or(142);
         let sym_offset = symbol_id("offset").unwrap_or(143);
@@ -806,16 +807,23 @@ impl<'a> KfxPackager<'a> {
                         }
                         story_elements.push(IonValue::Struct(elem_fields));
                     }
+                    // Image storyline element invariant:
+                    // MUST use sym_resource_name ($175) pointing directly to resource_id (NEVER $162 mime or "resource/" path).
+                    // This matches the $175 key in the $164 external_resource entity for Kindle layout resolution.
                     Block::Image { resource_id, alt, .. } => {
-                        let res_path = format!("resource/{}", resource_id);
                         let alt_text = alt.clone().unwrap_or_default();
                         block_info.push((block_eid, alt_text.chars().count().max(1)));
 
-                        story_elements.push(IonValue::Struct(vec![
+                        let mut img_fields = vec![
                             (sym_id, IonValue::Int(block_eid as i64)),
                             (sym_type, IonValue::Symbol(sym_type_image)),
-                            (sym_resource, IonValue::String(res_path)),
-                        ]));
+                            (sym_resource_name, IonValue::String(resource_id.clone())),
+                        ];
+                        if !alt_text.is_empty() {
+                            img_fields.push((sym_alt_text, IonValue::String(alt_text)));
+                        }
+
+                        story_elements.push(IonValue::Struct(img_fields));
                     }
                     _ => {
                         let text = block.plain_text();
@@ -1337,13 +1345,25 @@ impl<'a> KfxPackager<'a> {
         });
     }
 
+    /// Builds dual entities for assets:
+    /// 1. $164 (`external_resource`) metadata entity:
+    ///    - $175 (`resource_name`): resource identifier (matching storyline $175)
+    ///    - $165 (`location`): "resource/{id}" path mapping to $417 payload
+    ///    - $161 (`format`): $285 (jpg) or $284 (png)
+    ///    - $162 (`mime`): MIME type string
+    ///    - $422 (`resource_width`) & $423 (`resource_height`): MANDATORY dimensions in pixels
+    ///      required by Kindle OS layout engine (KPP / Hermes JS) to compute e-ink pagination
+    ///      and bounding boxes. Omission results in height=0px rendering collapse.
+    /// 2. $417 (`bcRawMedia`) raw binary image payload entity.
     fn build_resources(&mut self, symbols: &mut LocalSymbols) {
         let sym_ext_resource = symbol_id("external_resource").unwrap_or(164);
         let sym_raw_media = symbol_id("bcRawMedia").unwrap_or(417);
-        let sym_resource_name = symbol_id("resource_name").unwrap_or(392);
-        let sym_location = symbol_id("location").unwrap_or(171);
-        let sym_format = symbol_id("format").unwrap_or(163);
+        let sym_resource_name = symbol_id("resource_name").unwrap_or(175);
+        let sym_location = symbol_id("location").unwrap_or(165);
+        let sym_format = symbol_id("format").unwrap_or(161);
         let sym_mime = symbol_id("mime").unwrap_or(162);
+        let sym_resource_width = symbol_id("resource_width").unwrap_or(422);
+        let sym_resource_height = symbol_id("resource_height").unwrap_or(423);
         let sym_jpg = symbol_id("jpg").unwrap_or(285);
         let sym_png = symbol_id("png").unwrap_or(284);
 
@@ -1369,13 +1389,24 @@ impl<'a> KfxPackager<'a> {
             let is_png = asset.mime_type.contains("png") && payload_data.starts_with(b"\x89PNG");
             let format_sym = if is_png { sym_png } else { sym_jpg };
 
+            let dimensions = if asset.mime_type.starts_with("image/") {
+                crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
+            } else {
+                None
+            };
+
             // 1. External Resource metadata entity ($164)
-            let ext_fields = IonValue::Struct(vec![
+            let mut ext_field_vec = vec![
                 (sym_resource_name, IonValue::String(res_id.clone())),
                 (sym_location, IonValue::String(raw_path)),
                 (sym_format, IonValue::Symbol(format_sym)),
                 (sym_mime, IonValue::String(asset.mime_type.clone())),
-            ]);
+            ];
+            if let Some((w, h)) = dimensions {
+                ext_field_vec.push((sym_resource_width, IonValue::Int(w as i64)));
+                ext_field_vec.push((sym_resource_height, IonValue::Int(h as i64)));
+            }
+            let ext_fields = IonValue::Struct(ext_field_vec);
 
             let mut ext_writer = IonWriter::new();
             ext_writer.write_bvm();
@@ -1861,6 +1892,101 @@ mod tests {
         let sym_nav_unit = symbol_id("nav_unit").unwrap_or(393);
         let nav_units: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_nav_unit).collect();
         assert_eq!(nav_units.len(), 1);
+    }
+
+    #[test]
+    fn test_image_rendering_storyline_and_resource_dimensions() {
+        use image::{ImageBuffer, Rgb};
+
+        // Create a minimal 32x48 valid PNG image in memory
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(32, 48);
+        let mut png_bytes = Cursor::new(Vec::new());
+        img.write_to(&mut png_bytes, image::ImageFormat::Png).expect("Encode test png");
+        let png_data = png_bytes.into_inner();
+
+        let mut book = BookIR::default();
+        book.metadata.title = "Image Render Test".to_string();
+        book.sections.push(Section {
+            id: "sec1".to_string(),
+            title: "Illustration Chapter".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Before illustration".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                    }],
+                    style: None,
+                },
+                Block::Image {
+                    id: "img1".to_string(),
+                    resource_id: "fig_1".to_string(),
+                    alt: Some("Figure One".to_string()),
+                    width: None,
+                    height: None,
+                },
+            ],
+        });
+
+        book.resources.insert(
+            "fig_1".to_string(),
+            crate::ir::ResourceAsset {
+                id: "fig_1".to_string(),
+                mime_type: "image/png".to_string(),
+                data: png_data,
+            },
+        );
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        packager.package(&mut buffer).expect("Packaging with image failed");
+
+        // 1. Verify Storyline entity has resource_name ($175) and alt_text ($584), NOT $162 (mime)
+        let sym_storyline = SYM_STORYLINE; // 259
+        let storyline_entity = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == sym_storyline)
+            .expect("Storyline entity missing");
+
+        // The storyline entity payload contains "fig_1" and "Figure One"
+        assert!(
+            storyline_entity.data.windows(5).any(|w| w == b"fig_1"),
+            "Storyline must reference 'fig_1' resource_id"
+        );
+        assert!(
+            storyline_entity.data.windows(10).any(|w| w == b"Figure One"),
+            "Storyline must include 'Figure One' alt text"
+        );
+
+        // 2. Verify external_resource ($164) contains dimensions
+        let sym_ext_res = symbol_id("external_resource").unwrap_or(164);
+        let ext_res = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == sym_ext_res)
+            .expect("External resource entity missing");
+        assert!(!ext_res.data.is_empty());
+        // Verify width 32 and height 48 are encoded in ext_res ($164)
+        assert!(
+            ext_res.data.windows(2).any(|w| w == &[0x21, 32]),
+            "External resource entity ($164) must encode resource_width 32"
+        );
+        assert!(
+            ext_res.data.windows(2).any(|w| w == &[0x21, 48]),
+            "External resource entity ($164) must encode resource_height 48"
+        );
+
+        // 3. Verify that raw media ($417) was emitted
+        let sym_raw_media = symbol_id("bcRawMedia").unwrap_or(417);
+        let raw_media = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == sym_raw_media)
+            .expect("Raw media entity missing");
+        assert!(!raw_media.data.is_empty());
     }
 }
 
