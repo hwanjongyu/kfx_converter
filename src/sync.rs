@@ -355,7 +355,7 @@ impl KindleSync {
         }
     }
 
-    /// Robust copy using `gio copy` for Linux GVFS MTP or `std::fs::copy` with cache flush for standard mounts.
+    /// Robust copy using `gio copy` for Linux GVFS MTP or streamed copy with data sync for standard mounts.
     fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
         let dst_str = dst.to_string_lossy();
         if dst_str.contains("/gvfs/mtp:") {
@@ -365,12 +365,12 @@ impl KindleSync {
             let mut r = std::fs::File::open(src)?;
             let mut w = std::fs::File::create(dst)?;
             std::io::copy(&mut r, &mut w)?;
-            let _ = w.sync_all();
-            if let Some(parent) = dst.parent() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
+            // Flush file content without invoking dir fsync, which triggers gadget resets on Kindle VFAT
+            let _ = w.sync_data();
+            drop(w);
+            drop(r);
+            // Brief settle delay to allow eMMC controller to commit blocks
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         Ok(())
     }
@@ -433,12 +433,9 @@ impl KindleSync {
             use std::io::Write;
             let mut f = std::fs::File::create(dst)?;
             f.write_all(data)?;
-            let _ = f.sync_all();
-            if let Some(parent) = dst.parent() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
+            let _ = f.sync_data();
+            drop(f);
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         Ok(())
     }

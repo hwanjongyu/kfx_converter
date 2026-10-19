@@ -13,6 +13,7 @@ pub struct KindleStudio {
     settings: ConversionSettings,
     tasks: Vec<ConversionTask>,
     files: Vec<KindleFile>,
+    filter_format: Option<String>,
     _search_query: String,
 }
 
@@ -27,6 +28,7 @@ impl KindleStudio {
             settings: ConversionSettings::default(),
             tasks: Vec::new(),
             files,
+            filter_format: None,
             _search_query: String::new(),
         }
     }
@@ -412,7 +414,48 @@ impl KindleStudio {
                             })),
                     ),
             )
-            // 3. Task Cards
+            // 3. Task Queue Header & Clear Button
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(Theme::text_primary())
+                            .child(if self.tasks.is_empty() {
+                                "변환 대기열 (비어 있음)".to_string()
+                            } else {
+                                format!("변환 대기열 ({}개 작업)", self.tasks.len())
+                            }),
+                    )
+                    .child(
+                        if !self.tasks.is_empty() {
+                            div()
+                                .id("btn_clear_completed")
+                                .cursor_pointer()
+                                .px_2p5()
+                                .py_1()
+                                .rounded_md()
+                                .bg(Theme::bg_card_hover())
+                                .text_xs()
+                                .text_color(Theme::text_muted())
+                                .child("🗑 완료된 작업 지우기")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.tasks.retain(|t| {
+                                        t.status == TaskStatus::Converting || t.status == TaskStatus::Syncing || t.status == TaskStatus::Queued
+                                    });
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        }
+                    ),
+            )
+            // 4. Task Cards
             .child(
                 div()
                     .flex()
@@ -457,11 +500,13 @@ impl KindleStudio {
                             ),
                         };
 
+                        let is_active = matches!(task.status, TaskStatus::Converting | TaskStatus::Syncing | TaskStatus::Queued);
+
                         div()
                             .flex()
-                            .justify_between()
-                            .items_center()
+                            .flex_col()
                             .p_4()
+                            .gap_3()
                             .rounded_lg()
                             .bg(Theme::bg_card())
                             .border_1()
@@ -513,11 +558,45 @@ impl KindleStudio {
                                             .child(badge_text),
                                     ),
                             )
+                            .child(
+                                if is_active {
+                                    div()
+                                        .w_full()
+                                        .h_1p5()
+                                        .rounded_full()
+                                        .bg(Theme::border())
+                                        .child(
+                                            div()
+                                                .h_full()
+                                                .rounded_full()
+                                                .bg(badge_bg)
+                                                .w(DefiniteLength::Fraction(task.progress.clamp(0.08, 1.0))),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div().into_any_element()
+                                }
+                            )
                     })),
             )
     }
 
-    fn render_explorer_view(&self) -> impl IntoElement {
+    fn render_explorer_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_offline = !self.device.connected;
+        let active_filter = self.filter_format.as_deref().unwrap_or("ALL");
+
+        // Format counts
+        let count_kfx = self.files.iter().filter(|f| f.format == "KFX").count();
+        let count_azw3 = self.files.iter().filter(|f| f.format == "AZW3").count();
+        let count_mobi = self.files.iter().filter(|f| f.format == "MOBI").count();
+        let count_all = self.files.len();
+
+        let filtered_files: Vec<&KindleFile> = if let Some(ref fmt) = self.filter_format {
+            self.files.iter().filter(|f| &f.format == fmt).collect()
+        } else {
+            self.files.iter().collect()
+        };
+
         div()
             .flex()
             .flex_col()
@@ -539,23 +618,173 @@ impl KindleStudio {
                         div()
                             .text_xs()
                             .text_color(Theme::text_muted())
-                            .child(format!("총 {}권의 도서 확인됨", self.files.len())),
+                            .child(if is_offline {
+                                "기기 미연결".to_string()
+                            } else {
+                                format!("총 {}권 (필터 결과: {}권)", self.files.len(), filtered_files.len())
+                            }),
                     ),
             )
             .child(
                 div()
                     .flex()
-                    .flex_col()
+                    .items_center()
                     .gap_2()
-                    .children(self.files.iter().map(|file| {
-                        let badge_bg = match file.format.as_str() {
-                            "KFX" => Theme::accent_amber(),
-                            "AZW3" => Theme::accent_blue(),
-                            "MOBI" => Theme::accent_purple(),
-                            _ => Theme::text_muted(),
-                        };
-
+                    .child(
                         div()
+                            .id("filter_all")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .bg(if active_filter == "ALL" { Theme::accent_amber() } else { Theme::bg_card() })
+                            .text_color(if active_filter == "ALL" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
+                            .child(format!("전체 ({})", count_all))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.filter_format = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("filter_kfx")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .bg(if active_filter == "KFX" { Theme::accent_amber() } else { Theme::bg_card() })
+                            .text_color(if active_filter == "KFX" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
+                            .child(format!("KFX ({})", count_kfx))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.filter_format = Some("KFX".into());
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("filter_azw3")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .bg(if active_filter == "AZW3" { Theme::accent_blue() } else { Theme::bg_card() })
+                            .text_color(if active_filter == "AZW3" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
+                            .child(format!("AZW3 ({})", count_azw3))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.filter_format = Some("AZW3".into());
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("filter_mobi")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .bg(if active_filter == "MOBI" { Theme::accent_purple() } else { Theme::bg_card() })
+                            .text_color(if active_filter == "MOBI" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
+                            .child(format!("MOBI ({})", count_mobi))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.filter_format = Some("MOBI".into());
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                if is_offline {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .p_12()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(Theme::border())
+                        .bg(Theme::bg_card())
+                        .gap_3()
+                        .child(div().text_3xl().child("🔌"))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(Theme::text_primary())
+                                .child("킨들 기기가 연결되어 있지 않습니다"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(Theme::text_muted())
+                                .child("USB 케이블로 킨들을 PC에 연결한 후 아래 새로고침 버튼을 눌러주세요."),
+                        )
+                        .child(
+                            div()
+                                .id("btn_reconnect")
+                                .cursor_pointer()
+                                .mt_2()
+                                .px_4()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(Theme::accent_amber())
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(hsla(0.0, 0.0, 0.0, 1.0))
+                                .child("🔄 기기 연결 다시 확인")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh_device(cx);
+                                })),
+                        )
+                        .into_any_element()
+                } else if filtered_files.is_empty() {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .p_12()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(Theme::border())
+                        .bg(Theme::bg_card())
+                        .gap_2()
+                        .child(div().text_3xl().child("📚"))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(Theme::text_primary())
+                                .child("해당 조건의 도서가 없습니다"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(Theme::text_muted())
+                                .child("변환 탭에서 EPUB 도서를 드래그하여 킨들로 전송해 보세요."),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(filtered_files.into_iter().map(|file| {
+                            let badge_bg = match file.format.as_str() {
+                                "KFX" => Theme::accent_amber(),
+                                "AZW3" => Theme::accent_blue(),
+                                "MOBI" => Theme::accent_purple(),
+                                _ => Theme::text_muted(),
+                            };
+
+                            div()
                             .flex()
                             .justify_between()
                             .items_center()
@@ -606,7 +835,9 @@ impl KindleStudio {
                                             .child(file.modified.clone()),
                                     ),
                             )
-                    })),
+                    }))
+                    .into_any_element()
+                }
             )
     }
 }
@@ -620,9 +851,13 @@ impl Render for KindleStudio {
             .bg(Theme::bg_root())
             .child(self.render_header(cx))
             .child(self.render_tabs(cx))
-            .child(match self.tab {
-                StudioTab::Convert => self.render_converter_view(cx).into_any_element(),
-                StudioTab::Explorer => self.render_explorer_view().into_any_element(),
-            })
+            .child(
+                div()
+                    .flex_1()
+                    .child(match self.tab {
+                        StudioTab::Convert => self.render_converter_view(cx).into_any_element(),
+                        StudioTab::Explorer => self.render_explorer_view(cx).into_any_element(),
+                    })
+            )
     }
 }
