@@ -248,6 +248,8 @@ Standard publishing typography dictates that the opening paragraph of a chapter 
 | **`style_subscript`** | `<sub>`, `vertical-align: sub` | `$16` (font_size), `$31` (baseline_shift) | `0.75em`, `-0.20em` |
 | **`style_code`** | `<code>`, `<pre>`, `<tt>` | `$11` (font_family), `$16` (font_size) | `"monospace"`, `0.9em` |
 | **`style_small_caps`** | `<abbr>`, `<acronym>`, `font-variant: small-caps` | `$14` (font_variant) | `$369` (small_caps) |
+| **`style_dropcap`** | `span.dropcap`, `p.has-dropcap` | `$16`, `$13`, `$42`, `$50`, `$125`, `$126` | `3.0em`, `$361` (bold), `0.9em`, `0.15em`, `3`, `1` |
+| **`style_uppercase`** | `text-transform: uppercase`, `.all-caps` | `$41` (text_transform) | `$372` (uppercase) |
 
 ### 8.5 Forced Page Break & Section Boundary Mechanics
 Kindle's e-ink rendering engine does not honor CSS `page-break-*` inside a single layout partition. To achieve guaranteed hardware page breaks:
@@ -255,5 +257,18 @@ Kindle's e-ink rendering engine does not honor CSS `page-break-*` inside a singl
 2. `fragment_large_sections` checks `block.has_page_break_before()` and the preceding block's `has_page_break_after()` as strict partition boundaries.
 3. When encountered, a new Yellowjacket `$260 section` entity is spawned immediately.
 4. Because the Kindle e-ink display firmware unconditionally flushes the screen buffer and triggers a page turn between Yellowjacket sections, page breaks render identically to physical book leaf transitions.
+
+### 8.6 Drop Caps & Initial Capital Mechanics
+In traditional EPUB styling, drop caps are implemented via `<span class="dropcap">` or CSS pseudo-elements (`p::first-letter`):
+1. `EpubReader` extracts explicit spans (`dropcap`, `initial`, `first-letter`, `dc`) and detects paragraph-level drop cap classes (`has-dropcap`, `dropcap`).
+2. For paragraph-level declarations, `finish_paragraph_spans` automatically splits the opening grapheme (including preceding punctuation like `“I`) into a standalone `TextSpan`.
+3. `KfxPackager` maps these spans to `style_dropcap` with:
+   - `$16 font_size`: `3.0em`
+   - `$42 line_height`: `0.9em`
+   - `$50 margin_right`: `0.15em`
+   - `$125 dropcap_lines`: `3`
+   - `$126 dropcap_chars`: `1`
+4. This ensures that the Kindle layout engine allocates a multi-line bounding box for the letter without overlapping text or getting cut off at screen borders.
+
 
 

@@ -102,6 +102,8 @@ pub struct StyleSymMap {
     pub subscript: u32,
     pub code: u32,
     pub small_caps: u32,
+    pub dropcap: u32,
+    pub uppercase: u32,
 }
 
 /// Generates deterministic Amazon Content Repository container ID.
@@ -558,9 +560,15 @@ impl<'a> KfxPackager<'a> {
         let sub_sym = symbols.intern("style_subscript");
         let code_sym = symbols.intern("style_code");
         let small_caps_sym = symbols.intern("style_small_caps");
+        let dropcap_sym = symbols.intern("style_dropcap");
+        let uppercase_sym = symbols.intern("style_uppercase");
 
         let sym_font_variant = symbol_id("font_variant").unwrap_or(14);
         let sym_small_caps = symbol_id("small_caps").unwrap_or(369);
+        let sym_dropcap_lines = symbol_id("dropcap_lines").unwrap_or(125);
+        let sym_dropcap_chars = symbol_id("dropcap_chars").unwrap_or(126);
+        let sym_text_transform = symbol_id("text_transform").unwrap_or(41);
+        let sym_uppercase = symbol_id("uppercase").unwrap_or(372);
 
         let make_em = |val: &str| {
             IonValue::Struct(vec![
@@ -703,6 +711,23 @@ impl<'a> KfxPackager<'a> {
             (sym_font_variant, IonValue::Symbol(sym_small_caps)),
         ]);
 
+        // 18. inline dropcap style
+        let dropcap_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(dropcap_sym)),
+            (sym_font_size, make_em("3.0")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(3)),
+            (sym_dropcap_chars, IonValue::Int(1)),
+        ]);
+
+        // 19. inline uppercase style
+        let uppercase_val = IonValue::Struct(vec![
+            (sym_name, IonValue::Symbol(uppercase_sym)),
+            (sym_text_transform, IonValue::Symbol(sym_uppercase)),
+        ]);
+
         let style_list = [
             (h1_sym, h1_val),
             (h2_sym, h2_val),
@@ -721,6 +746,8 @@ impl<'a> KfxPackager<'a> {
             (sub_sym, sub_val),
             (code_sym, code_val),
             (small_caps_sym, small_caps_val),
+            (dropcap_sym, dropcap_val),
+            (uppercase_sym, uppercase_val),
         ];
 
         for (sym_id_val, val) in style_list {
@@ -752,6 +779,8 @@ impl<'a> KfxPackager<'a> {
             subscript: sub_sym,
             code: code_sym,
             small_caps: small_caps_sym,
+            dropcap: dropcap_sym,
+            uppercase: uppercase_sym,
         }
     }
 
@@ -876,6 +905,20 @@ impl<'a> KfxPackager<'a> {
                                 (sym_offset, IonValue::Int(offset as i64)),
                                 (sym_length, IonValue::Int(span_len as i64)),
                                 (sym_style, IonValue::Symbol(styles.small_caps)),
+                            ]));
+                        }
+                        if st.contains("dropcap") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.dropcap)),
+                            ]));
+                        }
+                        if st.contains("uppercase") {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(styles.uppercase)),
                             ]));
                         }
                     }
@@ -1986,8 +2029,8 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
-        // We register 17 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps
-        assert_eq!(style_entities.len(), 17, "Expected 17 style ($157) entities in KFX container");
+        // We register 19 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps, dropcap, uppercase
+        assert_eq!(style_entities.len(), 19, "Expected 19 style ($157) entities in KFX container");
     }
 
     #[test]
@@ -2072,7 +2115,7 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
-        assert_eq!(style_count, 17);
+        assert_eq!(style_count, 19);
     }
 
     #[test]

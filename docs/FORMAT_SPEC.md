@@ -63,6 +63,9 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | **`$1`** | `$ion` | Ion system symbol |
 | **`$3`** | `$ion_symbol_table` | Embedded symbol table annotation |
 | **`$14`** | `font_variant` | Font variant property (e.g. `$369` small_caps) |
+| **`$41`** | `text_transform` | Text capitalization transform (e.g. `$372` uppercase) |
+| **`$125`** | `dropcap_lines` | Number of text lines spanned by initial drop cap |
+| **`$126`** | `dropcap_chars` | Number of initial characters in drop cap |
 | **`$145`** | `content` | Text block and inline styling payloads |
 | **`$157`** | `style` | Formatting styles |
 | **`$161`** | `format` | Resource format descriptor (`$285` jpg, `$284` png) |
@@ -77,6 +80,7 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | **`$265`** | `position_id_map` | Mapping between IDs and positions |
 | **`$271`** | `image` | Storyline image block element type |
 | **`$369`** | `small_caps` | Small caps font variant value for `$14` |
+| **`$372`** | `uppercase` | Uppercase transform value for `$41` |
 | **`$409`** | `bcContId` | Container ID descriptor |
 | **`$417`** | `bcRawMedia` | Binary media payload chunk |
 | **`$419`** | `container_entity_map` | Manifest of all entities contained in the file |
@@ -221,6 +225,8 @@ Publishing industry typographic convention requires that the opening paragraph o
 | `style_subscript` | `$157` | `$16`: 0.75em, `$31`: -0.20em | Inline subscript span |
 | `style_code` | `$157` | `$11`: `"monospace"`, `$16`: 0.9em | Inline code / preformatted text |
 | `style_small_caps` | `$157` | `$14`: `$369` (small_caps) | Inline small caps / `<abbr>` / `<acronym>` |
+| `style_dropcap` | `$157` | `$16`: 3.0em, `$13`: `$361` (bold), `$42`: 0.9em, `$50`: 0.15em, `$125`: 3, `$126`: 1 | Initial capital drop cap |
+| `style_uppercase` | `$157` | `$41`: `$372` (uppercase) | Text transform uppercase |
 
 ---
 
@@ -236,5 +242,30 @@ In Yellowjacket, each `$260 section` represents an independent reading flow boun
    - `page-break-after: always` or `break-after: page` on a block triggers a forced section break immediately after that block.
    - Self-closing or empty page break elements (`<div class="pagebreak"/>`, `<hr class="pagebreak"/>`) set a pending page break carried forward to the subsequent block.
 3. Partitioning at the Yellowjacket section level guarantees deterministic, hardware-native page breaks across all Kindle Paperwhite, Oasis, and Scribe devices without relying on unstable CSS emulation.
+
+---
+
+## 9. Drop Caps & Stylistic Class Architecture
+
+Yellowjacket natively supports initial drop capitals through a combination of relative font scaling and layout metrics:
+
+### 9.1 Drop Cap Entity Structure (`style_dropcap`)
+```ion
+$157 /* style */: {
+    $4 /* name */: $style_dropcap,
+    $16 /* font_size */: { $307: "3.0", $306: $308 /* 3.0em */ },
+    $13 /* font_weight */: $361 /* bold */,
+    $42 /* line_height */: { $307: "0.9", $306: $308 /* 0.9em */ },
+    $50 /* margin_right */: { $307: "0.15", $306: $308 /* 0.15em */ },
+    $125 /* dropcap_lines */: 3,
+    $126 /* dropcap_chars */: 1
+}
+```
+
+### 9.2 Ingestion & Pseudo-Element Emulation
+- **Explicit Spans**: Detected on `<span class="dropcap">`, `class="initial"`, `class="first-letter"`, `class="dc"`.
+- **CSS Pseudo-Element (`p.dropcap::first-letter`)**: When a paragraph element bears drop cap styling (`<p class="dropcap">` or `<p class="has-dropcap">`), the converter automatically isolates the leading character (including any leading opening quotation mark, e.g., `“I`) into a dedicated dropcap `TextSpan`.
+- **Hardware Compatibility**: Standardizing on relative `3.0em` size with `0.9em` line height prevents clipping against the top edge or overlapping subsequent body text lines on e-ink displays.
+
 
 

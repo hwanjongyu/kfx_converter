@@ -610,12 +610,53 @@ impl EpubReader {
         // Block state
         let mut in_p = false;
         let mut p_style: Option<String> = None;
+        let mut p_has_dropcap = false;
         let mut in_heading = false;
         let mut heading_level = 1u8;
         let mut heading_style: Option<String> = None;
         let mut pending_page_break = false;
         let mut ignore_depth = 0usize;
         let mut first_paragraph_seen = false;
+
+        let finish_paragraph_spans = |spans: &mut Vec<TextSpan>, p_dropcap: bool| {
+            if p_dropcap && !spans.is_empty() {
+                let already_has_dropcap = spans.iter().any(|s| s.style.as_deref().map_or(false, |st| st.contains("dropcap")));
+                if !already_has_dropcap {
+                    let first = &mut spans[0];
+                    let trimmed = first.text.trim_start();
+                    let leading_spaces = first.text.len() - trimmed.len();
+                    let mut chars = trimmed.chars();
+                    if let Some(first_ch) = chars.next() {
+                        let take_len = if first_ch == '“' || first_ch == '"' || first_ch == '‘' || first_ch == '\'' {
+                            if let Some(second_ch) = chars.next() {
+                                first_ch.len_utf8() + second_ch.len_utf8()
+                            } else {
+                                first_ch.len_utf8()
+                            }
+                        } else {
+                            first_ch.len_utf8()
+                        };
+                        let drop_text = format!("{}{}", &first.text[..leading_spaces], &trimmed[..take_len]);
+                        let rest_text = trimmed[take_len..].to_string();
+                        let orig_style = first.style.take();
+                        let drop_style = match &orig_style {
+                            Some(s) => format!("{} dropcap", s),
+                            None => "dropcap".to_string(),
+                        };
+                        first.text = drop_text;
+                        first.style = Some(drop_style);
+                        if !rest_text.is_empty() {
+                            spans.insert(1, TextSpan {
+                                text: rest_text,
+                                style: orig_style,
+                                anchor_id: None,
+                                href: None,
+                            });
+                        }
+                    }
+                }
+            }
+        };
 
         // Table state
         let mut table_rows: Vec<Vec<String>> = Vec::new();
@@ -730,6 +771,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -742,6 +784,7 @@ impl EpubReader {
                                         }
                                     }
                                     in_p = false;
+                                    p_has_dropcap = false;
                                 }
                                 for attr in e.attributes().flatten() {
                                     let key = attr.key.as_ref();
@@ -763,6 +806,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -776,6 +820,7 @@ impl EpubReader {
                                     }
                                 }
                                 in_p = true;
+                                p_has_dropcap = false;
                                 let mut p_tokens = Vec::new();
                                 if local_bytes == b"blockquote" {
                                     p_tokens.push("blockquote".to_string());
@@ -787,7 +832,11 @@ impl EpubReader {
                                     let key = attr.key.as_ref();
                                     if key == b"style" {
                                         let val = String::from_utf8_lossy(&attr.value);
-                                        p_tokens.extend(Self::sanitize_css_style(&val));
+                                        let tokens = Self::sanitize_css_style(&val);
+                                        if tokens.contains(&"dropcap".to_string()) {
+                                            p_has_dropcap = true;
+                                        }
+                                        p_tokens.extend(tokens);
                                     } else if key == b"class" {
                                         let val = String::from_utf8_lossy(&attr.value).to_lowercase();
                                         if val.contains("pagebreak") || val.contains("page-break") {
@@ -795,6 +844,11 @@ impl EpubReader {
                                         }
                                         if val.contains("small-caps") || val.contains("smallcaps") {
                                             p_tokens.push("small_caps".to_string());
+                                        }
+                                        for cls in val.split_whitespace() {
+                                            if cls == "dropcap" || cls == "drop-cap" || cls == "initial" || cls == "first-letter" || cls == "has-dropcap" || cls == "has-drop-cap" || cls == "dc" {
+                                                p_has_dropcap = true;
+                                            }
                                         }
                                     } else if key == b"align" {
                                         let val = String::from_utf8_lossy(&attr.value).to_lowercase();
@@ -828,6 +882,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -840,6 +895,7 @@ impl EpubReader {
                                         }
                                     }
                                     in_p = false;
+                                    p_has_dropcap = false;
                                 }
                                 in_heading = true;
                                 heading_level = local_bytes[1].saturating_sub(b'0');
@@ -856,6 +912,9 @@ impl EpubReader {
                                         }
                                         if val.contains("small-caps") || val.contains("smallcaps") {
                                             h_tokens.push("small_caps".to_string());
+                                        }
+                                        if val.contains("uppercase") || val.contains("all-caps") {
+                                            h_tokens.push("uppercase".to_string());
                                         }
                                     }
                                 }
@@ -917,9 +976,20 @@ impl EpubReader {
                                         span_tokens.extend(Self::sanitize_css_style(&val));
                                     } else if attr.key.as_ref() == b"class" {
                                         let val = String::from_utf8_lossy(&attr.value).to_lowercase();
-                                        if val.contains("small-caps") || val.contains("smallcaps") {
-                                            span_tokens.push("small_caps".to_string());
-                                        } else {
+                                        let mut has_known = false;
+                                        for cls in val.split_whitespace() {
+                                            if cls == "small-caps" || cls == "smallcaps" {
+                                                span_tokens.push("small_caps".to_string());
+                                                has_known = true;
+                                            } else if cls == "dropcap" || cls == "drop-cap" || cls == "drop_cap" || cls == "initial" || cls == "first-letter" || cls == "initial-letter" || cls == "dc" {
+                                                span_tokens.push("dropcap".to_string());
+                                                has_known = true;
+                                            } else if cls == "uppercase" || cls == "all-caps" || cls == "allcaps" || cls == "caps" {
+                                                span_tokens.push("uppercase".to_string());
+                                                has_known = true;
+                                            }
+                                        }
+                                        if !has_known {
                                             span_tokens.push(val);
                                         }
                                     }
@@ -953,6 +1023,7 @@ impl EpubReader {
                                     if in_p || in_heading || in_li {
                                         flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                         if !current_spans.is_empty() {
+                                            finish_paragraph_spans(&mut current_spans, p_has_dropcap);
                                             let p_id = format!("p_{}", blocks.len() + 1);
                                             let p_block = Block::Paragraph {
                                                 id: p_id,
@@ -965,6 +1036,7 @@ impl EpubReader {
                                                 blocks.push(p_block);
                                             }
                                         }
+                                        p_has_dropcap = false;
                                     }
                                     if in_li {
                                         current_list_item_blocks.push(img_block);
@@ -1012,6 +1084,7 @@ impl EpubReader {
                                     if in_p || in_heading || in_li {
                                         flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                         if !current_spans.is_empty() {
+                                            finish_paragraph_spans(&mut current_spans, p_has_dropcap);
                                             let p_id = format!("p_{}", blocks.len() + 1);
                                             let p_block = Block::Paragraph {
                                                 id: p_id,
@@ -1024,6 +1097,7 @@ impl EpubReader {
                                                 blocks.push(p_block);
                                             }
                                         }
+                                        p_has_dropcap = false;
                                     }
                                     if in_li {
                                         current_list_item_blocks.push(img_block);
@@ -1063,6 +1137,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -1075,6 +1150,7 @@ impl EpubReader {
                                         }
                                     }
                                     in_p = false;
+                                    p_has_dropcap = false;
                                 }
                             }
                             b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
@@ -1184,6 +1260,7 @@ impl EpubReader {
                     if in_p {
                         flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                         if !current_spans.is_empty() {
+                            finish_paragraph_spans(&mut current_spans, p_has_dropcap);
                             let p_block = Block::Paragraph {
                                 id: format!("p_{}", blocks.len() + 1),
                                 spans: std::mem::take(&mut current_spans),
@@ -1326,6 +1403,16 @@ impl EpubReader {
                         if v.contains("small-caps") {
                             tokens.push("small_caps".to_string());
                         }
+                    }
+                    "text-transform" => {
+                        if v.contains("uppercase") {
+                            tokens.push("uppercase".to_string());
+                        } else if v.contains("lowercase") {
+                            tokens.push("lowercase".to_string());
+                        }
+                    }
+                    "initial-letter" => {
+                        tokens.push("dropcap".to_string());
                     }
                     _ => {}
                 }
@@ -1670,6 +1757,59 @@ mod tests {
             let s = style.as_ref().expect("Paragraph style");
             assert!(s.contains("page_break_before"), "Paragraph must inherit pending page_break_before");
             assert!(blocks[3].has_page_break_before());
+        } else {
+            panic!("Expected paragraph 3");
+        }
+    }
+
+    #[test]
+    fn test_parse_xhtml_dropcap_and_stylistic_classes() {
+        let manifest = HashMap::new();
+        let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+    <p><span class="dropcap">O</span>nce upon a midnight dreary.</p>
+    <p class="has-dropcap">“It was the best of times, it was the worst of times.”</p>
+    <p><span class="initial">T</span>here was a boy called Eustace Clarence Scrubb.</p>
+    <p><span class="all-caps">Important notice</span> and <span style="text-transform: uppercase">loud speech</span>.</p>
+</body>
+</html>"#;
+        let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
+        assert_eq!(blocks.len(), 4, "Expected 4 paragraph blocks");
+
+        // 1. Explicit <span class="dropcap">
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            assert_eq!(spans[0].text, "O");
+            assert_eq!(spans[0].style.as_deref(), Some("dropcap"));
+            assert_eq!(spans[1].text, "nce upon a midnight dreary.");
+        } else {
+            panic!("Expected paragraph 0");
+        }
+
+        // 2. Automatic extraction from <p class="has-dropcap"> with opening quote
+        if let Block::Paragraph { spans, .. } = &blocks[1] {
+            assert_eq!(spans[0].text, "“I");
+            assert_eq!(spans[0].style.as_deref(), Some("dropcap"));
+            assert_eq!(spans[1].text, "t was the best of times, it was the worst of times.”");
+        } else {
+            panic!("Expected paragraph 1");
+        }
+
+        // 3. Class "initial"
+        if let Block::Paragraph { spans, .. } = &blocks[2] {
+            assert_eq!(spans[0].text, "T");
+            assert_eq!(spans[0].style.as_deref(), Some("dropcap"));
+            assert_eq!(spans[1].text, "here was a boy called Eustace Clarence Scrubb.");
+        } else {
+            panic!("Expected paragraph 2");
+        }
+
+        // 4. Stylistic uppercase classes and styles
+        if let Block::Paragraph { spans, .. } = &blocks[3] {
+            let caps_span = spans.iter().find(|s| s.text == "Important notice").expect("all-caps span");
+            assert_eq!(caps_span.style.as_deref(), Some("uppercase"));
+            let upper_span = spans.iter().find(|s| s.text == "loud speech").expect("uppercase style span");
+            assert_eq!(upper_span.style.as_deref(), Some("uppercase"));
         } else {
             panic!("Expected paragraph 3");
         }
