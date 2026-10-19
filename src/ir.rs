@@ -91,6 +91,7 @@ pub struct BookIR {
     pub resources: HashMap<String, ResourceAsset>,
     pub toc: Vec<TocItem>,
     pub page_list: Vec<PageEntry>,
+    pub footnotes: HashMap<String, String>,
 }
 
 impl Block {

@@ -270,5 +270,42 @@ In traditional EPUB styling, drop caps are implemented via `<span class="dropcap
    - `$126 dropcap_chars`: `1`
 4. This ensures that the Kindle layout engine allocates a multi-line bounding box for the letter without overlapping text or getting cut off at screen borders.
 
+---
+
+## 9. Pop-up Footnotes & Auxiliary Data (`$617 yj.note`, `$597 auxiliary_data`)
+
+Kindle Enhanced Typesetting avoids disrupting the reading flow on footnotes by rendering an overlay card instead of triggering a full page navigation.
+
+### 9.1 The `$597 auxiliary_data` Container
+In Yellowjacket, each section is accompanied by an auxiliary data entity (`$597`) in the container. This chunk carries metadata (such as `IS_TARGET_SECTION`) and an optional `$617 yj.note` list:
+
+```ion
+$597 /* auxiliary_data */: {
+    $598 /* kfx_id */: $c_sec_1-ad,
+    $258 /* metadata */: [
+        {
+            $492 /* key */: "IS_TARGET_SECTION",
+            $307 /* value */: true
+        }
+    ],
+    $617 /* yj.note */: [
+        {
+            $155 /* id */: $note-fn1,
+            $492 /* key */: "fn1",
+            $159 /* type */: $281 /* footnote */,
+            $440 /* popup */: true,
+            $444 /* popup_text */: "Explanation text..."
+        }
+    ]
+}
+```
+
+### 9.2 Note Activation & Kindle OS Interception
+1. **Link Tap Interception**: When a reader taps a span with `href="#fn1"`, the layout engine queries the section's `$597 auxiliary_data` entity.
+2. **Matching Key**: If an item in `$617 yj.note` has `$492 key == "fn1"` and `$440 popup == true`, `KPPMainApp` intercepts the navigation event.
+3. **Modal Dialog Rendering**: The `$444 popup_text` string is rendered into a transient modal dialog overlay without navigating away from the current page.
+4. **Backlink Sanitization**: EPUB footnotes typically feature return arrows (`↩`, `↵`, `^`) linking back to the text. `kfx-converter` strips these trailing glyphs so the pop-up modal contains clean, legible explanatory prose without dead-end return characters.
+
+
 
 

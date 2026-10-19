@@ -155,6 +155,7 @@ impl EpubReader {
         // 5. Read spine chapters into Sections and build href -> section_id lookup map
         let mut sections = Vec::with_capacity(spine.len());
         let mut href_to_section = HashMap::new();
+        let mut all_footnotes = HashMap::new();
 
         for (idx, item_id) in spine.iter().enumerate() {
             if let Some(item) = manifest.get(item_id) {
@@ -165,7 +166,7 @@ impl EpubReader {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
                 if !file_name.is_empty() {
-                    href_to_section.insert(file_name, sec_id.clone());
+                    href_to_section.insert(file_name.clone(), sec_id.clone());
                 }
 
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
@@ -173,7 +174,14 @@ impl EpubReader {
                     let mut xhtml = String::new();
                     let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
                     if limited.read_to_string(&mut xhtml).is_ok() {
-                        let blocks = Self::parse_xhtml_blocks_with_manifest(&xhtml, &href_to_id);
+                        let (blocks, sec_footnotes) = Self::parse_xhtml_with_manifest(&xhtml, &href_to_id);
+                        for (fn_id, fn_text) in sec_footnotes {
+                            all_footnotes.insert(fn_id.clone(), fn_text.clone());
+                            all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
+                            if !file_name.is_empty() {
+                                all_footnotes.insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
+                            }
+                        }
                         let detected_title = blocks.iter().find_map(|b| {
                             if let Block::Heading { spans, .. } = b {
                                 let t = spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ").trim().to_string();
@@ -208,6 +216,7 @@ impl EpubReader {
             resources,
             toc,
             page_list: Vec::new(),
+            footnotes: all_footnotes,
         })
     }
 
@@ -588,9 +597,22 @@ impl EpubReader {
     }
 
     fn parse_xhtml_blocks_with_manifest(xhtml: &str, href_to_id: &HashMap<String, String>) -> Vec<Block> {
+        Self::parse_xhtml_with_manifest(xhtml, href_to_id).0
+    }
+
+    pub fn parse_xhtml_with_manifest(
+        xhtml: &str,
+        href_to_id: &HashMap<String, String>,
+    ) -> (Vec<Block>, HashMap<String, String>) {
         let mut blocks = Vec::new();
+        let mut footnotes = HashMap::new();
         let mut xml_reader = XmlReader::from_str(xhtml);
         let mut buf = Vec::new();
+
+        // Footnote extraction state
+        let mut footnote_depth = 0usize;
+        let mut current_footnote_id: Option<String> = None;
+        let mut current_footnote_text = String::new();
 
         // Style & Inline state
         let mut bold = false;
@@ -766,6 +788,35 @@ impl EpubReader {
                     } else if ignore_depth > 0 {
                         // ignore inside script/style
                     } else {
+                        if footnote_depth > 0 {
+                            footnote_depth += 1;
+                        } else {
+                            let mut elem_id: Option<String> = None;
+                            let mut is_footnote_container = false;
+                            for attr in e.attributes().flatten() {
+                                let key = attr.key.as_ref();
+                                if key == b"id" {
+                                    elem_id = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                } else if key == b"epub:type" || key == b"role" || key == b"class" {
+                                    let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                    if val.contains("footnote") || val.contains("endnote") || val.contains("notediv") {
+                                        is_footnote_container = true;
+                                    }
+                                }
+                            }
+                            if let Some(ref id) = elem_id {
+                                let lower_id = id.to_lowercase();
+                                if lower_id.starts_with("fn") || lower_id.starts_with("footnote") || lower_id.starts_with("note") {
+                                    is_footnote_container = true;
+                                }
+                            }
+                            if is_footnote_container && elem_id.is_some() {
+                                footnote_depth = 1;
+                                current_footnote_id = elem_id;
+                                current_footnote_text.clear();
+                            }
+                        }
+
                         match local_bytes {
                             b"div" | b"section" | b"article" | b"main" | b"aside" => {
                                 if in_p {
@@ -956,12 +1007,25 @@ impl EpubReader {
                             }
                             b"a" => {
                                 flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                let mut is_noteref = false;
                                 for attr in e.attributes().flatten() {
                                     if attr.key.as_ref() == b"href" {
                                         current_href = Some(String::from_utf8_lossy(&attr.value).to_string());
                                     } else if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name" {
                                         current_anchor = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                    } else if attr.key.as_ref() == b"epub:type" || attr.key.as_ref() == b"role" || attr.key.as_ref() == b"class" {
+                                        let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                                        if val.contains("noteref") || val.contains("footnote-ref") || val.contains("footnote_ref") || val.contains("fnref") {
+                                            is_noteref = true;
+                                        }
                                     }
+                                }
+                                if is_noteref {
+                                    let style = match &current_style {
+                                        Some(s) => format!("{} noteref", s),
+                                        None => "noteref".to_string(),
+                                    };
+                                    current_style = Some(style);
                                 }
                             }
                             b"span" | b"abbr" | b"acronym" => {
@@ -1113,6 +1177,9 @@ impl EpubReader {
                 Ok(Event::Text(ref e)) => {
                     if ignore_depth == 0 {
                         let text = e.unescape().unwrap_or_default();
+                        if footnote_depth > 0 {
+                            current_footnote_text.push_str(&text);
+                        }
                         if in_cell {
                             current_cell.push_str(&text);
                         } else if in_p || in_heading || in_li {
@@ -1132,6 +1199,26 @@ impl EpubReader {
                     if (local_bytes == b"script" || local_bytes == b"style") && ignore_depth > 0 {
                         ignore_depth -= 1;
                     } else if ignore_depth == 0 {
+                        if footnote_depth > 0 {
+                            footnote_depth -= 1;
+                            if footnote_depth == 0 {
+                                if let Some(fn_id) = current_footnote_id.take() {
+                                    let mut cleaned = current_footnote_text.trim().to_string();
+                                    while let Some(last_ch) = cleaned.chars().last() {
+                                        if last_ch == '↩' || last_ch == '⮐' || last_ch == '↵' || last_ch == '^' || last_ch == '↑' || last_ch.is_whitespace() {
+                                            cleaned.pop();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    let cleaned = cleaned.trim().to_string();
+                                    if !cleaned.is_empty() {
+                                        footnotes.insert(fn_id, cleaned);
+                                    }
+                                }
+                                current_footnote_text.clear();
+                            }
+                        }
                         match local_bytes {
                             b"p" | b"blockquote" | b"center" | b"div" | b"section" | b"article" | b"main" | b"aside" => {
                                 if in_p {
@@ -1204,6 +1291,10 @@ impl EpubReader {
                                 flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 current_href = None;
                                 current_anchor = None;
+                                if let Some(ref st) = current_style {
+                                    let new_st = st.replace("noteref", "").trim().to_string();
+                                    current_style = if new_st.is_empty() { None } else { Some(new_st) };
+                                }
                             }
                             b"span" | b"abbr" | b"acronym" => {
                                 flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
@@ -1295,7 +1386,7 @@ impl EpubReader {
             buf.clear();
         }
 
-        blocks
+        (blocks, footnotes)
     }
 
     fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
@@ -1813,6 +1904,48 @@ mod tests {
         } else {
             panic!("Expected paragraph 3");
         }
+    }
+
+    #[test]
+    fn test_parse_xhtml_footnotes_and_noteref() {
+        let xhtml = r##"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+    <p>This is a quantum statement<a href="#fn1" epub:type="noteref" class="noteref">1</a> and another note<a href="#fn2" role="doc-noteref">[2]</a>.</p>
+    <aside epub:type="footnote" id="fn1">
+        <p>1. Quantum mechanics is the study of matter and light at microscopic scales. <a href="#fnref1">↩</a></p>
+    </aside>
+    <div class="footnote" id="fn2">
+        <p>[2] See Heisenberg Uncertainty Principle. ^</p>
+    </div>
+</body>
+</html>"##;
+        let manifest = HashMap::new();
+        let (blocks, footnotes) = EpubReader::parse_xhtml_with_manifest(xhtml, &manifest);
+        assert!(!blocks.is_empty());
+
+        // Check noteref styling on paragraph 0 spans
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            let fn1_span = spans.iter().find(|s| s.text == "1").expect("fn1 span");
+            assert_eq!(fn1_span.href.as_deref(), Some("#fn1"));
+            assert!(fn1_span.style.as_deref().unwrap_or("").contains("noteref"));
+
+            let fn2_span = spans.iter().find(|s| s.text == "[2]").expect("fn2 span");
+            assert_eq!(fn2_span.href.as_deref(), Some("#fn2"));
+            assert!(fn2_span.style.as_deref().unwrap_or("").contains("noteref"));
+        } else {
+            panic!("Expected paragraph block");
+        }
+
+        // Check footnote extraction and backlink stripping
+        assert_eq!(
+            footnotes.get("fn1").map(|s| s.as_str()),
+            Some("1. Quantum mechanics is the study of matter and light at microscopic scales.")
+        );
+        assert_eq!(
+            footnotes.get("fn2").map(|s| s.as_str()),
+            Some("[2] See Heisenberg Uncertainty Principle.")
+        );
     }
 }
 

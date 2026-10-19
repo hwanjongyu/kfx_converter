@@ -869,8 +869,12 @@ pub const SYM_CONTENT_FEATURES: u32 = 585;
 pub const SYM_FORMAT_CAPABILITIES: u32 = 593;
 pub const SYM_BC_FCAPABILITIES_OFFSET: u32 = 594;
 pub const SYM_BC_FCAPABILITIES_LENGTH: u32 = 595;
+pub const SYM_FOOTNOTE: u32 = 281;
+pub const SYM_POPUP: u32 = 440;
+pub const SYM_POPUP_TEXT: u32 = 444;
 pub const SYM_AUXILIARY_DATA: u32 = 597;
 pub const SYM_SECTION_POSITION_ID_MAP: u32 = 609;
+pub const SYM_YJ_NOTE: u32 = 617;
 pub const SYM_YJ_LOCATION_PID_MAP: u32 = 621;
 
 /// Get the symbol name for a given symbol ID.

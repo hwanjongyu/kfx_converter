@@ -426,6 +426,7 @@ mod tests {
             resources: std::collections::HashMap::new(),
             toc: Vec::new(),
             page_list: Vec::new(),
+            footnotes: std::collections::HashMap::new(),
         };
 
         let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
@@ -469,6 +470,7 @@ mod tests {
             resources: std::collections::HashMap::new(),
             toc: Vec::new(),
             page_list: Vec::new(),
+            footnotes: std::collections::HashMap::new(),
         };
 
         let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")

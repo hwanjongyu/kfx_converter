@@ -79,6 +79,7 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | **`$264`** | `position_map` | Mapping between positions and content elements |
 | **`$265`** | `position_id_map` | Mapping between IDs and positions |
 | **`$271`** | `image` | Storyline image block element type |
+| **`$281`** | `footnote` | Note type descriptor for `yj.note` pop-up cards |
 | **`$369`** | `small_caps` | Small caps font variant value for `$14` |
 | **`$372`** | `uppercase` | Uppercase transform value for `$41` |
 | **`$409`** | `bcContId` | Container ID descriptor |
@@ -86,6 +87,8 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | **`$419`** | `container_entity_map` | Manifest of all entities contained in the file |
 | **`$422`** | `resource_width` | Pixel width required by Kindle layout engine |
 | **`$423`** | `resource_height` | Pixel height required by Kindle layout engine |
+| **`$440`** | `popup` | Yellowjacket note pop-up modal activation flag |
+| **`$444`** | `popup_text` | Cleaned footnote text payload for pop-up card |
 | **`$490`** | `book_metadata` | High-level book title, author, and language |
 | **`$538`** | `document_data` | Document layout and baseline typographical rules |
 | **`$584`** | `alt_text` | Storyline image accessibility/alt text |
@@ -93,6 +96,7 @@ Amazon KFX relies on indexed symbol tables to minimize string overhead:
 | **`$593`** | `format_capabilities` | Container capabilities header |
 | **`$597`** | `auxiliary_data` | Supplemental per-section reading data |
 | **`$609`** | `section_position_id_map` | Per-section position identifier index |
+| **`$617`** | `yj.note` | Note reference list in auxiliary data for pop-up dialogs |
 | **`$621`** | `yj.location_pid_map` | Yellowjacket location to PID mapping |
 
 ---
@@ -266,6 +270,57 @@ $157 /* style */: {
 - **Explicit Spans**: Detected on `<span class="dropcap">`, `class="initial"`, `class="first-letter"`, `class="dc"`.
 - **CSS Pseudo-Element (`p.dropcap::first-letter`)**: When a paragraph element bears drop cap styling (`<p class="dropcap">` or `<p class="has-dropcap">`), the converter automatically isolates the leading character (including any leading opening quotation mark, e.g., `“I`) into a dedicated dropcap `TextSpan`.
 - **Hardware Compatibility**: Standardizing on relative `3.0em` size with `0.9em` line height prevents clipping against the top edge or overlapping subsequent body text lines on e-ink displays.
+
+---
+
+## 10. Kindle Pop-up Footnotes & Note References Architecture
+
+Modern Kindle e-readers running Enhanced Typesetting provide a floating pop-up card modal when tapping footnote references, avoiding jarring page transitions to the end of the chapter or book.
+
+### 10.1 EPUB Footnote Ingestion
+`EpubReader` extracts footnote references and footnote definitions into `BookIR`:
+1. **Footnote References (`noteref`)**:
+   - Detected on `<a>` tags bearing `epub:type="noteref"`, `role="doc-noteref"`, or classes `noteref`, `footnote-ref`, `footnote_ref`, `fnref`.
+   - Tagged with `"noteref"` style on the inline `TextSpan`, preserving target link `href` (`#fn1` or `notes.xhtml#fn1`).
+2. **Footnote Containers (`doc-footnote`)**:
+   - Detected on `<aside>`, `<div>`, `<p>`, or `<li>` elements where:
+     - `epub:type` or `role` contains `footnote` or `endnote`, or
+     - `class` contains `footnote` or `endnote`, or
+     - `id` starts with `fn`, `footnote`, or `note`.
+   - Text is collected across all child elements and cleaned:
+     - Leading and trailing whitespace is stripped.
+     - Trailing backlink markers (`↩`, `⮐`, `↵`, `^`, `↑`) are automatically removed to prevent raw glyph clutter in the pop-up modal.
+   - Stored in `BookIR.footnotes: HashMap<String, String>` keyed by both local anchor (`fn1`) and cross-file paths (`chapter.xhtml#fn1`).
+
+### 10.2 Yellowjacket Auxiliary Data (`$597`) & Note Entities (`$617 yj.note`)
+For each section, `KfxPackager` inspects all block spans for referenced footnote anchors. If matching footnotes exist in `BookIR.footnotes`, a `$617 yj.note` list is attached to the section's `$597 auxiliary_data` entity:
+
+```ion
+$597 /* auxiliary_data */: {
+    $598 /* kfx_id */: $c_sec_1-ad,
+    $258 /* metadata */: [
+        {
+            $492 /* key */: "IS_TARGET_SECTION",
+            $307 /* value */: true
+        }
+    ],
+    $617 /* yj.note */: [
+        {
+            $155 /* id */: $note-fn1,
+            $492 /* key */: "fn1",
+            $159 /* type */: $281 /* footnote */,
+            $440 /* popup */: true,
+            $444 /* popup_text */: "Quantum mechanics is the study of matter and light at microscopic scales."
+        }
+    ]
+}
+```
+
+### 10.3 Kindle OS Runtime Interaction
+- When a user taps a hyperlink whose target anchor matches any `$492 key` in the section's `$617 yj.note` list with `$440 popup: true`, the Kindle layout engine intercepts navigation.
+- An in-page modal dialog appears floating over the reading surface displaying `$444 popup_text`.
+- Tapping outside the modal dismisses it without page reload, maintaining the user's reading position.
+
 
 
 

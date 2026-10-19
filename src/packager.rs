@@ -14,8 +14,8 @@ use crate::ir::{Block, BookIR, Section, TextSpan, DEFAULT_MAX_SECTION_BLOCKS, DE
 use crate::symbols::{
     symbol_id, SYM_AUXILIARY_DATA, SYM_BOOK_METADATA, SYM_CONTAINER_ENTITY_MAP,
     SYM_CONTENT, SYM_CONTENT_FEATURES, SYM_DOCUMENT_DATA, SYM_FORMAT_CAPABILITIES,
-    SYM_METADATA, SYM_SECTION, SYM_SECTION_POSITION_ID_MAP, SYM_STORYLINE,
-    SYM_YJ_LOCATION_PID_MAP,
+    SYM_FOOTNOTE, SYM_METADATA, SYM_POPUP, SYM_POPUP_TEXT, SYM_SECTION,
+    SYM_SECTION_POSITION_ID_MAP, SYM_STORYLINE, SYM_YJ_LOCATION_PID_MAP, SYM_YJ_NOTE,
 };
 
 pub const SINGLETON_ID: u32 = 348; // $null in KFX symbol table
@@ -814,6 +814,10 @@ impl<'a> KfxPackager<'a> {
         let sym_metadata = symbol_id("metadata").unwrap_or(258);
         let sym_key = symbol_id("key").unwrap_or(492);
         let sym_val = symbol_id("value").unwrap_or(307);
+        let sym_yj_note = SYM_YJ_NOTE; // 617
+        let sym_footnote = SYM_FOOTNOTE; // 281
+        let sym_popup = SYM_POPUP; // 440
+        let sym_popup_text = SYM_POPUP_TEXT; // 444
 
         let num_sections = self.sections.len();
         let mut section_data = Vec::with_capacity(num_sections);
@@ -1132,8 +1136,65 @@ impl<'a> KfxPackager<'a> {
                 data: sec_writer.into_bytes(),
             });
 
-            // 4. Auxiliary Data entity ($597) IS_TARGET_SECTION
-            let ad_val = IonValue::Struct(vec![
+            // Scan section blocks for referenced footnotes
+            let mut referenced_footnotes = Vec::new();
+            for b in &sec.blocks {
+                match b {
+                    Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+                        for span in spans {
+                            if let Some(ref href) = span.href {
+                                let anchor = if let Some(pos) = href.find('#') {
+                                    &href[pos + 1..]
+                                } else {
+                                    href.as_str()
+                                };
+                                if let Some(fn_text) = self.book.footnotes.get(anchor).or_else(|| self.book.footnotes.get(href)) {
+                                    referenced_footnotes.push((anchor.to_string(), fn_text.clone()));
+                                }
+                            }
+                        }
+                    }
+                    Block::List { items, .. } => {
+                        for item_blocks in items {
+                            for b in item_blocks {
+                                if let Block::Paragraph { spans, .. } = b {
+                                    for span in spans {
+                                        if let Some(ref href) = span.href {
+                                            let anchor = if let Some(pos) = href.find('#') {
+                                                &href[pos + 1..]
+                                            } else {
+                                                href.as_str()
+                                            };
+                                            if let Some(fn_text) = self.book.footnotes.get(anchor).or_else(|| self.book.footnotes.get(href)) {
+                                                referenced_footnotes.push((anchor.to_string(), fn_text.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut seen_fn = std::collections::HashSet::new();
+            let mut note_items = Vec::new();
+            for (anchor, fn_text) in referenced_footnotes {
+                if seen_fn.insert(anchor.clone()) {
+                    let note_sym_id = symbols.intern(&format!("note-{}", anchor));
+                    note_items.push(IonValue::Struct(vec![
+                        (sym_id, IonValue::Symbol(note_sym_id)),
+                        (sym_key, IonValue::String(anchor)),
+                        (sym_type, IonValue::Symbol(sym_footnote)),
+                        (sym_popup, IonValue::Bool(true)),
+                        (sym_popup_text, IonValue::String(fn_text)),
+                    ]));
+                }
+            }
+
+            // 4. Auxiliary Data entity ($597) IS_TARGET_SECTION and yj.note ($617)
+            let mut ad_fields = vec![
                 (sym_kfx_id, IonValue::Symbol(ad_sym_id)),
                 (
                     sym_metadata,
@@ -1145,7 +1206,13 @@ impl<'a> KfxPackager<'a> {
                         (sym_val, IonValue::Bool(true)),
                     ])]),
                 ),
-            ]);
+            ];
+
+            if !note_items.is_empty() {
+                ad_fields.push((sym_yj_note, IonValue::List(note_items)));
+            }
+
+            let ad_val = IonValue::Struct(ad_fields);
             let mut ad_writer = IonWriter::new();
             ad_writer.write_bvm();
             ad_writer.write_value(&ad_val);
@@ -2268,6 +2335,66 @@ mod tests {
             .find(|e| e.chunk_type == sym_raw_media)
             .expect("Raw media entity missing");
         assert!(!raw_media.data.is_empty());
+    }
+
+    #[test]
+    fn test_packager_emits_yj_note_popup_footnotes() {
+        let mut book = BookIR::default();
+        book.metadata.title = "Popup Footnotes Test".to_string();
+        book.footnotes.insert(
+            "fn1".to_string(),
+            "Pop-up explanation of quantum mechanics.".to_string(),
+        );
+
+        book.sections.push(Section {
+            id: "sec1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "Quantum mechanics is fundamental".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                        },
+                        TextSpan {
+                            text: "[1]".to_string(),
+                            style: Some("noteref".to_string()),
+                            anchor_id: Some("fnref1".to_string()),
+                            href: Some("#fn1".to_string()),
+                        },
+                    ],
+                    style: None,
+                },
+            ],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        packager.package(&mut buffer).expect("Packaging with footnotes failed");
+
+        // Verify auxiliary_data entity contains yj.note ($617)
+        let ad_entity = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == SYM_AUXILIARY_DATA)
+            .expect("Auxiliary data ($597) entity missing");
+
+        // Check that the auxiliary data payload contains the footnote text
+        let fn_text_bytes = "Pop-up explanation of quantum mechanics.".as_bytes();
+        assert!(
+            ad_entity.data.windows(fn_text_bytes.len()).any(|w| w == fn_text_bytes),
+            "Auxiliary data entity ($597) must encode popup_text for fn1"
+        );
+
+        // Check that anchor key "fn1" is present
+        let fn_key_bytes = b"fn1";
+        assert!(
+            ad_entity.data.windows(fn_key_bytes.len()).any(|w| w == fn_key_bytes),
+            "Auxiliary data entity ($597) must encode key 'fn1'"
+        );
     }
 }
 
