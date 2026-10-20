@@ -26,6 +26,21 @@ impl Theme {
         hsla(222.0 / 360.0, 0.30, 0.20, 1.0)
     }
 
+    #[inline]
+    pub fn scrollbar_track() -> Hsla {
+        hsla(222.0 / 360.0, 0.35, 0.18, 0.95)
+    }
+
+    #[inline]
+    pub fn scrollbar_thumb() -> Hsla {
+        hsla(38.0 / 360.0, 0.95, 0.52, 1.0)
+    }
+
+    #[inline]
+    pub fn scrollbar_thumb_hover() -> Hsla {
+        hsla(38.0 / 360.0, 1.0, 0.60, 1.0)
+    }
+
     // Accent colors
     #[inline]
     pub fn accent_amber() -> Hsla {

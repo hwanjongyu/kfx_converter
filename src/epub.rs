@@ -46,6 +46,26 @@ pub struct ManifestItem {
 pub struct EpubReader;
 
 impl EpubReader {
+    /// Fast-path to extract only metadata (title, author, identifier, language) without parsing chapters or assets.
+    pub fn read_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<BookMetadata, EpubError> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut archive = ZipArchive::new(reader)?;
+
+        let opf_path = Self::find_opf_path(&mut archive)?;
+        let opf_content = {
+            let mut entry = archive
+                .by_name(&opf_path)
+                .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
+            let mut s = String::new();
+            (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s)?;
+            s
+        };
+
+        let (metadata, _, _) = Self::parse_opf(&opf_content)?;
+        Ok(metadata)
+    }
+
     /// Opens and parses an EPUB file into a normalized `BookIR`.
     pub fn read_from_file<P: AsRef<Path>>(path: P) -> Result<BookIR, EpubError> {
         let file = File::open(path)?;
@@ -263,16 +283,38 @@ impl EpubReader {
         let mut manifest = HashMap::new();
         let mut spine = Vec::new();
 
+        let mut titles: Vec<(Option<String>, Option<String>, String)> = Vec::new();
+        let mut title_types: HashMap<String, String> = HashMap::new();
+        let mut identifiers: Vec<(Option<String>, String)> = Vec::new();
+        let mut unique_identifier_id: Option<String> = None;
+
         let mut xml_reader = XmlReader::from_str(opf_xml);
         let mut buf = Vec::new();
         let mut current_tag = String::new();
+        let mut current_title_id: Option<String> = None;
+        let mut current_title_type: Option<String> = None;
+        let mut current_identifier_id: Option<String> = None;
+        let mut current_meta_refines: Option<String> = None;
 
         loop {
             match xml_reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                     let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
 
-                    if local == "item" {
+                    if local == "package" {
+                        for attr in e.attributes().flatten() {
+                            let key = attr.key.as_ref();
+                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
+                                &key[pos + 1..]
+                            } else {
+                                key
+                            };
+                            if local_key == b"unique-identifier" {
+                                unique_identifier_id =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
+                    } else if local == "item" {
                         let mut id = String::new();
                         let mut href = String::new();
                         let mut media_type = String::new();
@@ -314,19 +356,74 @@ impl EpubReader {
                                 spine.push(String::from_utf8_lossy(&attr.value).to_string());
                             }
                         }
-                    } else if local == "meta" {
-                        // Check for <meta name="cover" content="..."/>
-                        let mut is_cover_meta = false;
-                        let mut cover_val = String::new();
+                    } else if local == "title" {
+                        current_tag = "title".to_string();
+                        current_title_id = None;
+                        current_title_type = None;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"name" && attr.value.as_ref() == b"cover" {
-                                is_cover_meta = true;
-                            } else if attr.key.as_ref() == b"content" {
-                                cover_val = String::from_utf8_lossy(&attr.value).to_string();
+                            let key = attr.key.as_ref();
+                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
+                                &key[pos + 1..]
+                            } else {
+                                key
+                            };
+                            if local_key == b"id" {
+                                current_title_id =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                            } else if local_key == b"title-type" {
+                                current_title_type =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
                             }
                         }
-                        if is_cover_meta && !cover_val.is_empty() {
-                            metadata.cover_image_id = Some(cover_val);
+                    } else if local == "identifier" {
+                        current_tag = "identifier".to_string();
+                        current_identifier_id = None;
+                        for attr in e.attributes().flatten() {
+                            let key = attr.key.as_ref();
+                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
+                                &key[pos + 1..]
+                            } else {
+                                key
+                            };
+                            if local_key == b"id" {
+                                current_identifier_id =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
+                    } else if local == "meta" {
+                        let mut is_cover_meta = false;
+                        let mut is_title_type_meta = false;
+                        let mut refines_val = String::new();
+                        let mut content_val = String::new();
+
+                        for attr in e.attributes().flatten() {
+                            let key = attr.key.as_ref();
+                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
+                                &key[pos + 1..]
+                            } else {
+                                key
+                            };
+                            if local_key == b"name" && attr.value.as_ref() == b"cover" {
+                                is_cover_meta = true;
+                            } else if local_key == b"content" {
+                                content_val = String::from_utf8_lossy(&attr.value).to_string();
+                            } else if local_key == b"property" && attr.value.as_ref() == b"title-type" {
+                                is_title_type_meta = true;
+                            } else if local_key == b"refines" {
+                                let r = String::from_utf8_lossy(&attr.value).to_string();
+                                refines_val = r.trim_start_matches('#').to_string();
+                            }
+                        }
+
+                        if is_cover_meta && !content_val.is_empty() {
+                            metadata.cover_image_id = Some(content_val);
+                        } else if is_title_type_meta && !refines_val.is_empty() {
+                            if !content_val.is_empty() {
+                                title_types.insert(refines_val, content_val);
+                            } else {
+                                current_tag = "meta_title_type".to_string();
+                                current_meta_refines = Some(refines_val);
+                            }
                         }
                     } else {
                         current_tag = local;
@@ -336,25 +433,131 @@ impl EpubReader {
                     let text = e.unescape().unwrap_or_default().trim().to_string();
                     if !text.is_empty() {
                         match current_tag.as_str() {
-                            "title" => metadata.title = text,
+                            "title" => {
+                                titles.push((current_title_id.take(), current_title_type.take(), text));
+                            }
+                            "identifier" => {
+                                identifiers.push((current_identifier_id.take(), text));
+                            }
+                            "meta_title_type" => {
+                                if let Some(target) = current_meta_refines.take() {
+                                    title_types.insert(target, text);
+                                }
+                            }
                             "creator" => metadata.creators.push(text),
-                            "language" => metadata.language = text,
-                            "identifier" => metadata.identifier = text,
-                            "publisher" => metadata.publisher = Some(text),
-                            "description" => metadata.description = Some(text),
-                            "date" => metadata.date = Some(text),
+                            "language" => {
+                                if metadata.language.is_empty() {
+                                    metadata.language = text;
+                                }
+                            }
+                            "publisher" => {
+                                if metadata.publisher.is_none() {
+                                    metadata.publisher = Some(text);
+                                }
+                            }
+                            "description" => {
+                                if metadata.description.is_none() {
+                                    metadata.description = Some(text);
+                                }
+                            }
+                            "date" => {
+                                if metadata.date.is_none() {
+                                    metadata.date = Some(text);
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
                 Ok(Event::End(_)) => {
                     current_tag.clear();
+                    current_title_id = None;
+                    current_title_type = None;
+                    current_identifier_id = None;
+                    current_meta_refines = None;
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(EpubError::Xml(e.to_string())),
                 _ => {}
             }
             buf.clear();
+        }
+
+        // Title selection hierarchy:
+        // 1. Refined title-type="main" or direct title-type="main"
+        // 2. id explicitly containing "main" and not "sub"
+        // 3. First title in document order not marked as "subtitle"
+        // 4. Fallback to first title found
+        let mut selected_title = None;
+        for (id, direct_type, text) in &titles {
+            let is_main = direct_type
+                .as_deref()
+                .map(|t| t.eq_ignore_ascii_case("main"))
+                .unwrap_or(false)
+                || id
+                    .as_ref()
+                    .and_then(|i| title_types.get(i))
+                    .map(|t| t.eq_ignore_ascii_case("main"))
+                    .unwrap_or(false);
+            if is_main {
+                selected_title = Some(text.clone());
+                break;
+            }
+        }
+
+        if selected_title.is_none() {
+            for (id, _, text) in &titles {
+                if let Some(i) = id {
+                    let lower = i.to_ascii_lowercase();
+                    if lower.contains("main") && !lower.contains("sub") {
+                        selected_title = Some(text.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        if selected_title.is_none() {
+            for (id, direct_type, text) in &titles {
+                let is_sub = direct_type
+                    .as_deref()
+                    .map(|t| t.eq_ignore_ascii_case("subtitle"))
+                    .unwrap_or(false)
+                    || id
+                        .as_ref()
+                        .and_then(|i| title_types.get(i))
+                        .map(|t| t.eq_ignore_ascii_case("subtitle"))
+                        .unwrap_or(false)
+                    || id
+                        .as_ref()
+                        .map(|i| i.to_ascii_lowercase().contains("sub"))
+                        .unwrap_or(false);
+                if !is_sub {
+                    selected_title = Some(text.clone());
+                    break;
+                }
+            }
+        }
+
+        if selected_title.is_none() && !titles.is_empty() {
+            selected_title = Some(titles[0].2.clone());
+        }
+
+        if let Some(t) = selected_title {
+            metadata.title = t;
+        }
+
+        // Identifier selection:
+        if let Some(uid_name) = unique_identifier_id {
+            if let Some((_, text)) = identifiers
+                .iter()
+                .find(|(id, _)| id.as_deref() == Some(&uid_name))
+            {
+                metadata.identifier = text.clone();
+            }
+        }
+        if metadata.identifier.is_empty() && !identifiers.is_empty() {
+            metadata.identifier = identifiers[0].1.clone();
         }
 
         if metadata.title.is_empty() {
@@ -2310,6 +2513,66 @@ mod tests {
         } else {
             panic!("Expected paragraph block");
         }
+    }
+
+    #[test]
+    fn test_epub_reader_read_metadata_from_file() {
+        let path = "/home/drew/github/hwanjongyu/Converter_epub_kfx/sample/Originals - Adam Grant.epub";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let meta = EpubReader::read_metadata_from_file(path).expect("Failed to read metadata");
+        assert_eq!(meta.title, "Originals");
+        assert!(meta.creators.iter().any(|c| c.contains("Adam Grant")));
+    }
+
+    #[test]
+    fn test_parse_opf_multi_title_with_refines_subtitle() {
+        let opf = r##"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="pub-id" version="3.0">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title id="maintitle">Dark Matter</dc:title>
+        <meta property="title-type" refines="#maintitle">main</meta>
+        <dc:title id="subtitle">A Novel</dc:title>
+        <meta property="title-type" refines="#subtitle">subtitle</meta>
+        <dc:creator>Blake Crouch</dc:creator>
+        <dc:language>en-US</dc:language>
+        <dc:identifier id="pub-id">urn:isbn:9781101904237</dc:identifier>
+        <dc:identifier id="calibre-id">2157</dc:identifier>
+    </metadata>
+    <manifest>
+        <item id="c1" href="chap1.xhtml" media-type="application/xhtml+xml"/>
+    </manifest>
+    <spine>
+        <itemref idref="c1"/>
+    </spine>
+</package>"##;
+        let (metadata, _, _) = EpubReader::parse_opf(opf).expect("parse_opf should succeed");
+        assert_eq!(metadata.title, "Dark Matter");
+        assert_eq!(metadata.identifier, "urn:isbn:9781101904237");
+        assert_eq!(metadata.language, "en-US");
+    }
+
+    #[test]
+    fn test_parse_opf_multi_title_document_order() {
+        let opf = r##"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>The Deep History of Ourselves</dc:title>
+        <dc:title id="sub">The Four-Billion-Year Story</dc:title>
+        <dc:creator>Joseph LeDoux</dc:creator>
+        <dc:language>en</dc:language>
+        <dc:identifier>9780525562146</dc:identifier>
+    </metadata>
+    <manifest>
+        <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    </manifest>
+    <spine>
+        <itemref idref="c1"/>
+    </spine>
+</package>"##;
+        let (metadata, _, _) = EpubReader::parse_opf(opf).expect("parse_opf should succeed");
+        assert_eq!(metadata.title, "The Deep History of Ourselves");
     }
 }
 

@@ -64,6 +64,7 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 ### 6. Desktop UI (`kfx-studio` / GPUI)
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
+| **Local Folder EPUB Explorer & Batch UI** | [spec-batch-folder-epub-ui.md](file:///home/drew/github/drew-developer/converter_epub2kfx/docs/spec-batch-folder-epub-ui.md) | [qa-batch-folder-epub-ui.md](file:///home/drew/github/drew-developer/converter_epub2kfx/docs/qa-batch-folder-epub-ui.md) | **PASS** |
 | **Dual-Pane Desktop Studio UI** | [spec-dual-pane-ui.md](file:///home/drew/github/drew-developer/converter_epub2kfx/docs/spec-dual-pane-ui.md) | [qa-dual-pane-ui.md](file:///home/drew/github/drew-developer/converter_epub2kfx/docs/qa-dual-pane-ui.md) | **PASS** |
 | **UI UX Polish & Dark Theme Tokens** | [spec-gui-ux-polish.md](file:///home/drew/github/drew-developer/converter_epub2kfx/docs/spec-gui-ux-polish.md) | [qa-gui-ux-polish.md](file:///home/drew/github/drew-developer/converter_epub2kfx/docs/qa-gui-ux-polish.md) | **PASS** |
 
@@ -90,6 +91,7 @@ docs/
 │
 ├── spec-advanced-typesetting.md                  # Spec: CSS drop caps, ruby furigana, and small-caps
 ├── spec-amazon-ground-truth-word-wise-dictionary.md # Spec: 20k Amazon ground truth lemma dictionary integration
+├── spec-batch-folder-epub-ui.md                  # Spec: Local folder EPUB explorer & batch conversion UI
 ├── spec-dual-pane-ui.md                          # Spec: GPUI dual-pane desktop application
 ├── spec-fix-cover-image-order.md                 # Spec: Cover extraction precedence and SVG fallback
 ├── spec-fix-image-rendering.md                   # Spec: Mandatory image dimensions ($422, $423)
@@ -113,6 +115,7 @@ docs/
 ├── qa-advanced-typesetting-phase3.md             # QA Log: Phase 3 typography test execution
 ├── qa-advanced-typesetting-phase4.md             # QA Log: Phase 4 typography test execution
 ├── qa-amazon-ground-truth-word-wise-dictionary.md # QA Log: 20,666 lemma binary dictionary validation
+├── qa-batch-folder-epub-ui.md                    # QA Log: Local folder EPUB explorer & batch conversion verification
 ├── qa-dual-pane-ui.md                            # QA Log: GPUI dual-pane desktop UI verification
 ├── qa-fix-cover-image-order.md                   # QA Log: Cover image extraction validation
 ├── qa-fix-image-rendering.md                     # QA Log: Image dimension emission verification
