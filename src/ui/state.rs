@@ -84,16 +84,7 @@ pub struct ConversionTask {
     pub xray: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct KindleFile {
-    pub name: String,
-    pub format: String, // KFX, AZW3, MOBI, PDF, TXT
-    pub size_formatted: String,
-    pub modified: String,
-    pub full_path: PathBuf,
-    pub has_word_wise: bool,
-    pub has_sdr: bool,
-}
+pub type KindleFile = kfx_converter::KindleBookFile;
 
 #[derive(Debug, Clone)]
 pub struct DeviceStatus {
@@ -188,121 +179,19 @@ pub fn convert_epub_file(
     })
 }
 
-/// Recursively scans for valid e-book files up to max_depth, ignoring hidden and .sdr folders.
-fn scan_dir_recursive(dir: &std::path::Path, depth: usize, max_depth: usize, files: &mut Vec<KindleFile>) {
-    if depth > max_depth {
-        return;
-    }
-    let valid_exts = ["kfx", "azw3", "mobi", "pdf", "txt"];
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-                if !name.starts_with('.') && !name.ends_with(".sdr") {
-                    scan_dir_recursive(&path, depth + 1, max_depth, files);
-                }
-            } else if path.is_file() {
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_lowercase())
-                    .unwrap_or_default();
-
-                if valid_exts.contains(&ext.as_str()) {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    let format = ext.to_uppercase();
-                    let size_formatted = match std::fs::metadata(&path) {
-                        Ok(meta) => {
-                            let bytes = meta.len();
-                            if bytes >= 1024 * 1024 {
-                                format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-                            } else {
-                                format!("{} KB", bytes / 1024)
-                            }
-                        }
-                        Err(_) => "0 KB".into(),
-                    };
-
-                    let modified = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-                        Ok(time) => {
-                            let duration = time.elapsed().unwrap_or_default();
-                            if duration.as_secs() < 60 {
-                                "Just now".into()
-                            } else if duration.as_secs() < 3600 {
-                                format!("{}m ago", duration.as_secs() / 60)
-                            } else if duration.as_secs() < 86400 {
-                                format!("{}h ago", duration.as_secs() / 3600)
-                            } else {
-                                format!("{}d ago", duration.as_secs() / 86400)
-                            }
-                        }
-                        Err(_) => "Unknown".into(),
-                    };
-
-                    // Check companion .sdr directory located next to the book file
-                    let file_stem = path.file_stem().unwrap_or_default().to_string_lossy();
-                    let parent = path.parent().unwrap_or(dir);
-                    let sdr_path = parent.join(format!("{}.sdr", file_stem));
-                    let has_sdr = sdr_path.is_dir();
-                    let mut has_word_wise = false;
-                    if has_sdr {
-                        if let Ok(sdr_entries) = std::fs::read_dir(&sdr_path) {
-                            for sdr_entry in sdr_entries.flatten() {
-                                let sdr_name = sdr_entry.file_name().to_string_lossy().to_lowercase();
-                                if sdr_name.ends_with(".kll") {
-                                    has_word_wise = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    files.push(KindleFile {
-                        name,
-                        format,
-                        size_formatted,
-                        modified,
-                        full_path: path,
-                        has_word_wise,
-                        has_sdr,
-                    });
-                }
-            }
-        }
-    }
-}
-
 /// Scans the Kindle documents directory (including author subfolders) to load real files stored on the device.
 pub fn load_device_files(device: &DeviceStatus) -> Vec<KindleFile> {
-    let mut files = Vec::new();
-    let Some(doc_path) = &device.path else {
-        return files;
-    };
-
-    if !doc_path.is_dir() {
-        return files;
+    if let Some(doc_path) = &device.path {
+        kfx_converter::KindleSync::scan_device_files(doc_path)
+    } else {
+        Vec::new()
     }
-
-    scan_dir_recursive(doc_path, 0, 3, &mut files);
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    files
 }
 
 /// Deletes an e-book file and its companion .sdr cache directory from the Kindle device.
 pub fn delete_device_file(file: &KindleFile) -> Result<(), String> {
-    if file.full_path.is_file() {
-        std::fs::remove_file(&file.full_path)
-            .map_err(|e| format!("Failed to delete book file: {}", e))?;
-    }
-    let file_stem = file.full_path.file_stem().unwrap_or_default().to_string_lossy();
-    if let Some(parent) = file.full_path.parent() {
-        let sdr_path = parent.join(format!("{}.sdr", file_stem));
-        if sdr_path.is_dir() {
-            let _ = std::fs::remove_dir_all(&sdr_path);
-        }
-    }
-    Ok(())
+    kfx_converter::KindleSync::delete_book_file(&file.full_path)
+        .map_err(|e| format!("Failed to delete book file: {}", e))
 }
 
 /// Recursively collects .epub files within dir up to max_depth.

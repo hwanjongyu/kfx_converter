@@ -268,7 +268,8 @@ impl WordWiseBuilder {
                  difficulty INTEGER,
                  sense_id INTEGER,
                  low_confidence BOOLEAN
-             );",
+             );
+             CREATE INDEX IF NOT EXISTS idx_glosses_diff_start ON glosses (difficulty, start);",
         )?;
 
         let tx = conn.transaction()?;
@@ -368,6 +369,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(diff, 3);
+
+        // Verify index created
+        let index_exists: bool = conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = 'idx_glosses_diff_start'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_exists, "idx_glosses_diff_start must exist");
     }
 
     #[test]

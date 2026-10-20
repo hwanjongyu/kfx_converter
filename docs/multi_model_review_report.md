@@ -78,17 +78,19 @@ However, cross-perspective analysis by **Gemini Pro**, **Claude Sonnet**, and **
 
 ### 💡 Medium / Low Severity (P2 & P3 — Architecture Cleanliness, Typography & Docs)
 
-10. **Unify Device File Management into `src/sync.rs` ([`src/ui/state.rs#L191-L306`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs#L191-L306))**:
-    - Relocate `load_device_files`, `scan_dir_recursive`, and `delete_device_file` from GUI state to `KindleSync` so CLI commands can manage device files.
-11. **Harmonize In-Place Section Fragmentation in `pipeline.rs` ([`src/pipeline.rs#L125`](file:///home/drew/github/hwanjongyu/kfx_converter/src/pipeline.rs#L125))**:
-    - Fragment `BookIR` once in-place inside `ConversionPipeline`, eliminating duplicate `temp_book` clones in `packager.rs` and `word_wise.rs`.
+10. **Unify Device File Management into `src/sync.rs` ([`src/ui/state.rs#L191-L306`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs#L191-L306))** `[RESOLVED]`:
+    - Relocated `KindleBookFile`, `scan_device_files`, and `delete_book_file` into `src/sync.rs`. `src/ui/state.rs` now cleanly forwards all device calls to `KindleSync`.
+11. **Harmonize In-Place Section Fragmentation in `pipeline.rs` ([`src/pipeline.rs#L125`](file:///home/drew/github/hwanjongyu/kfx_converter/src/pipeline.rs#L125))** `[RESOLVED]`:
+    - Fragment `BookIR` once in-place inside `ConversionPipeline`, and centralized cover image resolution into `BookIR::resolve_cover_resource_id`.
 12. **Scope Footnote Anchor Keys to Prevent Cross-Chapter Overwrite ([`src/epub.rs#L198-L204`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L198-L204))**:
     - Key footnotes by `section_href#id` rather than raw anchor IDs.
-13. **Fix Dropcap Quotes and Smart Contraction Stopwords ([`src/epub.rs#L986`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L986), [`src/enhancements/dictionary.rs#L323`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/dictionary.rs#L323))**:
-    - Set `dropcap_chars = 2` when opening with quote + letter.
-    - Normalize typographic curly apostrophes (`’`) to `'` before stopword filtering.
-14. **Update Obsolete Documentation ([`docs/FORMAT_SPEC.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/FORMAT_SPEC.md), [`docs/YELLOWJACKET.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/YELLOWJACKET.md))**:
-    - Reconcile Word Wise SQLite schema in `FORMAT_SPEC.md` and fragmentation threshold in `README.md` with implementation.
+13. **Fix Dropcap Quotes and Smart Contraction Stopwords ([`src/epub.rs#L986`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L986), [`src/enhancements/dictionary.rs#L323`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/dictionary.rs#L323))** `[RESOLVED]`:
+    - Added `dropcap_2` style (`dropcap_chars = 2`) for opening quote + letter.
+    - Normalized typographic curly apostrophes (`’`) to `'` and trimmed hyphens before stopword and lemma dictionary lookup.
+14. **Update Obsolete Documentation ([`docs/FORMAT_SPEC.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/FORMAT_SPEC.md), [`docs/YELLOWJACKET.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/YELLOWJACKET.md))** `[RESOLVED]`:
+    - Reconciled Word Wise SQLite schema in `FORMAT_SPEC.md` (`start`, `end`, `difficulty`, `sense_id`, `low_confidence`) and documented query index `idx_glosses_diff_start`.
+15. **Exact String-to-Decimal Ion Serialization ([`src/ion.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs))** `[RESOLVED]`:
+    - Replaced float parsing with exact base-10 digit parser `parse_decimal_exact` preventing IEEE-754 representation distortion.
 
 ---
 

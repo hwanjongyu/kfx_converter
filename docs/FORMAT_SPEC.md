@@ -127,24 +127,26 @@ LanguageLayer.en.<ContentID>.kll
 
 ```sql
 CREATE TABLE metadata (
-    key TEXT PRIMARY KEY,
+    key TEXT,
     value TEXT
 );
 
 CREATE TABLE glosses (
-    id INTEGER PRIMARY KEY,
-    start_pos INTEGER NOT NULL,
-    end_pos INTEGER NOT NULL,
-    word TEXT NOT NULL,
-    stem TEXT NOT NULL,
-    difficulty INTEGER NOT NULL,
-    sense_id INTEGER NOT NULL
+    start INTEGER PRIMARY KEY,
+    end INTEGER,
+    difficulty INTEGER,
+    sense_id INTEGER,
+    low_confidence BOOLEAN
 );
+CREATE INDEX IF NOT EXISTS idx_glosses_diff_start ON glosses (difficulty, start);
 ```
 
-- **`start_pos` / `end_pos`**: Character offsets within the reading text.
-- **`difficulty`**: Integer rating (1 = Basic, 3 = Intermediate B2, 4 = Advanced C1, 5 = Rare C2).
-- **`sense_id`**: Reference index into Kindle's internal Word Wise definitions database.
+- **`metadata`**: Contains sidecar revision metadata (`acr`, `targetLanguages`, `sidecarRevision=9`, `bookRevision`, `sourceLanguage`, `enDictionaryVersion`, `enDictionaryRevision`).
+- **`start` / `end`**: Character offsets within the reading text referencing words to gloss (`start` serves as primary key).
+- **`difficulty`**: Integer rating (1 = Basic, 3 = Intermediate B2, 4 = Advanced C1, 5 = Rare C2) used by the Kindle UI slider to dynamically filter definitions.
+- **`sense_id`**: Reference index into Kindle's internal Word Wise dictionary database (`kll.en.en.db`).
+- **`low_confidence`**: Boolean flag indicating whether definition ambiguity is present.
+- **`idx_glosses_diff_start`**: High-performance compound index accelerating Kindle reader viewport window slice queries (`WHERE difficulty >= ? AND start >= ?`).
 
 ---
 

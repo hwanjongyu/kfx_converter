@@ -110,6 +110,67 @@ pub struct IonWriter {
     buf: Vec<u8>,
 }
 
+/// Parses a decimal string exactly into (coefficient, exponent) without floating-point precision loss.
+pub fn parse_decimal_exact(s: &str) -> Option<(i64, i8)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (is_neg, s) = if let Some(stripped) = s.strip_prefix('-') {
+        (true, stripped)
+    } else if let Some(stripped) = s.strip_prefix('+') {
+        (false, stripped)
+    } else {
+        (false, s)
+    };
+
+    let (base_str, exp_str) = match s.split_once(['e', 'E']) {
+        Some((b, e)) => (b, Some(e)),
+        None => (s, None),
+    };
+    let exp_offset: i32 = if let Some(es) = exp_str {
+        es.parse::<i32>().ok()?
+    } else {
+        0
+    };
+
+    let (int_part, frac_part) = match base_str.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (base_str, ""),
+    };
+
+    if !int_part.is_empty() && !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !frac_part.is_empty() && !frac_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+
+    let combined = format!("{}{}", int_part, frac_part);
+    let trimmed = combined.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some((0, 0));
+    }
+
+    let mut coef: i64 = trimmed.parse().ok()?;
+    if is_neg {
+        coef = -coef;
+    }
+    let mut exp: i32 = -(frac_part.len() as i32) + exp_offset;
+
+    // Normalize trailing zeros: e.g. 1.0 -> coef 10, exp -1 -> coef 1, exp 0
+    while coef != 0 && coef % 10 == 0 {
+        coef /= 10;
+        exp += 1;
+    }
+
+    let exp_i8 = i8::try_from(exp).ok()?;
+    Some((coef, exp_i8))
+}
+
 impl IonWriter {
     /// Creates a new empty `IonWriter`.
     pub fn new() -> Self {
@@ -164,21 +225,27 @@ impl IonWriter {
 
     /// Serializes an Ion Decimal (type 5) with VarInt exponent and sign-magnitude coefficient.
     pub fn write_decimal(&mut self, s: &str) {
-        let val: f64 = s.parse().unwrap_or(0.0);
-        if val == 0.0 {
-            // Zero: single byte with exponent 0
+        let (coef, exp) = if let Some(parsed) = parse_decimal_exact(s) {
+            parsed
+        } else {
+            let val: f64 = s.parse().unwrap_or(0.0);
+            if val == 0.0 {
+                self.write_typed_bytes(0x50, &[0x80]);
+                return;
+            }
+            let mut c = ((val * 1_000_000.0).round() as i64).max(i64::MIN + 1);
+            let mut e: i8 = -6;
+            while c != 0 && c % 10 == 0 && e < 0 {
+                c /= 10;
+                e += 1;
+            }
+            (c, e)
+        };
+
+        if coef == 0 {
+            // Zero: single byte with exponent 0 (0x80 in VarInt)
             self.write_typed_bytes(0x50, &[0x80]);
             return;
-        }
-
-        // Convert to coefficient and exponent with precision 6
-        let mut coef = ((val * 1_000_000.0).round() as i64).max(i64::MIN + 1);
-        let mut exp: i8 = -6;
-
-        // Normalize trailing zeros
-        while coef != 0 && coef % 10 == 0 && exp < 0 {
-            coef /= 10;
-            exp += 1;
         }
 
         let mut payload = Vec::new();
@@ -713,6 +780,18 @@ mod tests {
         let mut w2 = IonWriter::new();
         w2.write_value(&IonValue::Decimal("1.2".to_string()));
         assert_eq!(w2.to_bytes(), &[82, 193, 12]);
+
+        let mut w4 = IonWriter::new();
+        w4.write_value(&IonValue::Decimal("1.35".to_string()));
+        let mut reader = IonReader::new(w4.to_bytes());
+        let val = reader.decode_value().unwrap();
+        assert_eq!(val, IonValue::Decimal("1.35".to_string()));
+
+        let mut w5 = IonWriter::new();
+        w5.write_value(&IonValue::Decimal("-0.05".to_string()));
+        let mut reader2 = IonReader::new(w5.to_bytes());
+        let val2 = reader2.decode_value().unwrap();
+        assert_eq!(val2, IonValue::Decimal("-0.05".to_string()));
 
         let mut w3 = IonWriter::new();
         let ann = IonValue::Annotated(

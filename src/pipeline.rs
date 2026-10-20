@@ -99,7 +99,11 @@ impl ConversionPipeline {
         if let Some(ref cb) = progress {
             cb(0.1, "Reading and validating EPUB archive...");
         }
-        let ir = EpubReader::read_from_file(&input_path)?;
+        let mut ir = EpubReader::read_from_file(&input_path)?;
+        ir.fragment_large_sections(
+            crate::ir::DEFAULT_MAX_SECTION_CHARS,
+            crate::ir::DEFAULT_MAX_SECTION_BLOCKS,
+        );
         let book_title = ir.metadata.title.clone();
         let creators = ir.metadata.creators.clone();
         let sections_count = ir.sections.len();
@@ -122,16 +126,7 @@ impl ConversionPipeline {
         }
         let mut cover_jpeg = None;
         let mut cover_optimized = false;
-        let cover_id_opt = ir.metadata.cover_image_id.clone().or_else(|| {
-            ir.sections.first().and_then(|s| {
-                s.blocks.iter().find_map(|b| match b {
-                    crate::ir::Block::Image { resource_id, .. } => Some(resource_id.clone()),
-                    _ => None,
-                })
-            })
-        }).or_else(|| {
-            ir.resources.keys().find(|k| k.to_lowercase().contains("cover")).cloned()
-        });
+        let cover_id_opt = ir.resolve_cover_resource_id();
 
         if let Some(target_id) = cover_id_opt {
             let asset = ir.resources.get(&target_id).or_else(|| {

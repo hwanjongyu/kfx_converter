@@ -320,8 +320,11 @@ impl LemmaDictionary {
         let stopwords = STOPWORDS_SET.get_or_init(|| ENGLISH_STOPWORDS.iter().copied().collect());
         let vocab = VOCAB_MAP.get_or_init(parse_builtin_and_ground_truth_vocab);
 
-        let mut clean = word.trim().trim_matches(&['\'', '’', '"', '“', '”', '`', ',', '.', ';', ':', '!', '?'][..]).to_lowercase();
-        if let Some(stripped) = clean.strip_suffix("'s").or_else(|| clean.strip_suffix("’s")) {
+        let mut clean = word.trim().trim_matches(&['\'', '’', '"', '“', '”', '`', ',', '.', ';', ':', '!', '?', '-'][..]).to_lowercase();
+        if clean.contains('’') {
+            clean = clean.replace('’', "'");
+        }
+        if let Some(stripped) = clean.strip_suffix("'s") {
             clean = stripped.to_string();
         }
 
@@ -391,9 +394,13 @@ mod tests {
         let res2 = dict.lookup("ameliorating", 3);
         assert_eq!(res2, Some((1, 35386)));
 
-        // 3. Stopword filtered
+        // 3. Stopword filtered (including curly apostrophe normalization)
         assert_eq!(dict.lookup("the", 3), None);
         assert_eq!(dict.lookup("because", 3), None);
+        assert_eq!(dict.lookup("don't", 3), None);
+        assert_eq!(dict.lookup("don’t", 3), None);
+        assert_eq!(dict.lookup("wasn’t", 3), None);
+        assert_eq!(dict.lookup("--the--", 3), None);
 
         // 4. Short word filtered
         assert_eq!(dict.lookup("it", 3), None);

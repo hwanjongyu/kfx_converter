@@ -296,6 +296,30 @@ impl BookIR {
             }
         }
     }
+
+    /// Resolves the cover image resource ID using a 3-tier fallback hierarchy:
+    /// 1. Explicit metadata cover_image_id
+    /// 2. First image block in the first section
+    /// 3. Any resource with a key containing "cover"
+    pub fn resolve_cover_resource_id(&self) -> Option<String> {
+        self.metadata
+            .cover_image_id
+            .clone()
+            .or_else(|| {
+                self.sections.first().and_then(|s| {
+                    s.blocks.iter().find_map(|b| match b {
+                        Block::Image { resource_id, .. } => Some(resource_id.clone()),
+                        _ => None,
+                    })
+                })
+            })
+            .or_else(|| {
+                self.resources
+                    .keys()
+                    .find(|k| k.to_lowercase().contains("cover"))
+                    .cloned()
+            })
+    }
 }
 
 fn extract_anchors_from_block(block: &Block) -> Vec<String> {
@@ -459,6 +483,35 @@ mod tests {
         assert_eq!(book.sections[1].id, "chapter_scene_p2");
         assert_eq!(book.sections[0].blocks.len(), 1);
         assert_eq!(book.sections[1].blocks.len(), 1);
+    }
+
+    #[test]
+    fn test_ir_resolve_cover_resource_id() {
+        let mut book = BookIR::default();
+        assert_eq!(book.resolve_cover_resource_id(), None);
+
+        // 1. Matched by ID heuristic
+        book.resources.insert(
+            "cover_img".to_string(),
+            crate::ir::ResourceAsset {
+                id: "cover_img".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xE0],
+            },
+        );
+        assert_eq!(book.resolve_cover_resource_id(), Some("cover_img".to_string()));
+
+        // 2. Explicit metadata overrides heuristic
+        book.metadata.cover_image_id = Some("explicit_cover".to_string());
+        book.resources.insert(
+            "explicit_cover".to_string(),
+            crate::ir::ResourceAsset {
+                id: "explicit_cover".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xE0],
+            },
+        );
+        assert_eq!(book.resolve_cover_resource_id(), Some("explicit_cover".to_string()));
     }
 }
 

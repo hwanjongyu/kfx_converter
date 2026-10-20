@@ -993,21 +993,23 @@ impl EpubReader {
                     let leading_spaces = first.text.len() - trimmed.len();
                     let mut chars = trimmed.chars();
                     if let Some(first_ch) = chars.next() {
-                        let take_len = if first_ch == '“' || first_ch == '"' || first_ch == '‘' || first_ch == '\'' {
+                        let is_quote = first_ch == '“' || first_ch == '"' || first_ch == '‘' || first_ch == '\'';
+                        let (take_len, is_two_char) = if is_quote {
                             if let Some(second_ch) = chars.next() {
-                                first_ch.len_utf8() + second_ch.len_utf8()
+                                (first_ch.len_utf8() + second_ch.len_utf8(), true)
                             } else {
-                                first_ch.len_utf8()
+                                (first_ch.len_utf8(), false)
                             }
                         } else {
-                            first_ch.len_utf8()
+                            (first_ch.len_utf8(), false)
                         };
                         let drop_text = format!("{}{}", &first.text[..leading_spaces], &trimmed[..take_len]);
                         let rest_text = trimmed[take_len..].to_string();
                         let orig_style = first.style.take();
+                        let drop_tag = if is_two_char { "dropcap_2" } else { "dropcap" };
                         let drop_style = match &orig_style {
-                            Some(s) => format!("{} dropcap", s),
-                            None => "dropcap".to_string(),
+                            Some(s) => format!("{} {}", s, drop_tag),
+                            None => drop_tag.to_string(),
                         };
                         first.text = drop_text;
                         first.style = Some(drop_style);
@@ -2422,10 +2424,10 @@ mod tests {
             panic!("Expected paragraph 0");
         }
 
-        // 2. Automatic extraction from <p class="has-dropcap"> with opening quote
+        // 2. Automatic extraction from <p class="has-dropcap"> with opening quote -> dropcap_2
         if let Block::Paragraph { spans, .. } = &blocks[1] {
             assert_eq!(spans[0].text, "“I");
-            assert_eq!(spans[0].style.as_deref(), Some("dropcap"));
+            assert_eq!(spans[0].style.as_deref(), Some("dropcap_2"));
             assert_eq!(spans[1].text, "t was the best of times, it was the worst of times.”");
         } else {
             panic!("Expected paragraph 1");

@@ -107,6 +107,7 @@ pub struct StyleSymMap {
     pub code: u32,
     pub small_caps: u32,
     pub dropcap: u32,
+    pub dropcap_2: u32,
     pub uppercase: u32,
     pub ruby: u32,
     pub img: u32,
@@ -463,41 +464,7 @@ impl<'a> KfxPackager<'a> {
     }
 
     fn resolve_cover_resource_id(&self) -> Option<String> {
-        // 1. Check book.metadata.cover_image_id
-        if let Some(ref cover_ref) = self.book.metadata.cover_image_id {
-            if self.book.resources.contains_key(cover_ref) {
-                return Some(cover_ref.clone());
-            }
-            let ref_filename = std::path::Path::new(cover_ref)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| cover_ref.clone());
-            for res_id in self.book.resources.keys() {
-                if res_id == &ref_filename || res_id.ends_with(&ref_filename) {
-                    return Some(res_id.clone());
-                }
-            }
-        }
-
-        // 2. Check section 0 for an image block
-        if let Some(sec) = self.book.sections.first() {
-            for block in &sec.blocks {
-                if let Block::Image { resource_id, .. } = block {
-                    if self.book.resources.contains_key(resource_id) {
-                        return Some(resource_id.clone());
-                    }
-                }
-            }
-        }
-
-        // 3. Fallback: resource containing "cover"
-        for res_id in self.book.resources.keys() {
-            if res_id.to_lowercase().contains("cover") {
-                return Some(res_id.clone());
-            }
-        }
-
-        None
+        self.book.resolve_cover_resource_id()
     }
 
     fn build_book_metadata(&mut self) {
@@ -685,6 +652,7 @@ impl<'a> KfxPackager<'a> {
         let code_sym = symbols.intern("style_code");
         let small_caps_sym = symbols.intern("style_small_caps");
         let dropcap_sym = symbols.intern("style_dropcap");
+        let dropcap_2_sym = symbols.intern("style_dropcap_2");
         let uppercase_sym = symbols.intern("style_uppercase");
         let ruby_sym = symbols.intern("style_ruby");
         let img_sym = symbols.intern("style_img");
@@ -853,7 +821,7 @@ impl<'a> KfxPackager<'a> {
             (sym_font_variant, IonValue::Symbol(sym_small_caps)),
         ]);
 
-        // 18. inline dropcap style
+        // 18. inline dropcap style (1 character)
         let dropcap_val = IonValue::Struct(vec![
             (sym_style_name, IonValue::Symbol(dropcap_sym)),
             (sym_font_size, make_em("3.0")),
@@ -862,6 +830,17 @@ impl<'a> KfxPackager<'a> {
             (sym_margin_right, make_em("0.15")),
             (sym_dropcap_lines, IonValue::Int(3)),
             (sym_dropcap_chars, IonValue::Int(1)),
+        ]);
+
+        // 18b. inline 2-character dropcap style (for opening quote + first letter)
+        let dropcap_2_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(dropcap_2_sym)),
+            (sym_font_size, make_em("3.0")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(3)),
+            (sym_dropcap_chars, IonValue::Int(2)),
         ]);
 
         // 19. inline uppercase style
@@ -912,6 +891,7 @@ impl<'a> KfxPackager<'a> {
             (code_sym, code_val),
             (small_caps_sym, small_caps_val),
             (dropcap_sym, dropcap_val),
+            (dropcap_2_sym, dropcap_2_val),
             (uppercase_sym, uppercase_val),
             (ruby_sym, ruby_val),
             (img_sym, img_val),
@@ -948,6 +928,7 @@ impl<'a> KfxPackager<'a> {
             code: code_sym,
             small_caps: small_caps_sym,
             dropcap: dropcap_sym,
+            dropcap_2: dropcap_2_sym,
             uppercase: uppercase_sym,
             ruby: ruby_sym,
             img: img_sym,
@@ -1087,11 +1068,19 @@ impl<'a> KfxPackager<'a> {
                                 (sym_style, IonValue::Symbol(styles.small_caps)),
                             ]));
                         }
-                        if st.contains("dropcap") {
+                        if st.contains("dropcap_2") {
                             style_events.push(IonValue::Struct(vec![
                                 (sym_offset, IonValue::Int(offset as i64)),
                                 (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.dropcap)),
+                                (sym_style, IonValue::Symbol(styles.dropcap_2)),
+                            ]));
+                        } else if st.contains("dropcap") {
+                            let is_quote_dropcap = span.text.chars().count() == 2 && span.text.chars().next().map_or(false, |c| c == '“' || c == '"' || c == '‘' || c == '\'');
+                            let target_style = if is_quote_dropcap { styles.dropcap_2 } else { styles.dropcap };
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(target_style)),
                             ]));
                         }
                         if st.contains("uppercase") {
@@ -2483,8 +2472,8 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
-        // We register 22 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps, dropcap, uppercase, ruby, img, cover_img
-        assert_eq!(style_entities.len(), 22, "Expected 22 style ($157) entities in KFX container");
+        // We register 23 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps, dropcap, dropcap_2, uppercase, ruby, img, cover_img
+        assert_eq!(style_entities.len(), 23, "Expected 23 style ($157) entities in KFX container");
     }
 
 
@@ -2579,7 +2568,7 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
-        assert_eq!(style_count, 22);
+        assert_eq!(style_count, 23);
     }
 
 
@@ -2943,8 +2932,8 @@ mod tests {
             .iter()
             .filter(|e| e.chunk_type == sym_style)
             .collect();
-        assert_eq!(style_entities.len(), 22, "Expected 22 style ($157) entities including style_ruby");
-        let ruby_style_entity = &style_entities[19];
+        assert_eq!(style_entities.len(), 23, "Expected 23 style ($157) entities including style_ruby");
+        let ruby_style_entity = &style_entities[20];
         assert!(!ruby_style_entity.data.is_empty());
 
 

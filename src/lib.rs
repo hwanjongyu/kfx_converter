@@ -19,7 +19,7 @@ pub use ion::{IonWriter, IonReader, IonValue, IonError, encode_varuint, wrap_ent
 pub use epub::{EpubReader, EpubError};
 pub use packager::{KfxPackager, PackagerError};
 pub use enhancements::{CoverOptimizer, CoverError, WordWiseBuilder, WordWiseGloss};
-pub use sync::{KindleSync, SyncError};
+pub use sync::{KindleBookFile, KindleSync, SyncError};
 pub use pipeline::{ConversionPipeline, ConversionOptions, ConversionReport, PipelineError};
 pub use validator::{KfxPreflightValidator, ValidationError, ValidationReport};
 
