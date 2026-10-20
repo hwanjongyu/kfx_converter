@@ -12,7 +12,7 @@ use quick_xml::Reader as XmlReader;
 use thiserror::Error;
 use zip::ZipArchive;
 
-use crate::ir::{Block, BookIR, BookMetadata, ResourceAsset, Section, TextSpan, TocItem};
+use crate::ir::{Block, BookIR, BookMetadata, PageEntry, ResourceAsset, Section, TextSpan, TocItem};
 
 pub const MAX_EPUB_FILES: usize = 10_000;
 pub const MAX_EPUB_UNCOMPRESSED_TOTAL: u64 = 1024 * 1024 * 1024; // 1 GB
@@ -201,8 +201,8 @@ impl EpubReader {
             }
         }
 
-        // 6. Extract Table of Contents (NCX, NAV, or Section Headings Fallback)
-        let toc = Self::extract_toc(
+        // 6. Extract Table of Contents and Page List (NCX, NAV, or Section Headings Fallback)
+        let (toc, page_list) = Self::extract_navigation(
             &mut archive,
             &opf_dir,
             &manifest,
@@ -215,7 +215,7 @@ impl EpubReader {
             sections,
             resources,
             toc,
-            page_list: Vec::new(),
+            page_list,
             footnotes: all_footnotes,
         })
     }
@@ -293,6 +293,11 @@ impl EpubReader {
                         }
 
                         if !id.is_empty() && !href.is_empty() {
+                            if let Some(ref props) = properties {
+                                if props.contains("cover-image") && metadata.cover_image_id.is_none() {
+                                    metadata.cover_image_id = Some(id.clone());
+                                }
+                            }
                             manifest.insert(
                                 id.clone(),
                                 ManifestItem {
@@ -362,13 +367,13 @@ impl EpubReader {
         Ok((metadata, manifest, spine))
     }
 
-    fn extract_toc<R: Read + std::io::Seek>(
+    fn extract_navigation<R: Read + std::io::Seek>(
         archive: &mut ZipArchive<R>,
         opf_dir: &str,
         manifest: &HashMap<String, ManifestItem>,
         href_to_section: &HashMap<String, String>,
         sections: &[Section],
-    ) -> Vec<TocItem> {
+    ) -> (Vec<TocItem>, Vec<PageEntry>) {
         // 1. Try EPUB 3 Navigation Document (nav.xhtml or properties="nav")
         for item in manifest.values() {
             let is_nav = item.properties.as_deref().map(|p| p.contains("nav")).unwrap_or(false)
@@ -379,9 +384,9 @@ impl EpubReader {
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut s = String::new();
                     if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
-                        let toc = Self::parse_nav_xhtml(&s, href_to_section);
+                        let (toc, page_list) = Self::parse_nav_xhtml(&s, href_to_section);
                         if !toc.is_empty() {
-                            return toc;
+                            return (toc, page_list);
                         }
                     }
                 }
@@ -398,9 +403,9 @@ impl EpubReader {
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut s = String::new();
                     if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
-                        let toc = Self::parse_ncx(&s, href_to_section);
+                        let (toc, page_list) = Self::parse_ncx(&s, href_to_section);
                         if !toc.is_empty() {
-                            return toc;
+                            return (toc, page_list);
                         }
                     }
                 }
@@ -425,16 +430,21 @@ impl EpubReader {
                 children: Vec::new(),
             });
         }
-        fallback_toc
+        (fallback_toc, Vec::new())
     }
 
-    fn parse_ncx(ncx_xml: &str, href_to_section: &HashMap<String, String>) -> Vec<TocItem> {
+    fn parse_ncx(
+        ncx_xml: &str,
+        href_to_section: &HashMap<String, String>,
+    ) -> (Vec<TocItem>, Vec<PageEntry>) {
         let mut items = Vec::new();
+        let mut page_items = Vec::new();
         let mut xml_reader = XmlReader::from_str(ncx_xml);
         let mut buf = Vec::new();
 
         let mut current_title = String::new();
         let mut current_src = String::new();
+        let mut current_page_val = String::new();
         let mut in_text = false;
         let mut in_nav_label = false;
 
@@ -446,6 +456,16 @@ impl EpubReader {
                         b"navPoint" => {
                             current_title.clear();
                             current_src.clear();
+                        }
+                        b"pageTarget" => {
+                            current_title.clear();
+                            current_src.clear();
+                            current_page_val.clear();
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"value" {
+                                    current_page_val = String::from_utf8_lossy(&attr.value).to_string();
+                                }
+                            }
                         }
                         b"navLabel" => {
                             in_nav_label = true;
@@ -497,6 +517,24 @@ impl EpubReader {
                                 });
                             }
                         }
+                        b"pageTarget" => {
+                            if !current_src.is_empty() {
+                                let (target_sec, target_anchor) =
+                                    Self::resolve_href_target(&current_src, href_to_section);
+                                let pnum = if !current_page_val.is_empty() {
+                                    current_page_val.clone()
+                                } else if !current_title.is_empty() {
+                                    current_title.clone()
+                                } else {
+                                    (page_items.len() + 1).to_string()
+                                };
+                                page_items.push(PageEntry {
+                                    page_number: pnum,
+                                    target_section: target_sec,
+                                    target_anchor,
+                                });
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -506,14 +544,28 @@ impl EpubReader {
             buf.clear();
         }
 
-        items
+        (items, page_items)
     }
 
-    fn parse_nav_xhtml(nav_xml: &str, href_to_section: &HashMap<String, String>) -> Vec<TocItem> {
-        let mut items = Vec::new();
+    fn parse_nav_xhtml(
+        nav_xml: &str,
+        href_to_section: &HashMap<String, String>,
+    ) -> (Vec<TocItem>, Vec<PageEntry>) {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum NavContext {
+            Toc,
+            PageList,
+            Landmarks,
+            Other,
+        }
+
+        let mut toc_items = Vec::new();
+        let mut page_items = Vec::new();
         let mut xml_reader = XmlReader::from_str(nav_xml);
         let mut buf = Vec::new();
 
+        let mut nav_stack: Vec<NavContext> = Vec::new();
+        let mut has_seen_toc = false;
         let mut in_a = false;
         let mut current_href = String::new();
         let mut current_text = String::new();
@@ -521,13 +573,62 @@ impl EpubReader {
         loop {
             match xml_reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
-                    if e.local_name().as_ref() == b"a" {
-                        in_a = true;
-                        current_href.clear();
-                        current_text.clear();
+                    let local = e.local_name();
+                    if local.as_ref() == b"nav" {
+                        let mut detected_ctx = None;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"href" {
-                                current_href = String::from_utf8_lossy(&attr.value).to_string();
+                            let key = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
+                            let val = String::from_utf8_lossy(&attr.value).to_lowercase();
+                            if key.contains("type") {
+                                if val.contains("page-list") {
+                                    detected_ctx = Some(NavContext::PageList);
+                                    break;
+                                } else if val.contains("toc") {
+                                    detected_ctx = Some(NavContext::Toc);
+                                    break;
+                                } else if val.contains("landmarks") {
+                                    detected_ctx = Some(NavContext::Landmarks);
+                                    break;
+                                }
+                            } else if key == "role" {
+                                if val.contains("doc-pagelist") {
+                                    detected_ctx = Some(NavContext::PageList);
+                                    break;
+                                } else if val.contains("doc-toc") {
+                                    detected_ctx = Some(NavContext::Toc);
+                                    break;
+                                }
+                            } else if key == "id" {
+                                if val == "page-list" || val == "pagelist" {
+                                    detected_ctx = Some(NavContext::PageList);
+                                } else if val == "toc" {
+                                    detected_ctx = Some(NavContext::Toc);
+                                }
+                            }
+                        }
+
+                        let ctx = detected_ctx.unwrap_or_else(|| {
+                            if !has_seen_toc {
+                                NavContext::Toc
+                            } else {
+                                NavContext::Other
+                            }
+                        });
+
+                        if ctx == NavContext::Toc {
+                            has_seen_toc = true;
+                        }
+                        nav_stack.push(ctx);
+                    } else if local.as_ref() == b"a" {
+                        let current_ctx = nav_stack.last().copied().unwrap_or(NavContext::Toc);
+                        if current_ctx == NavContext::Toc || current_ctx == NavContext::PageList {
+                            in_a = true;
+                            current_href.clear();
+                            current_text.clear();
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"href" {
+                                    current_href = String::from_utf8_lossy(&attr.value).to_string();
+                                }
                             }
                         }
                     }
@@ -542,22 +643,43 @@ impl EpubReader {
                     }
                 }
                 Ok(Event::End(ref e)) => {
-                    if e.local_name().as_ref() == b"a" {
+                    let local = e.local_name();
+                    if local.as_ref() == b"nav" {
+                        nav_stack.pop();
+                    } else if local.as_ref() == b"a" && in_a {
                         in_a = false;
                         if !current_href.is_empty() {
                             let (target_sec, target_anchor) =
                                 Self::resolve_href_target(&current_href, href_to_section);
-                            let title = if current_text.is_empty() {
-                                "Chapter".to_string()
-                            } else {
-                                current_text.clone()
-                            };
-                            items.push(TocItem {
-                                title,
-                                target_section: target_sec,
-                                target_anchor,
-                                children: Vec::new(),
-                            });
+                            let current_ctx = nav_stack.last().copied().unwrap_or(NavContext::Toc);
+                            match current_ctx {
+                                NavContext::Toc => {
+                                    let title = if current_text.is_empty() {
+                                        "Chapter".to_string()
+                                    } else {
+                                        current_text.clone()
+                                    };
+                                    toc_items.push(TocItem {
+                                        title,
+                                        target_section: target_sec,
+                                        target_anchor,
+                                        children: Vec::new(),
+                                    });
+                                }
+                                NavContext::PageList => {
+                                    let pnum = if current_text.is_empty() {
+                                        (page_items.len() + 1).to_string()
+                                    } else {
+                                        current_text.clone()
+                                    };
+                                    page_items.push(PageEntry {
+                                        page_number: pnum,
+                                        target_section: target_sec,
+                                        target_anchor,
+                                    });
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -567,7 +689,7 @@ impl EpubReader {
             buf.clear();
         }
 
-        items
+        (toc_items, page_items)
     }
 
     fn resolve_href_target(
@@ -794,10 +916,10 @@ impl EpubReader {
                     let local = e.local_name();
                     let local_bytes = local.as_ref();
 
-                    if local_bytes == b"script" || local_bytes == b"style" {
+                    if local_bytes == b"script" || local_bytes == b"style" || local_bytes == b"head" {
                         ignore_depth += 1;
                     } else if ignore_depth > 0 {
-                        // ignore inside script/style
+                        // ignore inside script/style/head
                     } else {
                         if footnote_depth > 0 {
                             footnote_depth += 1;
@@ -1245,7 +1367,7 @@ impl EpubReader {
                     let local = e.local_name();
                     let local_bytes = local.as_ref();
 
-                    if (local_bytes == b"script" || local_bytes == b"style") && ignore_depth > 0 {
+                    if (local_bytes == b"script" || local_bytes == b"style" || local_bytes == b"head") && ignore_depth > 0 {
                         ignore_depth -= 1;
                     } else if ignore_depth == 0 {
                         if footnote_depth > 0 {
@@ -1774,7 +1896,7 @@ mod tests {
             </navMap>
         </ncx>"#;
 
-        let ncx_toc = EpubReader::parse_ncx(ncx, &href_to_sec);
+        let (ncx_toc, _) = EpubReader::parse_ncx(ncx, &href_to_sec);
         assert_eq!(ncx_toc.len(), 2);
         assert_eq!(ncx_toc[0].title, "Chapter 1: The Beginning");
         assert_eq!(ncx_toc[0].target_section, "section_1");
@@ -1795,12 +1917,82 @@ mod tests {
             </body>
         </html>"#;
 
-        let nav_toc = EpubReader::parse_nav_xhtml(nav_xhtml, &href_to_sec);
+        let (nav_toc, _) = EpubReader::parse_nav_xhtml(nav_xhtml, &href_to_sec);
         assert_eq!(nav_toc.len(), 2);
         assert_eq!(nav_toc[0].title, "1. Start");
         assert_eq!(nav_toc[0].target_section, "section_1");
         assert_eq!(nav_toc[1].title, "2. Next");
         assert_eq!(nav_toc[1].target_section, "section_2");
+    }
+
+    #[test]
+    fn test_parse_nav_xhtml_separates_toc_and_page_list() {
+        let mut href_to_sec = HashMap::new();
+        href_to_sec.insert("ch1.xhtml".to_string(), "section_1".to_string());
+        href_to_sec.insert("ch2.xhtml".to_string(), "section_2".to_string());
+
+        let nav_xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+            <body>
+                <nav id="toc" epub:type="toc">
+                    <h1>Table of Contents</h1>
+                    <ol>
+                        <li><a href="ch1.xhtml">Chapter 1</a></li>
+                        <li><a href="ch2.xhtml">Chapter 2</a></li>
+                    </ol>
+                </nav>
+                <nav epub:type="landmarks">
+                    <h2>Landmarks</h2>
+                    <ol>
+                        <li><a href="ch1.xhtml">Start of Reading</a></li>
+                    </ol>
+                </nav>
+                <nav epub:type="page-list" hidden="">
+                    <h2>Pages</h2>
+                    <ol>
+                        <li><a href="ch1.xhtml#p_i">i</a></li>
+                        <li><a href="ch1.xhtml#p_xiii">xiii</a></li>
+                        <li><a href="ch2.xhtml#p_1">1</a></li>
+                        <li><a href="ch2.xhtml#p_2">2</a></li>
+                    </ol>
+                </nav>
+            </body>
+        </html>"#;
+
+        let (toc, page_list) = EpubReader::parse_nav_xhtml(nav_xhtml, &href_to_sec);
+
+        // Verify TOC contains ONLY the 2 chapters, NOT landmarks or pages
+        assert_eq!(toc.len(), 2);
+        assert_eq!(toc[0].title, "Chapter 1");
+        assert_eq!(toc[1].title, "Chapter 2");
+
+        // Verify Page List contains ONLY the 4 print page numbers
+        assert_eq!(page_list.len(), 4);
+        assert_eq!(page_list[0].page_number, "i");
+        assert_eq!(page_list[0].target_anchor.as_deref(), Some("p_i"));
+        assert_eq!(page_list[1].page_number, "xiii");
+        assert_eq!(page_list[1].target_anchor.as_deref(), Some("p_xiii"));
+        assert_eq!(page_list[2].page_number, "1");
+        assert_eq!(page_list[2].target_anchor.as_deref(), Some("p_1"));
+        assert_eq!(page_list[3].page_number, "2");
+        assert_eq!(page_list[3].target_anchor.as_deref(), Some("p_2"));
+    }
+
+    #[test]
+    fn test_epub_reader_real_originals_book_toc_and_page_list() {
+        let path = "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let book = EpubReader::read_from_file(path).expect("Failed to read Originals epub");
+        assert_eq!(book.toc.len(), 20, "TOC should contain exactly 20 chapters, got {}", book.toc.len());
+        assert_eq!(book.page_list.len(), 335, "Page list should contain 335 print pages, got {}", book.page_list.len());
+        assert_eq!(book.toc[0].title, "Cover");
+        assert_eq!(book.toc[19].title, "Index");
+        assert_eq!(book.page_list[0].page_number, "i");
+        assert_eq!(book.page_list[12].page_number, "xiii");
+        assert_eq!(book.page_list[13].page_number, "1");
+        assert_eq!(book.page_list[334].page_number, "322");
     }
 
     #[test]

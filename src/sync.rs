@@ -288,7 +288,12 @@ impl KindleSync {
             return Err(SyncError::DeviceNotFound(docs_dir));
         }
 
-        let safe_title = Self::sanitize_filename(book_title);
+        let safe_title = kfx_source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(Self::sanitize_filename)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| Self::sanitize_filename(book_title));
         let safe_asin = Self::sanitize_asin(asin);
 
         let kfx_filename = format!("{}.kfx", safe_title);
@@ -302,9 +307,11 @@ impl KindleSync {
             )));
         }
 
-        // 1. Copy KFX file
-        Self::copy_file(kfx_source, &dest_kfx_path)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // 1. Copy KFX file if source and destination differ
+        if kfx_source != dest_kfx_path {
+            Self::copy_file(kfx_source, &dest_kfx_path)?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
 
         // 2. Sync Cover Thumbnail (system/thumbnails or .system/thumbnails)
         if let Some(jpeg) = cover_jpeg {
@@ -396,15 +403,15 @@ impl KindleSync {
             // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
+            use std::io::Write;
             let mut r = std::fs::File::open(src)?;
             let mut w = std::fs::File::create(dst)?;
             std::io::copy(&mut r, &mut w)?;
-            // Flush file content without invoking dir fsync, which triggers gadget resets on Kindle VFAT
-            let _ = w.sync_data();
+            w.flush()?;
             drop(w);
             drop(r);
-            // Brief settle delay to allow eMMC controller to commit blocks
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Brief settle delay to allow eMMC controller to commit blocks without SCSI reset
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
         Ok(())
     }
@@ -467,9 +474,9 @@ impl KindleSync {
             use std::io::Write;
             let mut f = std::fs::File::create(dst)?;
             f.write_all(data)?;
-            let _ = f.sync_data();
+            f.flush()?;
             drop(f);
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
         Ok(())
     }

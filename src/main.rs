@@ -25,8 +25,8 @@ struct Args {
     #[arg(short, long)]
     sync: bool,
 
-    /// Generate Word Wise sidecar (.kll)
-    #[arg(short, long)]
+    /// Generate Word Wise sidecar (.kll) [default: true]
+    #[arg(short, long, default_value_t = true, action = clap::ArgAction::Set)]
     word_wise: bool,
 }
 

@@ -10,16 +10,18 @@ pub mod packager;
 pub mod enhancements;
 pub mod sync;
 pub mod pipeline;
+pub mod validator;
 
 pub use container::{KfxContainer, ContainerError, ContainerHeader, KfxEntity, ChunkEntry};
 pub use symbols::{symbol_name, symbol_id, KfxSymbol, KFX_SYMBOL_TABLE};
 pub use ir::BookIR;
-pub use ion::{IonWriter, IonValue, encode_varuint, wrap_enty_header};
+pub use ion::{IonWriter, IonReader, IonValue, IonError, encode_varuint, wrap_enty_header};
 pub use epub::{EpubReader, EpubError};
 pub use packager::{KfxPackager, PackagerError};
 pub use enhancements::{CoverOptimizer, CoverError, WordWiseBuilder, WordWiseGloss};
 pub use sync::{KindleSync, SyncError};
 pub use pipeline::{ConversionPipeline, ConversionOptions, ConversionReport, PipelineError};
+pub use validator::{KfxPreflightValidator, ValidationError, ValidationReport};
 
 #[cfg(test)]
 mod tests {

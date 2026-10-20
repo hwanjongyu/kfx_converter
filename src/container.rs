@@ -108,11 +108,38 @@ impl KfxContainer {
         };
 
         // Read chunk index table (bcIndexTab at offset 18 until info_offset)
-        let index_tab_len = if info_offset >= 18 {
+        let mut index_tab_len = if info_offset >= 18 {
             (info_offset - 18) as usize
         } else {
             0
         };
+
+        // If ContainerInfo is available at info_offset, check for exact bcIndexTabLength ($414: [0x03, 0x9e])
+        if (info_offset as u64) + (info_length as u64) <= file_len && info_length > 0 {
+            file.seek(SeekFrom::Start(info_offset as u64))?;
+            let mut ci_bytes = vec![0u8; info_length as usize];
+            if file.read_exact(&mut ci_bytes).is_ok() {
+                if let Some(pos) = ci_bytes.windows(2).position(|w| w == [0x03, 0x9e]) {
+                    let val_bytes = &ci_bytes[pos + 2..];
+                    if !val_bytes.is_empty() {
+                        let type_desc = val_bytes[0];
+                        if (type_desc & 0xf0) == 0x20 {
+                            let len = (type_desc & 0x0f) as usize;
+                            if len > 0 && len <= 8 && val_bytes.len() >= 1 + len {
+                                let mut tab_len: u64 = 0;
+                                for b in &val_bytes[1..1 + len] {
+                                    tab_len = (tab_len << 8) | (*b as u64);
+                                }
+                                if tab_len > 0 && tab_len < index_tab_len as u64 {
+                                    index_tab_len = tab_len as usize;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let chunk_count = index_tab_len / 24;
         if chunk_count > 50_000 {
             return Err(ContainerError::CorruptedHeader(format!(
@@ -120,6 +147,7 @@ impl KfxContainer {
                 chunk_count
             )));
         }
+
         if (18 + chunk_count * 24) as u64 > file_len {
             return Err(ContainerError::CorruptedHeader(
                 "bcIndexTab table exceeds file size".into(),
@@ -275,7 +303,8 @@ impl KfxContainer {
         let ci_bytes = ci_writer.into_bytes();
         let ci_length = ci_bytes.len() as u32;
 
-        let header_length = ci_offset + ci_length;
+        let kfxgen_info = b"[]";
+        let header_length = ci_offset + ci_length + kfxgen_info.len() as u32;
 
         // Write Fixed 18-byte CONT Header (<4sHIII)
         writer.write_all(KFX_MAGIC)?;
@@ -299,6 +328,9 @@ impl KfxContainer {
 
         // Write ContainerInfo Ion
         writer.write_all(&ci_bytes)?;
+
+        // Write kfxgen info trailer so standard tools (Calibre kfxlib, etc.) can parse cleanly
+        writer.write_all(kfxgen_info)?;
 
         // Write all wrapped entity payloads directly to writer (zero intermediate allocations)
         for ent in entities {
@@ -449,7 +481,8 @@ mod tests {
         let ci_offset = (&data[10..14]).read_u32::<LittleEndian>().unwrap();
         let ci_length = (&data[14..18]).read_u32::<LittleEndian>().unwrap();
 
-        assert_eq!(header_length, ci_offset + ci_length);
+        assert_eq!(header_length, ci_offset + ci_length + 2);
+        assert_eq!(&data[(ci_offset + ci_length) as usize..header_length as usize], b"[]");
 
         // index_tab is 1 entry * 24 bytes = 24 bytes, starts at 18
         // doc_sym starts at 18 + 24 = 42

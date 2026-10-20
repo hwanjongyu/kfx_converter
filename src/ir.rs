@@ -161,10 +161,12 @@ impl Block {
     }
 }
 
-/// Chapter-First Hybrid Fragmentation Thresholds:
-/// Lowered to 3,500 chars / 15 blocks to protect 512MB Kindle OS devices from pmond memory kills and JSQueue thread freezes.
-pub const DEFAULT_MAX_SECTION_CHARS: usize = 3_500;
-pub const DEFAULT_MAX_SECTION_BLOCKS: usize = 15;
+/// Standard EPUB Section Preservation Thresholds:
+/// Preserves native EPUB XHTML file boundaries without artificial mid-chapter page breaks.
+/// Set to 1,000,000 chars / 10,000 blocks so chapters remain single continuous flow documents,
+/// while explicit CSS forced page breaks (`page_break_before`/`page_break_after`) are still respected.
+pub const DEFAULT_MAX_SECTION_CHARS: usize = 1_000_000;
+pub const DEFAULT_MAX_SECTION_BLOCKS: usize = 10_000;
 
 impl BookIR {
     /// Fragments sections exceeding character or block limits into smaller sequential sections.

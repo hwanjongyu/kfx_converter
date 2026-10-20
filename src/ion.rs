@@ -324,6 +324,268 @@ impl IonWriter {
     }
 }
 
+/// Errors that can occur during binary Ion deserialization.
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum IonError {
+    #[error("Unexpected end of Ion buffer at offset {0}")]
+    UnexpectedEof(usize),
+    #[error("Invalid Ion binary marker")]
+    InvalidBvm,
+    #[error("Unsupported or invalid Ion type descriptor 0x{0:02x} at offset {1}")]
+    InvalidTypeDescriptor(u8, usize),
+    #[error("Malformed VarUInt at offset {0}")]
+    MalformedVarUInt(usize),
+    #[error("Malformed UTF-8 string at offset {0}")]
+    MalformedUtf8(usize),
+}
+
+/// Decodes an unsigned integer from Ion 7-bit variable-length unsigned integer (VarUInt).
+pub fn decode_varuint(buf: &[u8], offset: &mut usize) -> Result<u64, IonError> {
+    let mut val: u64 = 0;
+    while *offset < buf.len() {
+        let b = buf[*offset];
+        *offset += 1;
+        val = (val << 7) | ((b & 0x7F) as u64);
+        if (b & 0x80) != 0 {
+            return Ok(val);
+        }
+    }
+    Err(IonError::UnexpectedEof(*offset))
+}
+
+/// Decodes a signed integer from Ion variable-length signed integer (VarInt).
+pub fn decode_varint_slice(buf: &[u8], offset: &mut usize) -> Result<i64, IonError> {
+    if *offset >= buf.len() {
+        return Err(IonError::UnexpectedEof(*offset));
+    }
+    let first = buf[*offset];
+    *offset += 1;
+    let is_neg = (first & 0x40) != 0;
+    let mut val: i64 = (first & 0x3F) as i64;
+    if (first & 0x80) != 0 {
+        return Ok(if is_neg { -val } else { val });
+    }
+    while *offset < buf.len() {
+        let b = buf[*offset];
+        *offset += 1;
+        val = (val << 7) | ((b & 0x7F) as i64);
+        if (b & 0x80) != 0 {
+            return Ok(if is_neg { -val } else { val });
+        }
+    }
+    Err(IonError::UnexpectedEof(*offset))
+}
+
+/// Binary Amazon Ion deserializer.
+pub struct IonReader<'a> {
+    buf: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> IonReader<'a> {
+    /// Creates a new `IonReader`. Automatically skips the Ion BVM header if present.
+    pub fn new(buf: &'a [u8]) -> Self {
+        let mut offset = 0;
+        if buf.starts_with(&ION_BVM) {
+            offset = 4;
+        }
+        Self { buf, offset }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.offset >= self.buf.len()
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Decodes all top-level values until end of buffer.
+    pub fn decode_all(&mut self) -> Result<Vec<IonValue>, IonError> {
+        let mut values = Vec::new();
+        while self.offset < self.buf.len() {
+            values.push(self.decode_value()?);
+        }
+        Ok(values)
+    }
+
+    /// Decodes a single Ion value at current offset.
+    pub fn decode_value(&mut self) -> Result<IonValue, IonError> {
+        if self.offset >= self.buf.len() {
+            return Err(IonError::UnexpectedEof(self.offset));
+        }
+
+        let start_offset = self.offset;
+        let td = self.buf[self.offset];
+        self.offset += 1;
+
+        let type_code = td >> 4;
+        let len_nibble = td & 0x0F;
+
+        let content_len = if type_code == 0x0 || type_code == 0x1 {
+            0
+        } else if len_nibble == 0x0E {
+            decode_varuint(self.buf, &mut self.offset)? as usize
+        } else if len_nibble == 0x0F {
+            0
+        } else {
+            len_nibble as usize
+        };
+
+        if len_nibble == 0x0F && type_code != 0x01 {
+            return Ok(IonValue::Null);
+        }
+
+        if self.offset + content_len > self.buf.len() {
+            return Err(IonError::UnexpectedEof(self.buf.len()));
+        }
+
+        let payload_start = self.offset;
+        let payload_end = self.offset + content_len;
+
+        let val = match type_code {
+            0x0 => IonValue::Null,
+            0x1 => {
+                if len_nibble == 0x0F {
+                    IonValue::Null
+                } else {
+                    IonValue::Bool(len_nibble == 1)
+                }
+            }
+            0x2 => {
+                let mut int_val: u64 = 0;
+                for i in 0..content_len {
+                    int_val = (int_val << 8) | (self.buf[payload_start + i] as u64);
+                }
+                self.offset = payload_end;
+                IonValue::Int(int_val as i64)
+            }
+            0x3 => {
+                let mut int_val: u64 = 0;
+                for i in 0..content_len {
+                    int_val = (int_val << 8) | (self.buf[payload_start + i] as u64);
+                }
+                self.offset = payload_end;
+                IonValue::Int(-(int_val as i64))
+            }
+            0x4 => {
+                let f_val = if content_len == 0 {
+                    0.0
+                } else if content_len == 4 {
+                    let mut b = [0u8; 4];
+                    b.copy_from_slice(&self.buf[payload_start..payload_end]);
+                    f32::from_be_bytes(b) as f64
+                } else if content_len == 8 {
+                    let mut b = [0u8; 8];
+                    b.copy_from_slice(&self.buf[payload_start..payload_end]);
+                    f64::from_be_bytes(b)
+                } else {
+                    0.0
+                };
+                self.offset = payload_end;
+                IonValue::Float(f_val)
+            }
+            0x5 => {
+                if content_len == 0 {
+                    self.offset = payload_end;
+                    IonValue::Decimal("0".to_string())
+                } else {
+                    let mut cur = payload_start;
+                    let exp = decode_varint_slice(self.buf, &mut cur)?;
+                    let mantissa_bytes = &self.buf[cur..payload_end];
+                    let mut mantissa: i64 = 0;
+                    if !mantissa_bytes.is_empty() {
+                        let is_neg = (mantissa_bytes[0] & 0x80) != 0;
+                        let first = mantissa_bytes[0] & 0x7F;
+                        mantissa = first as i64;
+                        for &b in &mantissa_bytes[1..] {
+                            mantissa = (mantissa << 8) | (b as i64);
+                        }
+                        if is_neg {
+                            mantissa = -mantissa;
+                        }
+                    }
+                    self.offset = payload_end;
+                    if exp == 0 {
+                        IonValue::Decimal(format!("{}.0", mantissa))
+                    } else if exp < 0 {
+                        let shift = (-exp) as usize;
+                        let m_str = format!("{}", mantissa.abs());
+                        let sign = if mantissa < 0 { "-" } else { "" };
+                        if m_str.len() <= shift {
+                            let zeros = "0".repeat(shift - m_str.len());
+                            IonValue::Decimal(format!("{}0.{}{}", sign, zeros, m_str))
+                        } else {
+                            let split_pos = m_str.len() - shift;
+                            IonValue::Decimal(format!("{}{}.{}", sign, &m_str[..split_pos], &m_str[split_pos..]))
+                        }
+                    } else {
+                        IonValue::Decimal(format!("{}e{}", mantissa, exp))
+                    }
+                }
+            }
+            0x7 => {
+                let mut sid: u32 = 0;
+                for i in 0..content_len {
+                    sid = (sid << 8) | (self.buf[payload_start + i] as u32);
+                }
+                self.offset = payload_end;
+                IonValue::Symbol(sid)
+            }
+            0x8 => {
+                let s = std::str::from_utf8(&self.buf[payload_start..payload_end])
+                    .map_err(|_| IonError::MalformedUtf8(payload_start))?
+                    .to_string();
+                self.offset = payload_end;
+                IonValue::String(s)
+            }
+            0x9 | 0xA => {
+                let b = self.buf[payload_start..payload_end].to_vec();
+                self.offset = payload_end;
+                IonValue::Blob(b)
+            }
+            0xB | 0xC => {
+                self.offset = payload_start;
+                let mut items = Vec::new();
+                while self.offset < payload_end {
+                    items.push(self.decode_value()?);
+                }
+                self.offset = payload_end;
+                IonValue::List(items)
+            }
+            0xD => {
+                self.offset = payload_start;
+                let mut fields = Vec::new();
+                while self.offset < payload_end {
+                    let field_id = decode_varuint(self.buf, &mut self.offset)? as u32;
+                    let field_val = self.decode_value()?;
+                    fields.push((field_id, field_val));
+                }
+                self.offset = payload_end;
+                IonValue::Struct(fields)
+            }
+            0xE => {
+                self.offset = payload_start;
+                let annot_length = decode_varuint(self.buf, &mut self.offset)? as usize;
+                let annot_end = self.offset + annot_length;
+                let mut annotations = Vec::new();
+                while self.offset < annot_end {
+                    let annot_id = decode_varuint(self.buf, &mut self.offset)? as u32;
+                    annotations.push(annot_id);
+                }
+                let wrapped_val = self.decode_value()?;
+                self.offset = payload_end;
+                IonValue::Annotated(annotations, Box::new(wrapped_val))
+            }
+            _ => {
+                return Err(IonError::InvalidTypeDescriptor(td, start_offset));
+            }
+        };
+
+        Ok(val)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +688,64 @@ mod tests {
         );
         w3.write_value(&ann);
         assert_eq!(w3.to_bytes(), &[232, 130, 4, 209, 180, 33, 1, 33, 2]);
+    }
+
+    #[test]
+    fn test_ion_reader_roundtrip() {
+        let mut writer = IonWriter::new();
+        writer.write_bvm();
+
+        let original_struct = IonValue::Struct(vec![
+            (10, IonValue::String("English".to_string())),
+            (16, IonValue::Int(42)),
+            (17, IonValue::Int(-15)),
+            (20, IonValue::Bool(true)),
+            (21, IonValue::Bool(false)),
+            (22, IonValue::Null),
+            (25, IonValue::Blob(b"binary_blob".to_vec())),
+            (
+                30,
+                IonValue::List(vec![
+                    IonValue::Int(1),
+                    IonValue::Int(2),
+                    IonValue::String("item".to_string()),
+                    IonValue::Bool(true),
+                ]),
+            ),
+            (40, IonValue::Symbol(123)),
+        ]);
+
+        writer.write_value(&original_struct);
+        let raw = writer.to_bytes();
+
+        let mut reader = IonReader::new(raw);
+        let decoded = reader.decode_value().expect("Decode failed");
+        assert_eq!(decoded, original_struct);
+
+        // Test annotated value roundtrip
+        let mut w2 = IonWriter::new();
+        let ann = IonValue::Annotated(
+            vec![593],
+            Box::new(IonValue::List(vec![IonValue::Int(1), IonValue::Int(2)])),
+        );
+        w2.write_value(&ann);
+        let raw2 = w2.to_bytes();
+
+        let mut r2 = IonReader::new(raw2);
+        let decoded2 = r2.decode_value().expect("Decode annotated failed");
+        assert_eq!(decoded2, ann);
+
+        let underline_val = IonValue::Struct(vec![
+            (173, IonValue::Symbol(863)),
+            (23, IonValue::Bool(true)),
+        ]);
+        let mut w = IonWriter::new();
+        w.write_bvm();
+        w.write_value(&underline_val);
+        let raw = w.into_bytes();
+        println!("underline_val raw bytes: {:?}", raw);
+        let mut r = IonReader::new(&raw);
+        let dec = r.decode_value().expect("Decode underline failed");
+        assert_eq!(dec, underline_val);
     }
 }

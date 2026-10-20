@@ -126,8 +126,32 @@ impl ConversionPipeline {
         }
         let mut cover_jpeg = None;
         let mut cover_optimized = false;
-        if let Some(cover_id) = &ir.metadata.cover_image_id {
-            if let Some(asset) = ir.resources.get(cover_id) {
+        let cover_id_opt = ir.metadata.cover_image_id.clone().or_else(|| {
+            ir.sections.first().and_then(|s| {
+                s.blocks.iter().find_map(|b| match b {
+                    crate::ir::Block::Image { resource_id, .. } => Some(resource_id.clone()),
+                    _ => None,
+                })
+            })
+        }).or_else(|| {
+            ir.resources.keys().find(|k| k.to_lowercase().contains("cover")).cloned()
+        });
+
+        if let Some(target_id) = cover_id_opt {
+            let asset = ir.resources.get(&target_id).or_else(|| {
+                let fn_opt = std::path::Path::new(&target_id)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string());
+                ir.resources.iter().find_map(|(k, v)| {
+                    if let Some(ref fn_str) = fn_opt {
+                        if k == fn_str || k.ends_with(fn_str) {
+                            return Some(v);
+                        }
+                    }
+                    None
+                })
+            });
+            if let Some(asset) = asset {
                 if let Ok(optimized) = CoverOptimizer::optimize_thumbnail(&asset.data) {
                     cover_jpeg = Some(optimized);
                     cover_optimized = true;
@@ -160,6 +184,16 @@ impl ConversionPipeline {
                         let _ = f.read_to_end(&mut buf);
                         kll_bytes = Some(buf);
                     }
+                }
+            }
+
+            // Always deploy companion .sdr directory and .kll database alongside output_path
+            if let Some(ref kll) = kll_bytes {
+                let sdr_path = output_path.with_extension("sdr");
+                if std::fs::create_dir_all(&sdr_path).is_ok() {
+                    let safe_asin = KindleSync::sanitize_asin(&content_id);
+                    let kll_path = sdr_path.join(format!("LanguageLayer.en.{}.kll", safe_asin));
+                    let _ = std::fs::write(kll_path, kll);
                 }
             }
         }
