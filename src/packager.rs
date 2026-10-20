@@ -206,6 +206,7 @@ pub struct KfxPackager<'a> {
     book: &'a BookIR,
     sections: Vec<Section>,
     toc: Vec<crate::ir::TocItem>,
+    page_list: Vec<crate::ir::PageEntry>,
     content_type: &'a str,
     container_id: String,
     content_id: String,
@@ -241,11 +242,13 @@ impl<'a> KfxPackager<'a> {
         temp_book.fragment_large_sections(DEFAULT_MAX_SECTION_CHARS, DEFAULT_MAX_SECTION_BLOCKS);
         let sections = temp_book.sections;
         let toc = temp_book.toc;
+        let page_list = temp_book.page_list;
 
         Self {
             book,
             sections,
             toc,
+            page_list,
             content_type,
             container_id,
             content_id,
@@ -1435,13 +1438,14 @@ impl<'a> KfxPackager<'a> {
         symbols: &mut LocalSymbols,
         section_data: &[SectionPackData],
     ) {
-        if self.toc.is_empty() {
+        if self.toc.is_empty() && self.page_list.is_empty() {
             return;
         }
 
         let sym_book_navigation = symbol_id("book_navigation").unwrap_or(389);
         let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
         let sym_toc = symbol_id("toc").unwrap_or(212);
+        let sym_page_list = symbol_id("page_list").unwrap_or(237);
         let sym_nav_type = symbol_id("nav_type").unwrap_or(235);
         let sym_nav_container_name = symbol_id("nav_container_name").unwrap_or(239);
         let sym_nav_containers = symbol_id("nav_containers").unwrap_or(392);
@@ -1455,59 +1459,116 @@ impl<'a> KfxPackager<'a> {
         let sym_reading_order_name = symbol_id("reading_order_name").unwrap_or(178);
         let sym_default = symbol_id("default").unwrap_or(351);
 
-        let mut entries = Vec::new();
+        let mut nav_container_syms = Vec::new();
 
-        for item in &self.toc {
-            let target_sec = section_data
-                .iter()
-                .find(|s| s.raw_id == item.target_section || s.name == item.target_section)
-                .or_else(|| {
-                    let prefix = format!("{}_p", item.target_section);
-                    section_data
-                        .iter()
-                        .find(|s| s.raw_id.starts_with(&prefix) || s.name.starts_with(&prefix))
-                })
-                .or_else(|| section_data.first());
+        if !self.toc.is_empty() {
+            let mut entries = Vec::new();
 
-            let target_pos = if let Some(sec) = target_sec {
-                sec.block_info.first().map(|&(eid, _)| eid).unwrap_or(sec.sec_eid)
-            } else {
-                200
-            };
+            for item in &self.toc {
+                let target_sec = section_data
+                    .iter()
+                    .find(|s| s.raw_id == item.target_section || s.name == item.target_section)
+                    .or_else(|| {
+                        let prefix = format!("{}_p", item.target_section);
+                        section_data
+                            .iter()
+                            .find(|s| s.raw_id.starts_with(&prefix) || s.name.starts_with(&prefix))
+                    })
+                    .or_else(|| section_data.first());
 
-            let entry_val = IonValue::Struct(vec![
-                (sym_representation, IonValue::Struct(vec![
-                    (sym_label, IonValue::String(item.title.clone())),
-                ])),
-                (sym_target_position, IonValue::Struct(vec![
-                    (sym_id, IonValue::Int(target_pos as i64)),
-                    (sym_offset, IonValue::Int(0)),
-                ])),
+                let target_pos = if let Some(sec) = target_sec {
+                    sec.block_info.first().map(|&(eid, _)| eid).unwrap_or(sec.sec_eid)
+                } else {
+                    200
+                };
+
+                let entry_val = IonValue::Struct(vec![
+                    (sym_representation, IonValue::Struct(vec![
+                        (sym_label, IonValue::String(item.title.clone())),
+                    ])),
+                    (sym_target_position, IonValue::Struct(vec![
+                        (sym_id, IonValue::Int(target_pos as i64)),
+                        (sym_offset, IonValue::Int(0)),
+                    ])),
+                ]);
+                entries.push(entry_val);
+            }
+
+            // Build nav_container ($391) standalone entity for TOC
+            let container_sym = symbols.intern("toc_nav");
+            let container_val = IonValue::Struct(vec![
+                (sym_nav_type, IonValue::Symbol(sym_toc)),
+                (sym_nav_container_name, IonValue::Symbol(container_sym)),
+                (sym_entries, IonValue::List(entries)),
             ]);
-            entries.push(entry_val);
+
+            let mut container_writer = IonWriter::new();
+            container_writer.write_bvm();
+            container_writer.write_value(&container_val);
+            self.entities.push(KfxEntity {
+                entity_id: container_sym,
+                chunk_type: sym_nav_container,
+                data: container_writer.into_bytes(),
+            });
+            nav_container_syms.push(IonValue::Symbol(container_sym));
         }
 
-        // Build nav_container ($391) standalone entity
-        let container_sym = symbols.intern("toc_nav");
-        let container_val = IonValue::Struct(vec![
-            (sym_nav_type, IonValue::Symbol(sym_toc)),
-            (sym_nav_container_name, IonValue::Symbol(container_sym)),
-            (sym_entries, IonValue::List(entries)),
-        ]);
+        if !self.page_list.is_empty() {
+            let mut page_entries = Vec::new();
 
-        let mut container_writer = IonWriter::new();
-        container_writer.write_bvm();
-        container_writer.write_value(&container_val);
-        self.entities.push(KfxEntity {
-            entity_id: container_sym,
-            chunk_type: sym_nav_container,
-            data: container_writer.into_bytes(),
-        });
+            for page in &self.page_list {
+                let target_sec = section_data
+                    .iter()
+                    .find(|s| s.raw_id == page.target_section || s.name == page.target_section)
+                    .or_else(|| {
+                        let prefix = format!("{}_p", page.target_section);
+                        section_data
+                            .iter()
+                            .find(|s| s.raw_id.starts_with(&prefix) || s.name.starts_with(&prefix))
+                    })
+                    .or_else(|| section_data.first());
 
-        // Build book_navigation ($389) as singleton list of reading orders referencing container_sym
+                let target_pos = if let Some(sec) = target_sec {
+                    sec.block_info.first().map(|&(eid, _)| eid).unwrap_or(sec.sec_eid)
+                } else {
+                    200
+                };
+
+                let entry_val = IonValue::Struct(vec![
+                    (sym_representation, IonValue::Struct(vec![
+                        (sym_label, IonValue::String(page.page_number.clone())),
+                    ])),
+                    (sym_target_position, IonValue::Struct(vec![
+                        (sym_id, IonValue::Int(target_pos as i64)),
+                        (sym_offset, IonValue::Int(0)),
+                    ])),
+                ]);
+                page_entries.push(entry_val);
+            }
+
+            // Build nav_container ($391) standalone entity for page_list
+            let page_container_sym = symbols.intern("page_list_nav");
+            let page_container_val = IonValue::Struct(vec![
+                (sym_nav_type, IonValue::Symbol(sym_page_list)),
+                (sym_nav_container_name, IonValue::Symbol(page_container_sym)),
+                (sym_entries, IonValue::List(page_entries)),
+            ]);
+
+            let mut page_writer = IonWriter::new();
+            page_writer.write_bvm();
+            page_writer.write_value(&page_container_val);
+            self.entities.push(KfxEntity {
+                entity_id: page_container_sym,
+                chunk_type: sym_nav_container,
+                data: page_writer.into_bytes(),
+            });
+            nav_container_syms.push(IonValue::Symbol(page_container_sym));
+        }
+
+        // Build book_navigation ($389) as singleton list of reading orders referencing container symbols
         let nav_order = IonValue::Struct(vec![
             (sym_reading_order_name, IonValue::Symbol(sym_default)),
-            (sym_nav_containers, IonValue::List(vec![IonValue::Symbol(container_sym)])),
+            (sym_nav_containers, IonValue::List(nav_container_syms)),
         ]);
         let book_nav_val = IonValue::List(vec![nav_order]);
 
@@ -2302,6 +2363,49 @@ mod tests {
         // Verify document_data ($538) was emitted
         let has_doc_data = packager.entities.iter().any(|e| e.chunk_type == SYM_DOCUMENT_DATA);
         assert!(has_doc_data, "document_data ($538) was not emitted");
+    }
+
+    #[test]
+    fn test_packager_emits_page_list_navigation() {
+        let mut book = BookIR::default();
+        book.metadata.title = "Page List Test".to_string();
+        book.sections.push(Section {
+            id: "sec1".to_string(),
+            title: "Section 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Page 1 content".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }],
+        });
+        book.page_list.push(crate::ir::PageEntry {
+            page_number: "1".to_string(),
+            target_section: "sec1".to_string(),
+            target_anchor: None,
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging with page_list failed");
+        assert!(size > 0);
+
+        let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
+        let page_nav = packager.entities.iter().find(|e| {
+            if e.chunk_type == sym_nav_container {
+                let mut reader = crate::ion::IonReader::new(&e.data);
+                if let Ok(crate::ion::IonValue::Struct(fields)) = reader.decode_value() {
+                    return fields.iter().any(|(k, v)| *k == 235 && v == &crate::ion::IonValue::Symbol(237));
+                }
+            }
+            false
+        });
+        assert!(page_nav.is_some(), "page_list nav_container ($391) with nav_type=237 was not emitted");
     }
 
     #[test]

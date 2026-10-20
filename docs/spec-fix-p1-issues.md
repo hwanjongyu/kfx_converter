@@ -1,87 +1,92 @@
-# Specification: P1 Major Severity Remediation & Unified Pipeline Architecture
+# Specification: P1 Major Severity Remediation & Verification
 
 **Document:** `docs/spec-fix-p1-issues.md`  
-**Target:** `converter_epub2kfx`  
+**Target:** `kfx_converter`  
 **Status:** Approved for Implementation (Autonomous Execution via `/goal`)  
-**Date:** October 19, 2026  
+**Date:** October 20, 2026  
 
 ---
 
 ## 1. Overview & Objectives
 
-Following the multi-model consensus review by Gemini Pro, Claude Sonnet, and Claude Opus ([`docs/multi_model_review_report.md`](file:///home/drew/github/drew-developer/converter_epub2kfx/docs/multi_model_review_report.md)), this specification details the architectural and code remediation for all **P1 Major Severity issues**:
+Following the multi-model consensus audit ([`docs/multi_model_review_report.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/multi_model_review_report.md)), this specification details the architectural and code remediation for all **P1 Major Severity issues**:
 
-1. **`SEC-01`**: Guard Against Deceptive Deflate Stream Bombs (CWE-409) in `src/epub.rs`.
-2. **`RES-01`**: Fix Silent Content Dropping for `<div>`, `<section>`, `<article>` Elements in `src/epub.rs`.
-3. **`PID-01`**: Align Word Wise Position IDs with Yellowjacket Layout & Tokenize Inner Apostrophes in `src/enhancements/word_wise.rs`.
-4. **`SEC-03` & `SEC-02`**: FAT32 DOS Reserved Device Names, Safe Byte Length Truncation, and ASIN Char Boundary Safety in `src/sync.rs`.
-5. **`ARCH-01`**: Extract Unified `ConversionPipeline` Service in `src/pipeline.rs` to eliminate 100 lines of duplicate orchestration in `src/main.rs` and `src/ui/state.rs`.
-6. **`UI-01`**: Move Heavy GPUI Conversion to Background Async Tasks in `src/ui/app.rs` to eliminate UI thread freezes.
-
----
-
-## 2. Technical Specifications
-
-### 2.1 `SEC-01`: Deceptive Deflate Stream Bomb Mitigation (`src/epub.rs`)
-- **Vulnerability**: Unbounded `entry.read_to_string(&mut s)?` in `find_opf_path`, `read_from_file` (for OPF reading), and `extract_toc` (`nav.xhtml` and `toc.ncx`) allows crafted ZIP files with false metadata to decompress unbounded streams into RAM.
-- **Implementation**:
-  - Define `const MAX_METADATA_BYTES: u64 = 10 * 1024 * 1024;` (10 MB).
-  - Wrap entry streams with `std::io::Read::take(MAX_METADATA_BYTES)` before calling `read_to_string`.
-
-### 2.2 `RES-01`: XHTML Parser Content Preservation (`src/epub.rs`)
-- **Vulnerability**: Currently, `parse_xhtml_blocks_with_manifest` only collects text when `in_p || in_heading || in_li || in_cell`. Books with text directly in `<div>`, `<section>`, `<article>`, `<main>`, `<aside>`, or bare `<body>` silently lose all text.
-- **Implementation**:
-  - On `Event::Start(ref e)`: Treat `div`, `section`, `article`, `main`, `aside` as block containers.
-  - On `Event::Text(ref e)`: If non-whitespace text is encountered and `!in_p && !in_heading && !in_li && !in_cell`, automatically activate an implicit paragraph (`in_p = true`), record the text, and flush into a `Block::Paragraph` when closing block boundaries or upon next block start.
-  - On `Event::Eof`: Ensure any pending `current_spans` or `current_span_text` is flushed into a block before returning.
-
-### 2.3 `PID-01`: Word Wise PID Alignment & Apostrophe Tokenization (`src/enhancements/word_wise.rs`)
-- **Vulnerability**:
-  - `ch.is_alphabetic()` treats `'` and `’` as non-alphabetic, breaking words like `"ameliorate's"` before the dictionary stemming logic runs.
-  - `abs_pos` is calculated with an arbitrary `+ 1` delimiter, diverging from Yellowjacket `position_id_map` ($265).
-- **Implementation**:
-  - In `generate_from_book`: Accept apostrophes (`'` and `’`) and hyphens (`-`) when accumulating a token if `word_char_start.is_some()`.
-  - Align PID calculation with KFX Yellowjacket layout:
-    - Base PID increments by `1` at the start of each section (section root object).
-    - In-block character positions start at `current_pid + char_idx`.
-    - Base PID advances by each block's character length: `current_pid += text.chars().count()`.
-
-### 2.4 `SEC-03` & `SEC-02`: FAT32 DOS Reserved Names & Safe String Truncation (`src/sync.rs`)
-- **Implementation**:
-  - `sanitize_filename`:
-    - Disallow FAT32 DOS device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`..`COM9`, `LPT1`..`LPT9`). If matched, affix `_book`.
-    - Clamp UTF-8 byte length to $\le 128$ bytes without slicing inside multi-byte characters (`clean.pop()`).
-  - `sanitize_asin`:
-    - Replace byte truncation `clean.truncate(64)` with character boundary truncation via `clean.char_indices().nth(64)`.
-
-### 2.5 `ARCH-01`: Unified `ConversionPipeline` (`src/pipeline.rs`)
-- **Implementation**:
-  - Create `src/pipeline.rs` exposing:
-    - `ConversionOptions`: content_type, word_wise, auto_deploy.
-    - `ConversionReport`: output_path, total_bytes, duration, cover_optimized, word_wise_glosses, synced_to_device, sync_error.
-    - `ConversionPipeline::run(...)`:
-      1. EPUB ingestion (`EpubReader::read_from_file`).
-      2. KFX packaging (`KfxPackager::package_to_file`).
-      3. Cover thumbnail normalization (`CoverOptimizer::optimize_thumbnail`).
-      4. Word Wise `.kll` SQLite generation (`WordWiseBuilder`).
-      5. Device synchronization (`KindleSync`).
-  - Refactor `src/main.rs` and `src/ui/state.rs` to call `ConversionPipeline::run`.
-
-### 2.6 `UI-01`: Non-Blocking GPUI Worker (`src/ui/app.rs`)
-- **Implementation**:
-  - In `KindleStudio::process_epub_file`, instead of blocking the main context thread, dispatch conversion via a background task:
-    - Use `cx.background_executor().spawn(...)` or GPUI async execution.
-    - On completion, use `cx.update(...)` to update task status and reload Kindle device files without dropping frames.
+1. **`NAV-02`**: **Emit Real Page Numbers (`page_list`) in Yellowjacket Navigation** ([`src/packager.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs))
+   - Retain `page_list` in `KfxPackager` and serialize a secondary `$391 nav_container` (`nav_type = $237 page_list`) alongside TOC so Kindle devices display physical page numbers.
+2. **`SEC-04`**: **Defend Against Zip Header Spoofing & Bomb Decompression** ([`src/epub.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs))
+   - Do not pre-allocate memory using untrusted zip header size in `read_from_file`.
+   - Cap chapter XHTML decompressed size to 20MB.
+   - Guard `read_metadata_from_file` against zip bomb file counts.
+   - Normalize path separators and prevent directory traversal in `resolve_zip_path`.
+3. **`SYNC-02`**: **Atomic USB Sideloading via Temporary Staging & Rename** ([`src/sync.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs))
+   - Copy to a temporary file (`.kfx.tmp_<pid>`), invoke `sync_all()`, and atomically rename to `.kfx` to guarantee zero corruption if a user unplugs or powers down mid-transfer.
+4. **`UI-02`**: **Offload Blocking Device Discovery to Background Thread in GPUI** ([`src/ui/app.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs))
+   - Move `detect_kindle_device()` and `load_device_files()` from the main UI thread into background tasks.
+5. **`UI-03`**: **Bound Concurrency in GUI Batch Conversion** ([`src/ui/app.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs))
+   - Implement a bounded worker pool (max 2 parallel workers) for `convert_selected_epubs`, tracking `TaskStatus::Queued` to prevent host memory exhaustion.
 
 ---
 
-## 3. Verification & QA Plan
+## 2. Technical Specifications & Changes
+
+### 2.1 `NAV-02`: Real Page Numbers (`page_list`) Navigation Container (`src/packager.rs`)
+- Store `page_list: Vec<PageEntry>` in `KfxPackager`.
+- In `KfxPackager::new`:
+  ```rust
+  let page_list = temp_book.page_list;
+  ```
+- In `build_navigation`:
+  - If `!self.page_list.is_empty()`:
+    - Build `page_entries` mapping each `PageEntry` to the matching section and block position.
+    - Emit a secondary `nav_container` entity with `nav_type = 237` (`page_list`) and entity ID `page_list_nav`.
+    - Include `page_list_nav` in `$389 book_navigation` `nav_containers` ($392).
+
+### 2.2 `SEC-04`: Defensive ZIP Decompression & Path Hardening (`src/epub.rs`)
+- Define `pub const MAX_CHAPTER_XHTML_BYTES: u64 = 20 * 1024 * 1024;` (20 MB).
+- In asset reading:
+  ```rust
+  let mut data = Vec::with_capacity(entry.size().min(64 * 1024) as usize);
+  let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
+  if limited.read_to_end(&mut data).is_ok() && (data.len() as u64) <= MAX_EPUB_FILE_SIZE {
+      resources.insert(item.id.clone(), ResourceAsset { ... });
+  }
+  ```
+- In chapter reading:
+  ```rust
+  let mut xhtml = String::new();
+  let mut limited = (&mut entry).take(MAX_CHAPTER_XHTML_BYTES + 1);
+  if limited.read_to_string(&mut xhtml).is_ok() && (xhtml.len() as u64) <= MAX_CHAPTER_XHTML_BYTES {
+      ...
+  }
+  ```
+- In `read_metadata_from_file`:
+  Guard against `archive.len() > MAX_EPUB_FILES`.
+- In `resolve_zip_path`:
+  Replace backslashes `\` with `/`, strip leading/trailing `/`, and resolve `..` safely without escaping root.
+
+### 2.3 `SYNC-02`: Atomic Sideload Staging & Rename (`src/sync.rs`)
+- In `copy_file` and `write_bytes`:
+  - Create `tmp_dst = dst.with_extension(format!("{}.tmp_{}", ext, std::process::id()))`.
+  - Write or stream data to `tmp_dst`.
+  - Invoke `sync_all()` on `tmp_dst`.
+  - Atomically rename `std::fs::rename(&tmp_dst, dst)`.
+  - Sync parent directory descriptor.
+
+### 2.4 `UI-02` & `UI-03`: Asynchronous GPUI Device Probing & Bounded Batch Conversion (`src/ui/app.rs`)
+- In `KindleStudio::refresh_device`:
+  - Dispatch device detection and library walk asynchronously via `cx.background_executor().spawn(...)`.
+- In `KindleStudio::convert_selected_epubs`:
+  - Enqueue all selected items into `self.tasks` with `TaskStatus::Queued`.
+  - Spawn up to 2 concurrent background workers consuming items from a thread-safe work queue.
+
+---
+
+## 3. Verification & Testing Plan
 
 1. **Unit Tests**:
-   - `test_sanitize_filename_dos_devices`: Verify `AUX`, `CON.kfx`, `nul.epub` are safely rewritten and byte-capped $\le 128$.
-   - `test_sanitize_asin_unicode`: Verify strings with multi-byte characters do not panic on 64-char boundary truncation.
-   - `test_epub_parse_div_and_section_text`: Verify text inside `<div>` and `<section>` without `<p>` is cleanly captured.
-   - `test_word_wise_apostrophe_and_pid_alignment`: Verify `'s` and `’s` are correctly stemmed and PIDs align with section roots.
-   - `test_pipeline_e2e_run`: Verify `ConversionPipeline::run` produces valid KFX and optional enhancements.
+   - `test_packager_emits_page_list_navigation`: Verifies that a book containing `page_list` produces a `$391` entity with `nav_type = 237` (`page_list`) referenced in `$389`.
+   - `test_epub_resolve_zip_path_traversal_and_backslashes`: Verifies `resolve_zip_path` normalizes backslashes and safely pops relative directories without escaping root.
+   - `test_epub_metadata_file_count_guard`: Verifies `read_metadata_from_file` enforces limits.
+   - `test_sync_atomic_copy_and_write`: Verifies that `copy_file` and `write_bytes` write cleanly via atomic rename and leave no `.tmp` files behind.
 2. **Regression Check**:
-   - Run `cargo test --all-targets` and `cargo check --features gui` to ensure 100% build and test pass rate.
+   - Run `cargo test` and `cargo test --features gui` to ensure 100% pass rate.

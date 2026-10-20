@@ -17,6 +17,7 @@ use crate::ir::{Block, BookIR, BookMetadata, PageEntry, ResourceAsset, Section, 
 pub const MAX_EPUB_FILES: usize = 10_000;
 pub const MAX_EPUB_UNCOMPRESSED_TOTAL: u64 = 1024 * 1024 * 1024; // 1 GB
 pub const MAX_EPUB_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
+pub const MAX_CHAPTER_XHTML_BYTES: u64 = 20 * 1024 * 1024; // 20 MB limit for single chapter XHTML
 pub const MAX_METADATA_BYTES: u64 = 10 * 1024 * 1024; // 10 MB limit for XML/NCX/NAV metadata
 pub const MAX_COMPRESSION_RATIO: f64 = 100.0;
 
@@ -51,6 +52,14 @@ impl EpubReader {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let mut archive = ZipArchive::new(reader)?;
+
+        let num_files = archive.len();
+        if num_files > MAX_EPUB_FILES {
+            return Err(EpubError::Security(format!(
+                "Archive contains {} files, exceeding limit of {}",
+                num_files, MAX_EPUB_FILES
+            )));
+        }
 
         let opf_path = Self::find_opf_path(&mut archive)?;
         let opf_content = {
@@ -156,9 +165,9 @@ impl EpubReader {
             if item.media_type.starts_with("image/") || item.media_type.starts_with("font/") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
-                    let mut data = Vec::with_capacity(entry.size().min(MAX_EPUB_FILE_SIZE) as usize);
+                    let mut data = Vec::with_capacity(entry.size().min(64 * 1024) as usize);
                     let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
-                    if limited.read_to_end(&mut data).is_ok() {
+                    if limited.read_to_end(&mut data).is_ok() && (data.len() as u64) <= MAX_EPUB_FILE_SIZE {
                         resources.insert(
                             item.id.clone(),
                             ResourceAsset {
@@ -192,15 +201,16 @@ impl EpubReader {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut xhtml = String::new();
-                    let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
-                    if limited.read_to_string(&mut xhtml).is_ok() {
+                    let mut limited = (&mut entry).take(MAX_CHAPTER_XHTML_BYTES + 1);
+                    if limited.read_to_string(&mut xhtml).is_ok() && (xhtml.len() as u64) <= MAX_CHAPTER_XHTML_BYTES {
                         let (blocks, sec_footnotes) = Self::parse_xhtml_with_manifest(&xhtml, &href_to_id);
                         for (fn_id, fn_text) in sec_footnotes {
-                            all_footnotes.insert(fn_id.clone(), fn_text.clone());
                             all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
                             if !file_name.is_empty() {
                                 all_footnotes.insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
                             }
+                            all_footnotes.insert(format!("{}#{}", sec_id, fn_id), fn_text.clone());
+                            all_footnotes.entry(fn_id).or_insert(fn_text);
                         }
                         let detected_title = blocks.iter().find_map(|b| {
                             if let Block::Heading { spans, .. } = b {
@@ -1852,22 +1862,23 @@ impl EpubReader {
     }
 
     fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
-        if base_dir.is_empty() {
-            relative_path.to_string()
+        let normalized_rel = relative_path.replace('\\', "/");
+        let combined = if base_dir.is_empty() {
+            normalized_rel
         } else {
-            let combined = format!("{}/{}", base_dir, relative_path);
-            let mut parts = Vec::new();
-            for seg in combined.split('/') {
-                if seg.is_empty() || seg == "." {
-                    continue;
-                } else if seg == ".." {
-                    parts.pop();
-                } else {
-                    parts.push(seg);
-                }
+            format!("{}/{}", base_dir.trim_matches('/'), normalized_rel)
+        };
+        let mut parts = Vec::new();
+        for seg in combined.split('/') {
+            if seg.is_empty() || seg == "." {
+                continue;
+            } else if seg == ".." {
+                parts.pop();
+            } else {
+                parts.push(seg);
             }
-            parts.join("/")
         }
+        parts.join("/")
     }
 
     pub fn decode_percent(s: &str) -> String {
@@ -1984,6 +1995,8 @@ mod tests {
         assert_eq!(EpubReader::resolve_zip_path("OEBPS", "ch1.xhtml"), "OEBPS/ch1.xhtml");
         assert_eq!(EpubReader::resolve_zip_path("OEBPS/text", "../images/cover.jpg"), "OEBPS/images/cover.jpg");
         assert_eq!(EpubReader::resolve_zip_path("", "content.opf"), "content.opf");
+        assert_eq!(EpubReader::resolve_zip_path("OEBPS", "images\\cover.jpg"), "OEBPS/images/cover.jpg");
+        assert_eq!(EpubReader::resolve_zip_path("", "sub/../content.opf"), "content.opf");
     }
 
     #[test]

@@ -63,18 +63,16 @@ However, cross-perspective analysis by **Gemini Pro**, **Claude Sonnet**, and **
 
 ### ⚠️ High Severity (P1 — Security Hardening, Reliability & Feature Completeness)
 
-5. **Emit Real Page Numbers (`page_list`) in Yellowjacket Navigation ([`src/packager.rs#L241-L244, L1433`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L241-L244))**:
-   - Retain `page_list` in `KfxPackager` and serialize a secondary `$391 nav_container` (`nav_type = $237 page_list`) alongside TOC.
-6. **Defend Against Zip Header Spoofing & Bomb Decompression ([`src/epub.rs#L50-L165`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L50-L165))**:
-   - Do not pre-allocate vectors using untrusted `entry.size()`.
-   - Add decompression ratio tracking to `read_metadata_from_file`.
-   - Bound maximum XHTML chapter parsing size to 20MB.
-7. **Atomic USB Sideloading via Temporary File & Rename ([`src/sync.rs#L408`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L408))**:
-   - Copy to `.kfx.tmp`, execute `sync_all()`, and atomically rename to `.kfx` to prevent half-written book corruption on power loss.
-8. **Offload Blocking Device Discovery to Background Thread in GPUI ([`src/ui/app.rs#L30-L53`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L30-L53))**:
-   - Move `detect_kindle_device()` and `load_device_files()` calls into `cx.background_executor().spawn(...)`.
-9. **Bound Concurrency in GUI Batch Conversion ([`src/ui/app.rs#L179-L182`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L179-L182))**:
-   - Limit parallel conversion tasks to 2–4 workers to prevent host out-of-memory crashes on large directory conversions.
+5. - [x] **Emit Real Page Numbers (`page_list`) in Yellowjacket Navigation ([`src/packager.rs#L241-L244, L1433`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L241-L244))**:
+   - Retained `page_list` in `KfxPackager` and serialized a secondary `$391 nav_container` (`nav_type = $237 page_list`) alongside TOC.
+6. - [x] **Defend Against Zip Header Spoofing & Bomb Decompression ([`src/epub.rs#L50-L165`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L50-L165))**:
+   - Eliminated untrusted `entry.size()` memory pre-allocation; bounded single chapter XHTML parsing to 20MB (`MAX_CHAPTER_XHTML_BYTES`). Added archive file count checks to `read_metadata_from_file`, and hardened `resolve_zip_path`.
+7. - [x] **Atomic USB Sideloading via Temporary File & Rename ([`src/sync.rs#L408`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L408))**:
+   - Copied to `.kfx.tmp_<pid>`, executed `sync_all()`, and atomically renamed to `.kfx` with directory flushing to prevent half-written book corruption on power loss or cable disconnect.
+8. - [x] **Offload Blocking Device Discovery to Background Thread in GPUI ([`src/ui/app.rs#L30-L53`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L30-L53))**:
+   - Dispatched `detect_kindle_device()` and `load_device_files()` asynchronously via `cx.background_executor().spawn(...)`.
+9. - [x] **Bound Concurrency in GUI Batch Conversion ([`src/ui/app.rs#L179-L182`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L179-L182))**:
+   - Implemented a 2-worker bounded parallel conversion worker pool with FIFO queue and `TaskStatus::Queued` to protect host memory.
 
 ---
 

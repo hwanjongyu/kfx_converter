@@ -47,10 +47,25 @@ impl KindleStudio {
     }
 
     pub fn refresh_device(&mut self, cx: &mut Context<Self>) {
-        self.device = detect_kindle_device();
-        self.files = load_device_files(&self.device);
-        self.status_message = None;
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (device, files) = cx
+                .background_executor()
+                .spawn(async move {
+                    let dev = detect_kindle_device();
+                    let f = load_device_files(&dev);
+                    (dev, f)
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.device = device;
+                this.files = files;
+                this.status_message = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn eject_device(&mut self, cx: &mut Context<Self>) {
@@ -164,7 +179,7 @@ impl KindleStudio {
         }
 
         let count = selected_paths.len();
-        self.status_message = Some((format!("Starting conversion of {} books...", count), false));
+        self.status_message = Some((format!("Starting bounded conversion of {} books (2 concurrent workers)...", count), false));
 
         if sync_to_kindle {
             self.settings.auto_deploy = true;
@@ -176,8 +191,110 @@ impl KindleStudio {
             }
         }
 
-        for path in selected_paths {
-            self.process_epub_file(&path, cx);
+        let mut queued_tasks = std::collections::VecDeque::new();
+        for path in &selected_paths {
+            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let file_size_str = match std::fs::metadata(path) {
+                Ok(meta) => {
+                    let bytes = meta.len();
+                    if bytes >= 1024 * 1024 {
+                        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+                    } else {
+                        format!("{} KB", bytes / 1024)
+                    }
+                }
+                Err(_) => "Unknown".into(),
+            };
+            let task_id = (self.tasks.len() as u64) + (queued_tasks.len() as u64) + 1;
+            queued_tasks.push_back((task_id, path.clone()));
+            self.tasks.insert(0, ConversionTask {
+                id: task_id,
+                filename,
+                file_size_str,
+                status: TaskStatus::Queued,
+                progress: 0.0,
+                word_wise: self.settings.word_wise,
+                xray: false,
+            });
+        }
+        cx.notify();
+
+        let settings = self.settings.clone();
+        let device = self.device.clone();
+
+        // Bounded worker pool: max 2 concurrent conversion workers to safeguard memory
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(queued_tasks));
+        let num_workers = 2.min(selected_paths.len());
+
+        for _ in 0..num_workers {
+            let q = queue.clone();
+            let s_clone = settings.clone();
+            let d_clone = device.clone();
+
+            cx.spawn(async move |this, cx| {
+                loop {
+                    let next = {
+                        let mut guard = match q.lock() {
+                            Ok(g) => g,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        guard.pop_front()
+                    };
+
+                    let Some((task_id, path_buf)) = next else {
+                        break;
+                    };
+
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
+                            t.status = TaskStatus::Converting;
+                            t.progress = 0.5;
+                        }
+                        cx.notify();
+                    });
+
+                    let target_path = path_buf.clone();
+                    let s = s_clone.clone();
+                    let d = d_clone.clone();
+                    let res = cx.background_executor().spawn(async move {
+                        super::state::convert_epub_file(&target_path, &s, &d)
+                    }).await;
+
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
+                            t.progress = 1.0;
+                            match &res {
+                                Ok(r) => {
+                                    if r.synced_to_device {
+                                        t.status = TaskStatus::Completed;
+                                    } else {
+                                        t.status = TaskStatus::ConvertedLocalOnly;
+                                    }
+                                }
+                                Err(err) => {
+                                    t.status = TaskStatus::Failed(err.clone());
+                                }
+                            }
+                        }
+                        if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == path_buf) {
+                            match &res {
+                                Ok(r) => {
+                                    if r.synced_to_device {
+                                        item.status = LocalEpubStatus::OnDevice;
+                                    } else {
+                                        item.status = LocalEpubStatus::ConvertedLocal;
+                                    }
+                                }
+                                Err(err) => {
+                                    item.status = LocalEpubStatus::Error(err.clone());
+                                }
+                            }
+                        }
+                        this.refresh_device(cx);
+                        cx.notify();
+                    });
+                }
+            }).detach();
         }
 
         cx.notify();

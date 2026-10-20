@@ -403,12 +403,18 @@ impl KindleSync {
             // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
+            let tmp_dst = dst.with_extension(format!(
+                "{}.tmp_{}",
+                dst.extension().and_then(|e| e.to_str()).unwrap_or("kfx"),
+                std::process::id()
+            ));
             let mut r = std::fs::File::open(src)?;
-            let mut w = std::fs::File::create(dst)?;
+            let mut w = std::fs::File::create(&tmp_dst)?;
             std::io::copy(&mut r, &mut w)?;
             w.sync_all()?;
             drop(w);
             drop(r);
+            std::fs::rename(&tmp_dst, dst)?;
             if let Some(parent) = dst.parent() {
                 if let Ok(dir) = std::fs::File::open(parent) {
                     let _ = dir.sync_all();
@@ -476,10 +482,16 @@ impl KindleSync {
             Self::copy_file(tmp.path(), dst)?;
         } else {
             use std::io::Write;
-            let mut f = std::fs::File::create(dst)?;
+            let tmp_dst = dst.with_extension(format!(
+                "{}.tmp_{}",
+                dst.extension().and_then(|e| e.to_str()).unwrap_or("dat"),
+                std::process::id()
+            ));
+            let mut f = std::fs::File::create(&tmp_dst)?;
             f.write_all(data)?;
             f.sync_all()?;
             drop(f);
+            std::fs::rename(&tmp_dst, dst)?;
             if let Some(parent) = dst.parent() {
                 if let Ok(dir) = std::fs::File::open(parent) {
                     let _ = dir.sync_all();
