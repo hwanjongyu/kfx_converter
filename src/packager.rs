@@ -56,7 +56,7 @@ impl LocalSymbols {
         let import_entry = IonValue::Struct(vec![
             (4, IonValue::String("YJ_symbols".to_string())), // $4 = name
             (5, IonValue::Int(10)),                         // $5 = version
-            (8, IonValue::Int(842)),                        // $8 = max_id in YJ_symbols shared table (842 symbols: 10..=851)
+            (8, IonValue::Int(851)),                        // $8 = max_id in YJ_symbols shared table (Amazon KFX specification: max_id = 851)
         ]);
         let sym_values: Vec<IonValue> = self
             .names
@@ -1900,7 +1900,7 @@ impl<'a> KfxPackager<'a> {
             // 1. External Resource metadata entity ($164)
             let mut ext_field_vec = vec![
                 (sym_resource_name, IonValue::Symbol(res_sym_id)),
-                (sym_location, IonValue::Symbol(raw_sym_id)),
+                (sym_location, IonValue::String(raw_path)),
                 (sym_format, IonValue::Symbol(format_sym)),
                 (sym_mime, IonValue::String(asset.mime_type.clone())),
             ];
@@ -2579,7 +2579,7 @@ mod tests {
 
 
     #[test]
-    fn test_yj_symbols_import_max_id_842() {
+    fn test_yj_symbols_import_max_id_851() {
         let mut symbols = LocalSymbols::new();
         let id1 = symbols.intern("test_local_sym_1");
         assert_eq!(id1, 852);
@@ -2591,7 +2591,7 @@ mod tests {
         // Verify BVM magic
         assert_eq!(&symtab_bytes[0..4], &[0xE0, 0x01, 0x00, 0xEA]);
 
-        // Explicitly decode symbol table and verify max_id in YJ_symbols import is 842
+        // Explicitly decode symbol table and verify max_id in YJ_symbols import is 851
         let mut reader = crate::ion::IonReader::new(&symtab_bytes);
         let values = reader.decode_all().expect("failed to decode symbol table");
         assert_eq!(values.len(), 1);
@@ -2609,7 +2609,7 @@ mod tests {
                 assert_eq!(import_list.len(), 1);
                 if let crate::ion::IonValue::Struct(import_fields) = &import_list[0] {
                     let max_id = import_fields.iter().find(|(k, _)| *k == 8).expect("missing max_id field $8");
-                    assert_eq!(max_id.1, crate::ion::IonValue::Int(842));
+                    assert_eq!(max_id.1, crate::ion::IonValue::Int(851));
                 } else {
                     panic!("expected struct in import_list");
                 }
@@ -2768,6 +2768,24 @@ mod tests {
             0x70,
             "resource_name in external_resource must be encoded as Ion Symbol (0x7x), got 0x{:02x}",
             ext_sym_val_descriptor
+        );
+
+        // Verify location ($165 = [0x01, 0xa5]) is encoded as Ion String (0x8x)
+        let loc_pos = ext_res
+            .data
+            .windows(2)
+            .position(|w| w == [0x01, 0xa5])
+            .expect("location ($165) field missing in external_resource");
+        let loc_val_descriptor = ext_res.data[loc_pos + 2];
+        assert_eq!(
+            loc_val_descriptor & 0xf0,
+            0x80,
+            "location in external_resource must be encoded as Ion String (0x8x), got 0x{:02x}",
+            loc_val_descriptor
+        );
+        assert!(
+            ext_res.data.windows(14).any(|w| w == b"resource/fig_1"),
+            "External resource entity ($164) must contain 'resource/fig_1' URI string"
         );
 
         // Verify width 32 and height 48 are encoded in ext_res ($164)

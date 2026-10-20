@@ -294,22 +294,26 @@ impl<'a> KfxPreflightValidator<'a> {
                                 }
                         }
 
-                        // $165 = location in $164 -> symbol referencing $417 (bcRawMedia)
+                        // $165 = location in $164 -> String URI referencing container path (e.g. "resource/{id}")
                         165 => {
                             if referrer.chunk_type == 164 {
                                 match fval {
-                                    IonValue::Symbol(target_sym) => {
-                                        if !entity_map.contains_key(&(417, *target_sym)) {
-                                            return Err(ValidationError::MissingFragment {
-                                                referrer_chunk: referrer.chunk_type,
-                                                referrer_eid: referrer.entity_id,
-                                                field_id: 165,
-                                                field_name: "location".to_string(),
-                                                target_sym: *target_sym,
-                                                target_name: self.resolve_symbol_name(*target_sym),
-                                                expected_chunk: 417,
-                                            });
-                                        }
+                                    IonValue::String(raw_path) => {
+                                        let target_sym = self.symbols.and_then(|syms| {
+                                            syms.names.iter().position(|s| s == raw_path).map(|pos| 852 + pos as u32)
+                                        });
+                                        if let Some(target_sym) = target_sym
+                                            && !entity_map.contains_key(&(417, target_sym)) {
+                                                return Err(ValidationError::MissingFragment {
+                                                    referrer_chunk: referrer.chunk_type,
+                                                    referrer_eid: referrer.entity_id,
+                                                    field_id: 165,
+                                                    field_name: "location".to_string(),
+                                                    target_sym,
+                                                    target_name: self.resolve_symbol_name(target_sym),
+                                                    expected_chunk: 417,
+                                                });
+                                            }
                                     }
                                     _ => {
                                         return Err(ValidationError::IllegalField {
@@ -318,7 +322,7 @@ impl<'a> KfxPreflightValidator<'a> {
                                             field_id: 165,
                                             field_name: "location".to_string(),
                                             reason: format!(
-                                                "Field 'location' ($165) in external_resource ($164) must be a Symbol referencing bcRawMedia ($417), found {:?}",
+                                                "Field 'location' ($165) in external_resource ($164) must be a String URI path ('resource/...'), found {:?}",
                                                 fval
                                             ),
                                         });
@@ -633,16 +637,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validator_catches_string_location_in_external_resource() {
+    fn test_validator_catches_non_string_location_in_external_resource() {
         let mut symbols = LocalSymbols::new();
         let res_sym = symbols.intern("res_img1");
 
-        // External resource entity with invalid String location instead of Symbol
+        // External resource entity with invalid Symbol location instead of String
         let mut w_res = IonWriter::new();
         w_res.write_bvm();
         w_res.write_value(&IonValue::Struct(vec![
             (175, IonValue::Symbol(res_sym)),
-            (165, IonValue::String("resource/res_img1".to_string())), // Illegal String!
+            (165, IonValue::Symbol(999)), // Illegal Symbol instead of String!
         ]));
 
         let entities = vec![

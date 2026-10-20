@@ -467,8 +467,10 @@ impl KindleSync {
             }
             let kll_path = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
             let _ = Self::write_bytes(&kll_path, kll);
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+
+        // Final settle delay to ensure all FAT directory transactions are safely buffered
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
         Ok(dest_kfx_path)
     }
@@ -482,52 +484,59 @@ impl KindleSync {
         if !sdr_dir.is_dir() {
             return;
         }
-        let stale_exts = [".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea"];
+        let stale_exts = [".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea", ".yjf", ".yjr"];
         if let Ok(entries) = std::fs::read_dir(sdr_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let fname_lower = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_lowercase())
-                    .unwrap_or_default();
+                if path.is_file() {
+                    let fname_lower = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_lowercase())
+                        .unwrap_or_default();
 
-                if fname_lower.ends_with(".bad_file")
-                    || stale_exts.iter().any(|ext| fname_lower.ends_with(ext))
-                    || (purge_word_wise && fname_lower.contains(".kll"))
-                {
-                    let _ = std::fs::remove_file(&path);
-                } else if let Some(asin) = current_asin {
-                    let asin_lower = asin.to_lowercase();
-                    if (fname_lower.contains(".kll") || fname_lower.contains(".asc"))
-                        && !fname_lower.contains(&asin_lower)
+                    if fname_lower.contains(".bad_file")
+                        || stale_exts.iter().any(|ext| fname_lower.ends_with(ext))
+                        || (purge_word_wise && fname_lower.contains(".kll"))
                     {
                         let _ = std::fs::remove_file(&path);
+                    } else if let Some(asin) = current_asin {
+                        let asin_lower = asin.to_lowercase();
+                        if (fname_lower.contains(".kll") || fname_lower.contains(".asc"))
+                            && !fname_lower.contains(&asin_lower)
+                        {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                } else if path.is_dir() && path.file_name().is_some_and(|n| n == "data") {
+                    let pag_cache = path.join(".pagination.cache");
+                    if pag_cache.is_dir() {
+                        let _ = std::fs::remove_dir_all(&pag_cache);
                     }
                 }
             }
         }
     }
 
-    /// Robust copy using `gio copy` for Linux GVFS MTP or streamed copy with data sync for standard mounts.
+    /// Robust copy using `gio copy` for Linux GVFS MTP or streamed copy for standard mounts.
+    /// Note: Avoid calling `sync_data()` / `sync_all()` on individual file handles, as SCSI
+    /// SYNCHRONIZE CACHE commands cause Kindle's USB gadget driver (fsg) to stall on slow eMMC
+    /// and trigger "capacity change from N to 0" (medium drop / disconnect).
     fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
         let dst_str = dst.to_string_lossy();
         if dst_str.contains("/gvfs/mtp:") {
             // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
+            use std::io::Write;
             let mut r = std::fs::File::open(src)?;
             let mut w = std::fs::File::create(dst)?;
             std::io::copy(&mut r, &mut w)?;
-            // Flush file content without invoking directory fsync, which triggers gadget resets on Kindle VFAT
-            let _ = w.sync_data();
+            w.flush()?;
             drop(w);
             drop(r);
-            // Brief settle delay to allow eMMC controller to commit blocks without SCSI reset
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
         Ok(())
     }
@@ -590,9 +599,10 @@ impl KindleSync {
             use std::io::Write;
             let mut f = std::fs::File::create(dst)?;
             f.write_all(data)?;
-            let _ = f.sync_data();
+            f.flush()?;
             drop(f);
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
+            std::thread::sleep(std::time::Duration::from_millis(150));
         }
         Ok(())
     }
@@ -695,6 +705,11 @@ mod tests {
         std::fs::write(sdr.join("test.phl"), b"stale_phl").unwrap();
         std::fs::write(sdr.join("test.bdr"), b"stale_bdr").unwrap();
         std::fs::write(sdr.join("test.ea"), b"stale_ea").unwrap();
+        std::fs::write(sdr.join("test.yjf"), b"stale_yjf").unwrap();
+        std::fs::write(sdr.join("test.yjr"), b"stale_yjr").unwrap();
+        let pag_cache = sdr.join("data").join(".pagination.cache");
+        std::fs::create_dir_all(&pag_cache).unwrap();
+        std::fs::write(pag_cache.join("cache.bin"), b"stale_pag").unwrap();
         std::fs::write(sdr.join("old.mbp1.bad_file"), b"bad_file").unwrap();
         std::fs::write(sdr.join("corrupted.han.BAD_FILE"), b"bad_file_caps").unwrap();
         std::fs::write(sdr.join("XRAY.entities.OLDASIN.asc"), b"orphaned_xray").unwrap();
@@ -711,6 +726,9 @@ mod tests {
         assert!(!sdr.join("test.phl").exists());
         assert!(!sdr.join("test.bdr").exists());
         assert!(!sdr.join("test.ea").exists());
+        assert!(!sdr.join("test.yjf").exists());
+        assert!(!sdr.join("test.yjr").exists());
+        assert!(!sdr.join("data").join(".pagination.cache").exists());
         assert!(!sdr.join("old.mbp1.bad_file").exists());
         assert!(!sdr.join("corrupted.han.BAD_FILE").exists());
         assert!(!sdr.join("XRAY.entities.OLDASIN.asc").exists());

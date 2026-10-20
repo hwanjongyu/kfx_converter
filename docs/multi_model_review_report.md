@@ -51,8 +51,8 @@ However, cross-perspective analysis by **Gemini Pro**, **Claude Sonnet**, and **
 2. - [x] **Fix Yellowjacket Symbol Table Import `max_id` Offset ([`src/packager.rs#L59`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L59))**:
    - Changed `(8, IonValue::Int(851))` to `(8, IonValue::Int(842))`.
    - *Rationale*: $9 \text{ system symbols} + 842 \text{ imported symbols} = 851$. Local document symbols start at 852.
-3. - [x] **Fix `external_resource` Field `location` Type ([`src/packager.rs#L1847`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L1847))**:
-   - Changed `(sym_location, IonValue::String(raw_path))` to `(sym_location, IonValue::Symbol(raw_sym_id))`.
+3. - [x] **Preserve `external_resource` Field `location` as String URI ([`src/packager.rs#L1903`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L1903))**:
+   - In Yellowjacket, `$165` (`location`) in `$164` (`external_resource`) is strictly an Ion String URI path (e.g. `"resource/{id}"`), whereas the `$417` entity ID in the dependency graph is the Symbol ID. Serializing `$165` as Symbol caused Kindle `val.as_string()` to return NULL, rendering all images invisible. Restored to `IonValue::String(raw_path)`.
 4. - [x] **Fix Integer Overflow & Negation Panics in Ion Reader ([`src/ion.rs#L439-L470`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs#L439-L470))**:
    - Used `self.offset.checked_add(content_len)` to prevent arithmetic wrap-around.
    - Enforced `content_len <= 8` for integer decoding, and protected `i64::MIN` negation from debug panics.

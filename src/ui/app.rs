@@ -282,6 +282,18 @@ impl KindleStudio {
                                 Ok(r) => {
                                     if r.synced_to_device {
                                         item.status = LocalEpubStatus::OnDevice;
+                                        let kfx_name = r.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                        if !this.files.iter().any(|f| f.name == kfx_name) {
+                                            this.files.push(kfx_converter::KindleBookFile {
+                                                name: kfx_name,
+                                                format: "KFX".into(),
+                                                size_formatted: "Synced".into(),
+                                                modified: "Just now".into(),
+                                                full_path: r.output_path.clone(),
+                                                has_word_wise: true,
+                                                has_sdr: true,
+                                            });
+                                        }
                                     } else {
                                         item.status = LocalEpubStatus::ConvertedLocal;
                                     }
@@ -291,7 +303,6 @@ impl KindleStudio {
                                 }
                             }
                         }
-                        this.refresh_device(cx);
                         cx.notify();
                     });
                 }
@@ -392,7 +403,18 @@ impl KindleStudio {
                                 t.status = TaskStatus::ConvertedLocalOnly;
                             }
                             if res.synced_to_device {
-                                this.refresh_device(cx);
+                                let kfx_name = res.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                if !this.files.iter().any(|f| f.name == kfx_name) {
+                                    this.files.push(kfx_converter::KindleBookFile {
+                                        name: kfx_name,
+                                        format: "KFX".into(),
+                                        size_formatted: "Synced".into(),
+                                        modified: "Just now".into(),
+                                        full_path: res.output_path.clone(),
+                                        has_word_wise: true,
+                                        has_sdr: true,
+                                    });
+                                }
                             }
 
                             if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == target_path) {

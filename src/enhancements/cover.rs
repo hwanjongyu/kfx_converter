@@ -26,22 +26,29 @@ pub struct CoverOptimizer;
 
 impl CoverOptimizer {
     /// Resizes down high-resolution content images exceeding max_dim (default 2560x2560) to protect
-    /// Kindle devices with 512MB RAM from pmond OOM crashes.
-    /// If image dimensions are already <= max_dim, returns the original bytes untouched.
+    /// Kindle devices with 512MB RAM from pmond OOM crashes, and re-encodes Progressive JPEGs
+    /// (SOF2 marker 0xFFC2) to Baseline JPEG (SOF0) so Kindle's hardware decoder can render them.
     pub fn optimize_content_image(data: &[u8], max_dim: u32) -> Result<Vec<u8>, CoverError> {
         if data.is_empty() {
             return Err(CoverError::EmptyData);
         }
 
+        let is_jpeg = data.starts_with(b"\xff\xd8");
+        let is_progressive_jpeg = is_jpeg && data.windows(2).any(|w| w == [0xff, 0xc2]);
+
         let img = image::load_from_memory(data)?;
         let (w, h) = (img.width(), img.height());
 
-        if w <= max_dim && h <= max_dim {
-            // Already safe, zero-cost bypass
+        if w <= max_dim && h <= max_dim && !is_progressive_jpeg {
+            // Already safe dimensions and standard baseline format, zero-cost bypass
             return Ok(data.to_vec());
         }
 
-        let resized = img.resize(max_dim, max_dim, FilterType::Lanczos3);
+        let resized = if w > max_dim || h > max_dim {
+            img.resize(max_dim, max_dim, FilterType::Lanczos3)
+        } else {
+            img
+        };
 
         let mut out = Cursor::new(Vec::new());
         let is_png = data.starts_with(b"\x89PNG");
@@ -172,5 +179,20 @@ mod tests {
         let decoded_big = image::load_from_memory(&result_big).unwrap();
         assert!(decoded_big.width() <= 2560);
         assert!(decoded_big.height() <= 2560);
+    }
+
+    #[test]
+    fn test_optimize_content_image_progressive_jpeg_converted_to_baseline() {
+        // A minimal valid Progressive JPEG (SOF2 marker [0xFF, 0xC2])
+        let prog_jpeg: [u8; 521] = [
+            255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67, 0, 8, 6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18, 19, 15, 20, 29, 26, 31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40, 55, 41, 44, 48, 49, 52, 52, 52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 219, 0, 67, 1, 9, 9, 9, 12, 11, 12, 24, 13, 13, 24, 50, 33, 28, 33, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 255, 194, 0, 17, 8, 0, 10, 0, 10, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 21, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 255, 196, 0, 21, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6, 255, 218, 0, 12, 3, 1, 0, 2, 16, 3, 16, 0, 0, 1, 138, 12, 184, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 5, 2, 31, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 1, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 1, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 6, 63, 2, 31, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 63, 33, 31, 255, 218, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 0, 16, 7, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 16, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 16, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 63, 16, 31, 255, 217
+        ];
+        assert!(prog_jpeg.windows(2).any(|w| w == [0xff, 0xc2]));
+
+        let baseline_res = CoverOptimizer::optimize_content_image(&prog_jpeg, 2560).unwrap();
+
+        // Verify converted to baseline JPEG (has SOF0 [0xFF, 0xC0] and NO SOF2 [0xFF, 0xC2])
+        assert!(baseline_res.windows(2).any(|w| w == [0xff, 0xc0]));
+        assert!(!baseline_res.windows(2).any(|w| w == [0xff, 0xc2]));
     }
 }
