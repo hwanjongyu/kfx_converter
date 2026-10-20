@@ -148,6 +148,26 @@ pub fn generate_content_id(seed: &str) -> String {
     hex
 }
 
+/// Resolves or deterministically generates an Amazon ASIN conforming to regex `^B[0-9A-Z]{9}$`.
+pub fn resolve_asin(identifier: &str, content_id: &str) -> String {
+    let cleaned = identifier
+        .trim()
+        .trim_start_matches("urn:asin:")
+        .trim_start_matches("mobi-asin:")
+        .trim_start_matches("asin:")
+        .trim();
+
+    if cleaned.len() == 10
+        && (cleaned.starts_with('B') || cleaned.starts_with('b'))
+        && cleaned.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        cleaned.to_uppercase()
+    } else {
+        // Deterministic 10-character Amazon ASIN: 'B' followed by first 9 hex digits of content_id
+        format!("B{}", &content_id[..9])
+    }
+}
+
 /// Generates 23-character URL-safe Base64 publication ID (version byte 0x05 + 16 derived bytes).
 pub fn generate_book_id(seed: &str) -> String {
     let mut hasher = Sha1::new();
@@ -205,7 +225,11 @@ impl<'a> KfxPackager<'a> {
 
         let container_id = generate_container_id(&seed);
         let content_id = generate_content_id(&seed);
-        let asin = content_id.clone();
+
+        // Kindle Word Wise & store feature requirements:
+        // ASIN must strictly conform to Amazon Standard Identification Number regex `^B[0-9A-Z]{9}$`.
+        let asin = resolve_asin(&book.metadata.identifier, &content_id);
+
         let book_id = generate_book_id(&seed);
 
         let mut temp_book = BookIR {
@@ -230,6 +254,18 @@ impl<'a> KfxPackager<'a> {
             entities: Vec::new(),
             next_eid: 852,
         }
+    }
+
+    pub fn container_id(&self) -> &str {
+        &self.container_id
+    }
+
+    pub fn content_id(&self) -> &str {
+        &self.content_id
+    }
+
+    pub fn asin(&self) -> &str {
+        &self.asin
     }
 
     fn alloc_eid(&mut self) -> u32 {
@@ -470,7 +506,9 @@ impl<'a> KfxPackager<'a> {
         let sym_val = symbol_id("value").unwrap_or(307);
 
         let author = self.book.metadata.creators.join(", ");
-        let lang = if self.book.metadata.language.is_empty() {
+        let lang = if self.book.metadata.language.starts_with("en")
+            || self.book.metadata.language.is_empty()
+        {
             "en".to_string()
         } else {
             self.book.metadata.language.clone()
@@ -1965,6 +2003,18 @@ mod tests {
 
         let book_id = generate_book_id(seed);
         assert_eq!(book_id.len(), 23);
+
+        // Test dynamic ASIN resolution without hardcoding
+        let asin_direct = resolve_asin("B00XIYGCDO", &content_id);
+        assert_eq!(asin_direct, "B00XIYGCDO");
+
+        let asin_urn = resolve_asin("urn:asin:b001234567", &content_id);
+        assert_eq!(asin_urn, "B001234567");
+
+        let asin_fallback = resolve_asin("9780698405776", &content_id);
+        assert_eq!(asin_fallback.len(), 10);
+        assert!(asin_fallback.starts_with('B'));
+        assert_eq!(asin_fallback, format!("B{}", &content_id[..9]));
     }
 
     #[test]

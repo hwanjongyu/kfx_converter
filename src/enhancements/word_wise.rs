@@ -36,13 +36,13 @@ pub struct WordWisePacingConfig {
 impl Default for WordWisePacingConfig {
     fn default() -> Self {
         Self {
-            min_difficulty: 3,
-            target_difficulty: 5,
-            min_distance: 80,
-            max_glosses_per_window: 1,
+            min_difficulty: 1,
+            target_difficulty: 3,
+            min_distance: 20,
+            max_glosses_per_window: 4,
             window_size: 800,
-            frontmatter_skip_chars: 8000,
-            max_total_glosses: 500,
+            frontmatter_skip_chars: 0,
+            max_total_glosses: 10_000,
         }
     }
 }
@@ -187,6 +187,11 @@ impl WordWiseBuilder {
             // Section root element occupies 1 PID position in Yellowjacket position_id_map ($265)
             pid += 1;
 
+            if section.blocks.is_empty() {
+                pid += 1;
+                continue;
+            }
+
             for block in &section.blocks {
                 let text = block.plain_text();
                 let mut word_char_start = None;
@@ -229,7 +234,8 @@ impl WordWiseBuilder {
                     }
                 }
 
-                pid += char_idx;
+                let block_len = char_idx.max(1);
+                pid += block_len;
             }
         }
 
@@ -432,7 +438,7 @@ mod tests {
 
         let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
             .with_pacing(WordWisePacingConfig {
-                min_difficulty: 3,
+                min_difficulty: 1,
                 target_difficulty: 5,
                 min_distance: 10,
                 max_glosses_per_window: 5,
@@ -477,7 +483,7 @@ mod tests {
 
         let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
             .with_pacing(WordWisePacingConfig {
-                min_difficulty: 3,
+                min_difficulty: 1,
                 target_difficulty: 5,
                 min_distance: 1,
                 max_glosses_per_window: 10,

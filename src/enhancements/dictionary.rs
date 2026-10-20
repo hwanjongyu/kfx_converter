@@ -29,212 +29,296 @@ pub const ENGLISH_STOPWORDS: &[&str] = &[
 ];
 
 pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
-    // Difficulty 3 (Intermediate-Advanced CEFR B2)
-    ("abstruse", 3, 8435), ("acrimony", 3, 42592), ("amalgamate", 3, 16556),
-    ("ameliorate", 3, 35386), ("anachronism", 3, 17750), ("anomalous", 3, 8502),
-    ("arbitrate", 3, 15781), ("assiduous", 3, 34856), ("bathos", 3, 34892), ("belie", 3, 11857),
-    ("bellwether", 3, 14092), ("bombastic", 3, 105389), ("calumny", 3, 15620),
-    ("castigate", 3, 15728), ("caterwaul", 3, 7989), ("chicanery", 3, 15772),
-    ("chimerical", 3, 100161), ("coalesce", 3, 29181), ("cogent", 3, 14904),
-    ("commensurate", 3, 42620), ("consecrate", 3, 19445), ("credulous", 3, 7696),
-    ("debilitate", 3, 35231), ("decimate", 3, 1081), ("defalcation", 3, 105478),
-    ("deleterious", 3, 737), ("delineate", 3, 13735), ("demagogue", 3, 40611), ("demur", 3, 32524),
-    ("denigrate", 3, 31898), ("deprecate", 3, 19474), ("deride", 3, 20151),
-    ("desiccate", 3, 108536), ("didactic", 3, 4065), ("dilatory", 3, 18677),
-    ("dilettante", 3, 39444), ("disabuse", 3, 16327), ("discernment", 3, 24150),
-    ("disingenuous", 3, 23874), ("disparage", 3, 18954), ("disseminate", 3, 29603),
-    ("dissonance", 3, 102184), ("divisive", 3, 8343), ("dogmatic", 3, 23031),
-    ("ebullient", 3, 21852), ("effluvium", 3, 79964), ("egalitarian", 3, 26870),
-    ("egregious", 3, 36506), ("elucidate", 3, 36391), ("enervate", 3, 5573), ("engender", 3, 4276),
-    ("equivocal", 3, 42463), ("ersatz", 3, 19557), ("erudite", 3, 23071), ("evanescent", 3, 36739),
-    ("exacerbate", 3, 6368), ("exasperate", 3, 14883), ("excoriate", 3, 18199),
-    ("exonerate", 3, 12254), ("extol", 3, 29354), ("fallacious", 3, 22001), ("fatuous", 3, 13840),
-    ("fecund", 3, 16194), ("filibuster", 3, 20069), ("flout", 3, 29581), ("foment", 3, 30194),
-    ("fulsome", 3, 13830), ("gainsay", 3, 41827), ("galvanize", 3, 37142), ("germane", 3, 36025),
-    ("grandiloquent", 3, 15173), ("hackneyed", 3, 10508), ("halcyon", 3, 27242),
-    ("hebdomadal", 3, 105139), ("hedonist", 3, 42864), ("hegemony", 3, 10805),
-    ("hermetic", 3, 3793), ("heterodox", 3, 25115), ("homogenous", 3, 13584),
-    ("hyperbole", 3, 18817), ("iconoclast", 3, 668), ("idiosyncratic", 3, 94350),
-    ("impair", 3, 6851), ("impecunious", 3, 37531), ("impiety", 3, 24184), ("inchoate", 3, 10617),
-    ("incontrovertible", 3, 30395), ("ingenuous", 3, 14362), ("inimical", 3, 2200),
-    ("innovate", 3, 37825), ("insouciance", 3, 8071), ("instigate", 3, 9675),
-    ("inundate", 3, 22043), ("invidious", 3, 16850), ("irresolute", 3, 18362),
-    ("juxtapose", 3, 36183), ("lachrymose", 3, 14195), ("laudable", 3, 14417),
-    ("lugubrious", 3, 858), ("malediction", 3, 78859), ("maverick", 3, 36779),
-    ("mendacious", 3, 35829), ("misanthrope", 3, 29802), ("munificent", 3, 36539),
-    ("nadir", 3, 63630), ("nascent", 3, 64537), ("neophyte", 3, 49623), ("nullify", 3, 43304),
-    ("obdurate", 3, 43251), ("obfuscate", 3, 56385), ("obstreperous", 3, 49459),
-    ("oleaginous", 3, 104218), ("palliate", 3, 64223), ("panacea", 3, 65938),
-    ("parsimonious", 3, 73758), ("parsimony", 3, 44441), ("paucity", 3, 76672),
-    ("pellucid", 3, 63112), ("perfidious", 3, 70147), ("periphrastic", 3, 92192),
-    ("perspicacious", 3, 44160), ("pervade", 3, 66335), ("phlegmatic", 3, 61131),
-    ("piquant", 3, 53530), ("platitude", 3, 57036), ("preponderance", 3, 57763),
-    ("prescient", 3, 46334), ("probity", 3, 74958), ("profligate", 3, 68333),
-    ("propitious", 3, 53801), ("puerile", 3, 47885), ("pugnacious", 3, 54279),
-    ("punctilious", 3, 56105), ("pusillanimous", 3, 76529), ("quixotic", 3, 55707),
-    ("recant", 3, 77260), ("recondite", 3, 71322), ("redoubtable", 3, 74521),
-    ("refractory", 3, 65992), ("refulgent", 3, 93846), ("relegate", 3, 56257),
-    ("remonstrate", 3, 49647), ("reprobate", 3, 72853), ("repudiate", 3, 66867),
-    ("sagacious", 3, 68514), ("salubrious", 3, 73480), ("sangfroid", 3, 49391),
-    ("satiate", 3, 46398), ("sedulous", 3, 92194), ("serendipity", 3, 51902),
-    ("sesquipedalian", 3, 99005), ("somnolent", 3, 44960), ("sophistry", 3, 73679),
-    ("soporific", 3, 70259), ("specious", 3, 45824), ("stymie", 3, 54338), ("subjugate", 3, 51513),
-    ("supplant", 3, 54586), ("surfeit", 3, 72817), ("sycophant", 3, 57820),
-    ("tangential", 3, 77073), ("timorous", 3, 78170), ("torpid", 3, 45051),
-    ("tractable", 3, 59837), ("trenchant", 3, 58752), ("truculent", 3, 73107),
-    ("ululate", 3, 59079), ("umbrage", 3, 64401), ("unctuous", 3, 58508), ("underlie", 3, 74260),
-    ("upbraid", 3, 59072), ("vacillate", 3, 52206), ("variegated", 3, 45701),
-    ("venerate", 3, 76403), ("verbose", 3, 45759), ("vilify", 3, 50582), ("vindicate", 3, 64114),
-    ("vitiate", 3, 53627), ("vociferous", 3, 71268), ("voluble", 3, 57348), ("winsome", 3, 43950),
-    ("xenophobia", 3, 76471), ("zealot", 3, 60529), ("zeitgeist", 3, 59724), ("zephyr", 3, 51530),
+    // Difficulty 1 (GRE / CEFR C2 Rare & Arcane - shown at lowest slider 'Fewer Hints')
+    ("abstruse", 1, 8435), ("acrimony", 1, 42592), ("amalgamate", 1, 16556),
+    ("ameliorate", 1, 35386), ("anachronism", 1, 17750), ("anomalous", 1, 8502),
+    ("arbitrate", 1, 15781), ("assiduous", 1, 34856), ("bathos", 1, 34892), ("belie", 1, 11857),
+    ("bellwether", 1, 14092), ("bombastic", 1, 105389), ("calumny", 1, 15620),
+    ("camphor", 1, 38030), ("castigate", 1, 15728), ("caterwaul", 1, 7989),
+    ("chicanery", 1, 15772), ("chimerical", 1, 100161), ("clamber", 1, 36016),
+    ("coachman", 1, 26549), ("coalesce", 1, 29181), ("cogent", 1, 14904),
+    ("colossal", 1, 13955), ("commensurate", 1, 42620), ("consecrate", 1, 19445),
+    ("credulous", 1, 7696), ("debilitate", 1, 35231), ("decimate", 1, 1081),
+    ("defalcation", 1, 105478), ("deleterious", 1, 737), ("delineate", 1, 13735),
+    ("demagogue", 1, 40611), ("demur", 1, 32524), ("denigrate", 1, 31898),
+    ("deprecate", 1, 19474), ("deride", 1, 20151), ("desiccate", 1, 108536),
+    ("didactic", 1, 4065), ("dilatory", 1, 18677), ("dilettante", 1, 39444),
+    ("disabuse", 1, 16327), ("discernment", 1, 24150), ("disingenuous", 1, 23874),
+    ("disparage", 1, 18954), ("disseminate", 1, 29603), ("dissonance", 1, 102184),
+    ("divisive", 1, 8343), ("dogmatic", 1, 23031), ("ebullient", 1, 21852),
+    ("effluvium", 1, 79964), ("egalitarian", 1, 26870), ("egregious", 1, 36506),
+    ("elucidate", 1, 36391), ("enervate", 1, 5573), ("engender", 1, 4276),
+    ("equivocal", 1, 42463), ("ersatz", 1, 19557), ("erudite", 1, 23071),
+    ("evanescent", 1, 36739), ("exacerbate", 1, 6368), ("exasperate", 1, 14883),
+    ("excoriate", 1, 18199), ("exonerate", 1, 12254), ("extol", 1, 29354),
+    ("fallacious", 1, 22001), ("fatuous", 1, 13840), ("fecund", 1, 16194),
+    ("filibuster", 1, 20069), ("flout", 1, 29581), ("foment", 1, 30194),
+    ("fulsome", 1, 13830), ("gainsay", 1, 41827), ("galvanize", 1, 37142),
+    ("germane", 1, 36025), ("grandiloquent", 1, 15173), ("hackneyed", 1, 10508),
+    ("halcyon", 1, 27242), ("hazy", 1, 40077), ("headlong", 1, 19647),
+    ("hebdomadal", 1, 105139), ("hedonist", 1, 42864), ("hegemony", 1, 10805),
+    ("hermetic", 1, 3793), ("heterodox", 1, 25115), ("hillock", 1, 34195),
+    ("homogenous", 1, 13584), ("hyperbole", 1, 18817), ("iconoclast", 1, 668),
+    ("idiosyncratic", 1, 94350), ("impair", 1, 6851), ("impecunious", 1, 37531),
+    ("impiety", 1, 24184), ("inchoate", 1, 10617), ("incontrovertible", 1, 30395),
+    ("incredulous", 1, 32470), ("indistinct", 1, 2931), ("ingenuous", 1, 14362),
+    ("inimical", 1, 2200), ("innovate", 1, 37825), ("insouciance", 1, 8071),
+    ("instigate", 1, 9675), ("interminable", 1, 6624), ("inundate", 1, 22043),
+    ("invidious", 1, 16850), ("irresolute", 1, 18362), ("juxtapose", 1, 36183),
+    ("lachrymose", 1, 14195), ("laudable", 1, 14417), ("lectern", 1, 8634),
+    ("lugubrious", 1, 858), ("malediction", 1, 78859), ("maverick", 1, 36779),
+    ("mendacious", 1, 35829), ("misanthrope", 1, 29802), ("mischievous", 1, 4629),
+    ("munificent", 1, 36539), ("nadir", 1, 63630), ("nascent", 1, 64537),
+    ("neophyte", 1, 49623), ("nullify", 1, 43304), ("obdurate", 1, 43251),
+    ("obfuscate", 1, 56385), ("obstreperous", 1, 49459), ("oleaginous", 1, 104218),
+    ("outlandish", 1, 48083), ("palliate", 1, 64223), ("panacea", 1, 65938),
+    ("parsimonious", 1, 73758), ("parsimony", 1, 44441), ("paucity", 1, 76672),
+    ("pellucid", 1, 63112), ("perfidious", 1, 70147), ("periphrastic", 1, 92192),
+    ("perspicacious", 1, 44160), ("pervade", 1, 66335), ("phlegmatic", 1, 61131),
+    ("piquant", 1, 53530), ("platitude", 1, 57036), ("preponderance", 1, 57763),
+    ("prescient", 1, 46334), ("probity", 1, 74958), ("profligate", 1, 68333),
+    ("propitious", 1, 53801), ("puerile", 1, 47885), ("pugnacious", 1, 54279),
+    ("punctilious", 1, 56105), ("pusillanimous", 1, 76529), ("quixotic", 1, 55707),
+    ("recant", 1, 77260), ("recondite", 1, 71322), ("redoubtable", 1, 74521),
+    ("refractory", 1, 65992), ("refulgent", 1, 93846), ("relegate", 1, 56257),
+    ("remonstrate", 1, 49647), ("reprobate", 1, 72853), ("repudiate", 1, 66867),
+    ("ruinous", 1, 69463), ("sagacious", 1, 68514), ("salubrious", 1, 73480),
+    ("sangfroid", 1, 49391), ("satiate", 1, 46398), ("sedulous", 1, 92194),
+    ("serendipity", 1, 51902), ("sesquipedalian", 1, 99005), ("somber", 1, 49100),
+    ("somnolent", 1, 44960), ("sophistry", 1, 73679), ("soporific", 1, 70259),
+    ("specious", 1, 45824), ("sphinx", 1, 58703), ("stymie", 1, 54338),
+    ("subjugate", 1, 51513), ("supplant", 1, 54586), ("surfeit", 1, 72817),
+    ("swig", 1, 69402), ("sycophant", 1, 57820), ("tangential", 1, 77073),
+    ("timorous", 1, 78170), ("torpid", 1, 45051), ("tractable", 1, 59837),
+    ("trenchant", 1, 58752), ("truculent", 1, 73107), ("ululate", 1, 59079),
+    ("umbrage", 1, 64401), ("unctuous", 1, 58508), ("underlie", 1, 74260),
+    ("undoubted", 1, 73317), ("unease", 1, 57849), ("upbraid", 1, 59072),
+    ("vacillate", 1, 52206), ("variegated", 1, 45701), ("venerate", 1, 76403),
+    ("verbose", 1, 45759), ("vestige", 1, 64146), ("vilify", 1, 50582),
+    ("vindicate", 1, 64114), ("vitiate", 1, 53627), ("vociferous", 1, 71268),
+    ("voluble", 1, 57348), ("winsome", 1, 43950), ("wry", 1, 51966),
+    ("xenophobia", 1, 76471), ("zealot", 1, 60529), ("zeitgeist", 1, 59724),
+    ("zephyr", 1, 51530),
 
-    // Difficulty 4 (Advanced / Academic CEFR C1)
-    ("aberration", 4, 10914), ("abhor", 4, 40675), ("acquiesce", 4, 19129), ("admonish", 4, 16197),
-    ("alacrity", 4, 3846), ("ambiguous", 4, 24295), ("ambivalent", 4, 17619),
-    ("antipathy", 4, 39281), ("antithesis", 4, 30589), ("apathy", 4, 38020),
-    ("arbitrary", 4, 11315), ("arcane", 4, 20376), ("archaic", 4, 35794), ("arduous", 4, 13141),
-    ("ascetic", 4, 19537), ("astonish", 4, 41837), ("audacious", 4, 16205), ("avarice", 4, 20190),
-    ("brevity", 4, 34112), ("cajole", 4, 20417), ("capricious", 4, 36842), ("catalyst", 4, 31830),
-    ("caustic", 4, 39615), ("censure", 4, 26343), ("circumspect", 4, 24001),
-    ("clandestine", 4, 42181), ("coincide", 4, 16172), ("commence", 4, 6996), ("compel", 4, 1286),
-    ("conciliatory", 4, 23664), ("concur", 4, 26594), ("condone", 4, 21201), ("conform", 4, 12674),
-    ("connoisseur", 4, 9018), ("consequent", 4, 19262), ("contentious", 4, 4534),
-    ("conundrum", 4, 38883), ("copious", 4, 19549), ("corroborate", 4, 8030),
-    ("culpable", 4, 38005), ("cumbersome", 4, 35131), ("dearth", 4, 39461), ("decorum", 4, 15057),
-    ("deferential", 4, 105264), ("deficient", 4, 35031), ("depict", 4, 5010),
-    ("desultory", 4, 22437), ("deviate", 4, 6812), ("devise", 4, 151), ("diatribe", 4, 11204),
-    ("diffident", 4, 17523), ("disclose", 4, 26233), ("disconsolate", 4, 16687),
-    ("discordant", 4, 18327), ("discrepancy", 4, 31709), ("dispassionate", 4, 1271),
-    ("distort", 4, 39473), ("divergent", 4, 105127), ("duplicity", 4, 7595),
-    ("eclectic", 4, 28943), ("efficacy", 4, 37057), ("effrontery", 4, 24292), ("elicit", 4, 39242),
-    ("embellish", 4, 19030), ("eminent", 4, 27254), ("emulate", 4, 31446), ("enigma", 4, 11524),
-    ("ephemeral", 4, 3367), ("epiphany", 4, 13505), ("epitome", 4, 22340),
-    ("equanimity", 4, 39967), ("eradicate", 4, 35729), ("esoteric", 4, 22280),
-    ("esteemed", 4, 82075), ("eulogy", 4, 5636), ("euphemism", 4, 2964), ("exemplary", 4, 42821),
-    ("exhaustive", 4, 28933), ("expedient", 4, 29320), ("extraneous", 4, 7373),
-    ("facetious", 4, 23762), ("fastidious", 4, 26919), ("feasible", 4, 4278),
-    ("flagrant", 4, 27627), ("fledgling", 4, 349), ("flippant", 4, 38386), ("forestall", 4, 12985),
-    ("fortuitous", 4, 11812), ("fractious", 4, 8691), ("frugal", 4, 20383),
-    ("gargantuan", 4, 28487), ("garrulous", 4, 13003), ("glib", 4, 25179), ("grandiose", 4, 22088),
-    ("gratuitous", 4, 32766), ("gregarious", 4, 34693), ("grievous", 4, 30076), ("guile", 4, 6178),
-    ("hapless", 4, 20878), ("harangue", 4, 27115), ("hector", 4, 42888), ("heretic", 4, 2413),
-    ("hiatus", 4, 37727), ("hubris", 4, 36926), ("ignominious", 4, 21965), ("immutable", 4, 36199),
-    ("impartial", 4, 30009), ("imperious", 4, 7754), ("impervious", 4, 5709),
-    ("impetuous", 4, 30255), ("implacable", 4, 39830), ("implicit", 4, 9022),
-    ("impudent", 4, 24876), ("inadvertent", 4, 17579), ("inane", 4, 6741), ("incipient", 4, 3502),
-    ("incongruous", 4, 22752), ("indigenous", 4, 5574), ("indolent", 4, 42267),
-    ("indomitable", 4, 19813), ("ineffable", 4, 9639), ("inept", 4, 31343), ("inert", 4, 15858),
-    ("infer", 4, 24708), ("inhibit", 4, 2221), ("inscrutable", 4, 16699), ("insipid", 4, 43177),
-    ("insolent", 4, 16107), ("insular", 4, 16737), ("intractable", 4, 4283),
-    ("intrepid", 4, 34183), ("inured", 4, 102358), ("invective", 4, 9559),
-    ("inveterate", 4, 29913), ("invoke", 4, 34839), ("irascible", 4, 5608),
-    ("itinerant", 4, 15922), ("judicious", 4, 23932), ("laconic", 4, 35248), ("lament", 4, 23604),
-    ("largesse", 4, 33995), ("latent", 4, 13423), ("lethargic", 4, 541), ("levity", 4, 32584),
-    ("limpid", 4, 6982), ("magnanimous", 4, 28211), ("malleable", 4, 43137),
-    ("mercurial", 4, 31413), ("mitigate", 4, 16026), ("mollify", 4, 5381), ("morose", 4, 43063),
-    ("nebulous", 4, 69276), ("nefarious", 4, 53794), ("negligent", 4, 72001),
-    ("nocturnal", 4, 57714), ("noxious", 4, 56506), ("obsequious", 4, 73019),
-    ("obsolete", 4, 77545), ("obstinate", 4, 61214), ("obtuse", 4, 48468), ("onerous", 4, 59661),
-    ("opulent", 4, 69290), ("ostentatious", 4, 75340), ("paragon", 4, 44503), ("pariah", 4, 68546),
-    ("partisan", 4, 69248), ("pedantic", 4, 104833), ("perfunctory", 4, 78270),
-    ("pernicious", 4, 77133), ("peruse", 4, 62177), ("pervasive", 4, 43456), ("placate", 4, 71732),
-    ("plethora", 4, 58728), ("poignant", 4, 59985), ("pragmatic", 4, 48523),
-    ("preclude", 4, 52069), ("precocious", 4, 77456), ("predilection", 4, 69679),
-    ("predominant", 4, 49212), ("presumptuous", 4, 56003), ("prodigal", 4, 53553),
-    ("prodigious", 4, 74954), ("profuse", 4, 62884), ("prolific", 4, 51942),
-    ("propensity", 4, 55829), ("prosaic", 4, 51586), ("prosper", 4, 74179),
-    ("provincial", 4, 55104), ("quandary", 4, 63103), ("querulous", 4, 68210),
-    ("quiescent", 4, 74980), ("rancor", 4, 56812), ("rapacious", 4, 58149),
-    ("recalcitrant", 4, 46132), ("refine", 4, 60619), ("reiterate", 4, 47445),
-    ("renounce", 4, 78262), ("reprehensible", 4, 75851), ("rescind", 4, 74338),
-    ("resilient", 4, 57399), ("reticent", 4, 60499), ("revere", 4, 59578), ("ribald", 4, 54218),
-    ("rife", 4, 64918), ("rudimentary", 4, 59106), ("salient", 4, 65234),
-    ("sanctimonious", 4, 52462), ("sanguine", 4, 55160), ("scintillating", 4, 68937),
-    ("scrupulous", 4, 67819), ("scrutinize", 4, 55161), ("servile", 4, 58840),
-    ("sinuous", 4, 57917), ("solicitous", 4, 46448), ("sonorous", 4, 66600),
-    ("spurious", 4, 53788), ("squalid", 4, 61215), ("staid", 4, 60310), ("strident", 4, 56393),
-    ("sublime", 4, 65901), ("subservient", 4, 62644), ("substantiate", 4, 77572),
-    ("subversive", 4, 64806), ("succinct", 4, 51989), ("supercilious", 4, 71294),
-    ("superfluous", 4, 53511), ("surreptitious", 4, 73110), ("tacit", 4, 50744),
-    ("taciturn", 4, 44246), ("tawdry", 4, 70208), ("temerity", 4, 72052), ("tenacious", 4, 48674),
-    ("transient", 4, 77922), ("turgid", 4, 62331), ("ubiquitous", 4, 52437),
-    ("unequivocal", 4, 70727), ("unfettered", 4, 46626), ("untoward", 4, 49055),
-    ("urbane", 4, 46904), ("usurp", 4, 45337), ("vacuous", 4, 69836), ("vapid", 4, 64511),
-    ("vehement", 4, 49089), ("veracity", 4, 60108), ("verdant", 4, 69740), ("vestige", 4, 64146),
-    ("vexation", 4, 57106), ("vicarious", 4, 70338), ("virulent", 4, 51186), ("viscous", 4, 46584),
-    ("voracious", 4, 73677), ("wane", 4, 69830), ("wizened", 4, 53455), ("yoke", 4, 45411),
-    ("zenith", 4, 76245),
+    // Difficulty 2 (Advanced CEFR C1 Academic & Literary)
+    ("aberration", 2, 10914), ("abhor", 2, 40675), ("acquiesce", 2, 19129),
+    ("admonish", 2, 16197), ("alacrity", 2, 3846), ("amid", 2, 4814),
+    ("antipathy", 2, 39281), ("antithesis", 2, 30589), ("apathy", 2, 38020),
+    ("arcane", 2, 20376), ("archaic", 2, 35794), ("arduous", 2, 13141),
+    ("ascetic", 2, 19537), ("astonish", 2, 41837), ("audacious", 2, 16205),
+    ("automaton", 2, 35511), ("avarice", 2, 20190), ("brevity", 2, 34112),
+    ("cajole", 2, 20417), ("capricious", 2, 36842), ("caustic", 2, 39615),
+    ("censure", 2, 26343), ("circumspect", 2, 24001), ("clandestine", 2, 42181),
+    ("conciliatory", 2, 23664), ("concur", 2, 26594), ("condone", 2, 21201),
+    ("connoisseur", 2, 9018), ("contentious", 2, 4534), ("conundrum", 2, 38883),
+    ("copious", 2, 19549), ("corroborate", 2, 8030), ("culpable", 2, 38005),
+    ("cumbersome", 2, 35131), ("dearth", 2, 39461), ("decorum", 2, 15057),
+    ("deferential", 2, 105264), ("desultory", 2, 22437), ("diatribe", 2, 11204),
+    ("diffident", 2, 17523), ("disconsolate", 2, 16687), ("discordant", 2, 18327),
+    ("discrepancy", 2, 31709), ("dispassionate", 2, 1271), ("divergent", 2, 105127),
+    ("duplicity", 2, 7595), ("eclectic", 2, 28943), ("efficacy", 2, 37057),
+    ("effrontery", 2, 24292), ("elicit", 2, 39242), ("embellish", 2, 19030),
+    ("emulate", 2, 31446), ("enigma", 2, 11524), ("ephemeral", 2, 3367),
+    ("epiphany", 2, 13505), ("epitome", 2, 22340), ("equanimity", 2, 39967),
+    ("eradicate", 2, 35729), ("esoteric", 2, 22280), ("eulogy", 2, 5636),
+    ("euphemism", 2, 2964), ("exemplary", 2, 42821), ("fastidious", 2, 26919),
+    ("flagrant", 2, 27627), ("fledgling", 2, 349), ("flippant", 2, 38386),
+    ("forestall", 2, 12985), ("fortuitous", 2, 11812), ("fractious", 2, 8691),
+    ("frugal", 2, 20383), ("gargantuan", 2, 28487), ("garrulous", 2, 13003),
+    ("glib", 2, 25179), ("grandiose", 2, 22088), ("gratuitous", 2, 32766),
+    ("gregarious", 2, 34693), ("grievous", 2, 30076), ("guile", 2, 6178),
+    ("hapless", 2, 20878), ("harangue", 2, 27115), ("hector", 2, 42888),
+    ("heretic", 2, 2413), ("hiatus", 2, 37727), ("hubris", 2, 36926),
+    ("ignominious", 2, 21965), ("immutable", 2, 36199), ("imperious", 2, 7754),
+    ("impervious", 2, 5709), ("impetuous", 2, 30255), ("implacable", 2, 39830),
+    ("impudent", 2, 24876), ("inane", 2, 6741), ("incipient", 2, 3502),
+    ("incongruous", 2, 22752), ("indolent", 2, 42267), ("indomitable", 2, 19813),
+    ("ineffable", 2, 9639), ("inscrutable", 2, 16699), ("insipid", 2, 43177),
+    ("insolent", 2, 16107), ("insular", 2, 16737), ("intractable", 2, 4283),
+    ("intrepid", 2, 34183), ("inured", 2, 102358), ("invective", 2, 9559),
+    ("inveterate", 2, 29913), ("irascible", 2, 5608), ("itinerant", 2, 15922),
+    ("judicious", 2, 23932), ("laconic", 2, 35248), ("largesse", 2, 33995),
+    ("levity", 2, 32584), ("limpid", 2, 6982), ("magnanimous", 2, 28211),
+    ("malleable", 2, 43137), ("mercurial", 2, 31413), ("mitigate", 2, 16026),
+    ("mollify", 2, 5381), ("morose", 2, 43063), ("nebulous", 2, 69276),
+    ("nefarious", 2, 53794), ("obsequious", 2, 73019), ("obstinate", 2, 61214),
+    ("obtuse", 2, 48468), ("onerous", 2, 59661), ("opulent", 2, 69290),
+    ("ostentatious", 2, 75340), ("paragon", 2, 44503), ("pariah", 2, 68546),
+    ("pedantic", 2, 104833), ("perfunctory", 2, 78270), ("pernicious", 2, 77133),
+    ("peruse", 2, 62177), ("placate", 2, 71732), ("plethora", 2, 58728),
+    ("poignant", 2, 59985), ("precocious", 2, 77456), ("predilection", 2, 69679),
+    ("presumptuous", 2, 56003), ("prodigal", 2, 53553), ("prodigious", 2, 74954),
+    ("querulous", 2, 68210), ("quiescent", 2, 74980), ("rancor", 2, 56812),
+    ("rapacious", 2, 58149), ("recalcitrant", 2, 46132), ("reprehensible", 2, 75851),
+    ("rescind", 2, 74338), ("ribald", 2, 54218), ("rife", 2, 64918),
+    ("rudimentary", 2, 59106), ("salient", 2, 65234), ("sanctimonious", 2, 52462),
+    ("sanguine", 2, 55160), ("scintillating", 2, 68937), ("scrupulous", 2, 67819),
+    ("sinuous", 2, 57917), ("solicitous", 2, 46448), ("sonorous", 2, 66600),
+    ("spurious", 2, 53788), ("squalid", 2, 61215), ("staid", 2, 60310),
+    ("strident", 2, 56393), ("sublime", 2, 65901), ("subservient", 2, 62644),
+    ("subversive", 2, 64806), ("succinct", 2, 51989), ("supercilious", 2, 71294),
+    ("superfluous", 2, 53511), ("surreptitious", 2, 73110), ("tacit", 2, 50744),
+    ("taciturn", 2, 44246), ("tawdry", 2, 70208), ("temerity", 2, 72052),
+    ("tenacious", 2, 48674), ("transient", 2, 77922), ("turgid", 2, 62331),
+    ("ubiquitous", 2, 52437), ("unequivocal", 2, 70727), ("unfettered", 2, 46626),
+    ("untoward", 2, 49055), ("urbane", 2, 46904), ("usurp", 2, 45337),
+    ("vacuous", 2, 69836), ("vapid", 2, 64511), ("vehement", 2, 49089),
+    ("veracity", 2, 60108), ("verdant", 2, 69740), ("vexation", 2, 57106),
+    ("vicarious", 2, 70338), ("virulent", 2, 51186), ("viscous", 2, 46584),
+    ("voracious", 2, 73677), ("wane", 2, 69830), ("wizened", 2, 53455),
+    ("yoke", 2, 45411), ("zenith", 2, 76245),
 
-    // Difficulty 5 (Proficiency / Rare / GRE CEFR C2)
-    ("abundant", 5, 6756), ("adequate", 5, 6120), ("aesthetic", 5, 36175), ("alleviate", 5, 8055),
-    ("anticipate", 5, 8729), ("apparent", 5, 14117), ("appease", 5, 40934),
-    ("articulate", 5, 25737), ("assert", 5, 14264), ("attain", 5, 10391), ("austere", 5, 4121),
-    ("authentic", 5, 12623), ("belligerent", 5, 23239), ("benevolent", 5, 30789),
-    ("benign", 5, 14432), ("cacophony", 5, 9795), ("cease", 5, 2688), ("coherent", 5, 41136),
-    ("complacent", 5, 34186), ("comprehensive", 5, 41506), ("conceal", 5, 31359),
-    ("consent", 5, 12349), ("conspicuous", 5, 36650), ("contemplate", 5, 4756),
-    ("contradict", 5, 22113), ("crucial", 5, 751), ("cursory", 5, 19788), ("daunting", 5, 37877),
-    ("deceive", 5, 3431), ("deliberate", 5, 21843), ("derive", 5, 12563), ("deter", 5, 6440),
-    ("diminish", 5, 18524), ("discern", 5, 29273), ("discreet", 5, 28641), ("disdain", 5, 16744),
-    ("diverse", 5, 42936), ("docile", 5, 13436), ("dormant", 5, 6990), ("dubious", 5, 18148),
-    ("elaborate", 5, 18417), ("eloquent", 5, 39084), ("elusive", 5, 31846), ("empathy", 5, 20840),
-    ("empirical", 5, 30481), ("endure", 5, 1197), ("enhance", 5, 22868), ("evident", 5, 43103),
-    ("explicit", 5, 12638), ("extravagant", 5, 21949), ("facilitate", 5, 36452),
-    ("fervent", 5, 14071), ("flourish", 5, 9688), ("formidable", 5, 37678), ("foster", 5, 25818),
-    ("furtive", 5, 1620), ("futile", 5, 2315), ("genuine", 5, 21375), ("haughty", 5, 35004),
-    ("hesitate", 5, 5308), ("hierarchy", 5, 27762), ("hostile", 5, 14994), ("illicit", 5, 42541),
-    ("immense", 5, 7997), ("imminent", 5, 38515), ("impassive", 5, 21320), ("impose", 5, 945),
-    ("indifferent", 5, 13635), ("induce", 5, 31464), ("inevitable", 5, 6734),
-    ("infamous", 5, 6157), ("inherent", 5, 6449), ("innocuous", 5, 34733), ("insight", 5, 43044),
-    ("integrate", 5, 32170), ("intense", 5, 22987), ("intervene", 5, 30168),
-    ("intricate", 5, 19991), ("languid", 5, 35122), ("lucid", 5, 18071), ("luminous", 5, 7494),
-    ("malevolent", 5, 25080), ("manifest", 5, 17957), ("melancholy", 5, 21478),
-    ("meticulous", 5, 3115), ("mundane", 5, 3770), ("myriad", 5, 4735), ("nonchalant", 5, 45910),
-    ("nostalgia", 5, 77740), ("notable", 5, 49850), ("oblivious", 5, 54014), ("obscure", 5, 48688),
-    ("obtain", 5, 47023), ("ominous", 5, 67981), ("opaque", 5, 54363), ("paradigm", 5, 66242),
-    ("penchant", 5, 51197), ("perceive", 5, 51768), ("persist", 5, 61561), ("petulant", 5, 60286),
-    ("plausible", 5, 70711), ("ponder", 5, 58435), ("precarious", 5, 57143), ("precede", 5, 59713),
-    ("precise", 5, 60389), ("prevail", 5, 73663), ("profound", 5, 54502), ("prominent", 5, 47249),
-    ("propriety", 5, 62890), ("provoke", 5, 69473), ("prudent", 5, 53379), ("pungent", 5, 44935),
-    ("pursue", 5, 68585), ("quell", 5, 57221), ("rational", 5, 54323), ("raucous", 5, 64536),
-    ("rebuke", 5, 67582), ("reluctant", 5, 55426), ("resemble", 5, 48774), ("restrain", 5, 62551),
-    ("rhetoric", 5, 72759), ("rigid", 5, 47949), ("robust", 5, 63202), ("scarcely", 5, 55533),
-    ("sincere", 5, 52396), ("skepticism", 5, 51891), ("solitary", 5, 50799), ("stoic", 5, 72645),
-    ("subsequent", 5, 65215), ("subtle", 5, 48265), ("suppress", 5, 45490), ("sustain", 5, 49113),
-    ("tedious", 5, 50093), ("tentative", 5, 59946), ("tenuous", 5, 49946), ("tolerate", 5, 63145),
-    ("trepidation", 5, 64538), ("trigger", 5, 60422), ("undermine", 5, 63315),
-    ("unprecedented", 5, 63111), ("utilize", 5, 53528), ("valid", 5, 55287), ("vanish", 5, 50145),
-    ("vital", 5, 46110), ("vivid", 5, 45015), ("volatile", 5, 62706), ("wan", 5, 61771),
-    ("wanton", 5, 65555), ("wistful", 5, 65423),
+    // Difficulty 3 (Upper-Intermediate CEFR B2/C1 - Balanced baseline)
+    ("ambiguous", 3, 24295), ("ambivalent", 3, 17619), ("arbitrary", 3, 11315),
+    ("benevolent", 3, 30789), ("catalyst", 3, 31830), ("coincide", 3, 16172),
+    ("commence", 3, 6996), ("compel", 3, 1286), ("conform", 3, 12674),
+    ("consequent", 3, 19262), ("contemplate", 3, 4756), ("deficient", 3, 35031),
+    ("depict", 3, 5010), ("deviate", 3, 6812), ("devise", 3, 151),
+    ("disclose", 3, 26233), ("distort", 3, 39473), ("eminent", 3, 27254),
+    ("esteemed", 3, 82075), ("exhaustive", 3, 28933), ("expedient", 3, 29320),
+    ("extraneous", 3, 7373), ("facetious", 3, 23762), ("feasible", 3, 4278),
+    ("impartial", 3, 30009), ("implicit", 3, 9022), ("inadvertent", 3, 17579),
+    ("incapable", 3, 9), ("indigenous", 3, 5574), ("inept", 3, 31343),
+    ("inert", 3, 15858), ("infer", 3, 24708), ("inhibit", 3, 2221),
+    ("invoke", 3, 34839), ("lament", 3, 23604), ("latent", 3, 13423),
+    ("lethargic", 3, 541), ("lever", 3, 25), ("mansion", 3, 9),
+    ("negligent", 3, 72001), ("nocturnal", 3, 57714), ("noxious", 3, 56506),
+    ("obsolete", 3, 77545), ("partisan", 3, 69248), ("pervasive", 3, 43456),
+    ("pragmatic", 3, 48523), ("preclude", 3, 52069), ("predominant", 3, 49212),
+    ("profuse", 3, 62884), ("prolific", 3, 51942), ("propensity", 3, 55829),
+    ("prosaic", 3, 51586), ("prosper", 3, 74179), ("provincial", 3, 55104),
+    ("quandary", 3, 63103), ("refine", 3, 60619), ("reiterate", 3, 47445),
+    ("renounce", 3, 78262), ("resilient", 3, 57399), ("reticent", 3, 60499),
+    ("revere", 3, 59578), ("scarcely", 3, 55533), ("scrutinize", 3, 55161),
+    ("servile", 3, 58840), ("shiver", 3, 10), ("splendid", 3, 29354),
+    ("substantiate", 3, 77572),
+
+    // Difficulty 4 (Intermediate CEFR B2 Vocabulary)
+    ("abundant", 4, 6756), ("adequate", 4, 6120), ("aesthetic", 4, 36175),
+    ("alleviate", 4, 8055), ("anticipate", 4, 8729), ("apparent", 4, 14117),
+    ("appease", 4, 40934), ("articulate", 4, 25737), ("assert", 4, 14264),
+    ("attain", 4, 10391), ("austere", 4, 4121), ("authentic", 4, 12623),
+    ("belligerent", 4, 23239), ("benign", 4, 14432), ("cacophony", 4, 9795),
+    ("coherent", 4, 41136), ("complacent", 4, 34186), ("comprehensive", 4, 41506),
+    ("conspicuous", 4, 36650), ("contradict", 4, 22113), ("crucial", 4, 751),
+    ("cursory", 4, 19788), ("deliberate", 4, 21843), ("diminish", 4, 18524),
+    ("discern", 4, 29273), ("discreet", 4, 28641), ("disdain", 4, 16744),
+    ("diverse", 4, 42936), ("elaborate", 4, 18417), ("eloquent", 4, 39084),
+    ("elusive", 4, 31846), ("empathy", 4, 20840), ("empirical", 4, 30481),
+    ("enhance", 4, 22868), ("evident", 4, 43103), ("exclusive", 4, 40687),
+    ("explicit", 4, 12638), ("extravagant", 4, 21949), ("facilitate", 4, 36452),
+    ("fervent", 4, 14071), ("flourish", 4, 9688), ("formidable", 4, 37678),
+    ("foster", 4, 25818), ("furtive", 4, 1620), ("futile", 4, 2315),
+    ("haughty", 4, 35004), ("hierarchy", 4, 27762), ("illicit", 4, 42541),
+    ("imminent", 4, 38515), ("impassive", 4, 21320), ("impose", 4, 945),
+    ("indifferent", 4, 13635), ("induce", 4, 31464), ("inevitable", 4, 6734),
+    ("infamous", 4, 6157), ("inherent", 4, 6449), ("innocuous", 4, 34733),
+    ("insight", 4, 43044), ("integrate", 4, 32170), ("intervene", 4, 30168),
+    ("intricate", 4, 19991), ("languid", 4, 35122), ("lucid", 4, 18071),
+    ("luminous", 4, 7494), ("malevolent", 4, 25080), ("manifest", 4, 17957),
+    ("melancholy", 4, 21478), ("meticulous", 4, 3115), ("mundane", 4, 3770),
+    ("myriad", 4, 4735), ("nonchalant", 4, 45910), ("nostalgia", 4, 77740),
+    ("notable", 4, 49850), ("oblivious", 4, 54014), ("obscure", 4, 48688),
+    ("obtain", 4, 47023), ("ominous", 4, 67981), ("opaque", 4, 54363),
+    ("paradigm", 4, 66242), ("penchant", 4, 51197), ("perceive", 4, 51768),
+    ("petulant", 4, 60286), ("plausible", 4, 70711), ("ponder", 4, 58435),
+    ("precarious", 4, 57143), ("precede", 4, 59713), ("precise", 4, 60389),
+    ("prevail", 4, 73663), ("profound", 4, 54502), ("prominent", 4, 47249),
+    ("propriety", 4, 62890), ("pungent", 4, 44935), ("quell", 4, 57221),
+    ("raucous", 4, 64536), ("rebuke", 4, 67582), ("reluctant", 4, 55426),
+    ("rigid", 4, 47949), ("robust", 4, 63202), ("skepticism", 4, 51891),
+    ("stoic", 4, 72645), ("subsequent", 4, 65215), ("subtle", 4, 48265),
+    ("suppress", 4, 45490), ("sustain", 4, 49113), ("tedious", 4, 50093),
+    ("tentative", 4, 59946), ("tenuous", 4, 49946), ("trepidation", 4, 64538),
+    ("unprecedented", 4, 63111), ("wan", 4, 61771), ("wanton", 4, 65555),
+    ("wistful", 4, 65423),
+
+    // Difficulty 5 (Foundational Academic Vocabulary - shown on highest slider 'More Hints')
+    ("cease", 5, 2688), ("click", 5, 42955), ("conceal", 5, 31359),
+    ("consent", 5, 12349), ("daunting", 5, 37877), ("deceive", 5, 3431),
+    ("derive", 5, 12563), ("deter", 5, 6440), ("docile", 5, 13436),
+    ("dormant", 5, 6990), ("download", 5, 28861), ("dubious", 5, 18148),
+    ("endure", 5, 1197), ("genuine", 5, 21375), ("hesitate", 5, 5308),
+    ("hostile", 5, 14994), ("immense", 5, 7997), ("intense", 5, 22987),
+    ("persist", 5, 61561), ("provoke", 5, 69473), ("prudent", 5, 53379),
+    ("pursue", 5, 68585), ("rational", 5, 54323), ("resemble", 5, 48774),
+    ("restrain", 5, 62551), ("rhetoric", 5, 72759), ("sincere", 5, 52396),
+    ("solitary", 5, 50799), ("tolerate", 5, 63145), ("trigger", 5, 60422),
+    ("undermine", 5, 63315), ("utilize", 5, 53528), ("valid", 5, 55287),
+    ("vanish", 5, 50145), ("vital", 5, 46110), ("vivid", 5, 45015),
+    ("volatile", 5, 62706),
+
 ];
+
+static WORDWISE_DICT_BYTES: &[u8] = include_bytes!("wordwise_dict.bin");
 
 static STOPWORDS_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
 static VOCAB_MAP: OnceLock<HashMap<&'static str, (u8, u32)>> = OnceLock::new();
+
+fn parse_builtin_and_ground_truth_vocab() -> HashMap<&'static str, (u8, u32)> {
+    let mut map = HashMap::with_capacity(22_000);
+
+    // 1. Load curated baseline overrides
+    for &(w, d, s) in BUILTIN_VOCABULARY {
+        map.insert(w, (d, s));
+    }
+
+    // 2. Parse Amazon Ground Truth binary dataset (20,000+ lemmas with native sense IDs)
+    if WORDWISE_DICT_BYTES.len() >= 8 && &WORDWISE_DICT_BYTES[0..4] == b"WWK1" {
+        let count = u32::from_le_bytes(WORDWISE_DICT_BYTES[4..8].try_into().unwrap()) as usize;
+        let mut offset = 8;
+        for _ in 0..count {
+            if offset >= WORDWISE_DICT_BYTES.len() {
+                break;
+            }
+            let len = WORDWISE_DICT_BYTES[offset] as usize;
+            offset += 1;
+            if offset + len + 5 > WORDWISE_DICT_BYTES.len() {
+                break;
+            }
+            if let Ok(lemma) = std::str::from_utf8(&WORDWISE_DICT_BYTES[offset..offset + len]) {
+                offset += len;
+                let diff = WORDWISE_DICT_BYTES[offset];
+                offset += 1;
+                let sense_id = u32::from_le_bytes(
+                    WORDWISE_DICT_BYTES[offset..offset + 4].try_into().unwrap(),
+                );
+                offset += 4;
+                map.entry(lemma).or_insert((diff, sense_id));
+            } else {
+                offset += len + 5;
+            }
+        }
+    }
+
+    map
+}
 
 pub struct LemmaDictionary;
 
 impl LemmaDictionary {
     pub fn new() -> Self {
         STOPWORDS_SET.get_or_init(|| ENGLISH_STOPWORDS.iter().copied().collect());
-        VOCAB_MAP.get_or_init(|| {
-            BUILTIN_VOCABULARY
-                .iter()
-                .map(|&(w, d, s)| (w, (d, s)))
-                .collect()
-        });
+        VOCAB_MAP.get_or_init(parse_builtin_and_ground_truth_vocab);
         Self
+    }
+
+    /// Returns the total number of distinct lemmas loaded in the dictionary.
+    pub fn len(&self) -> usize {
+        let vocab = VOCAB_MAP.get_or_init(parse_builtin_and_ground_truth_vocab);
+        vocab.len()
+    }
+
+    /// Returns whether the dictionary contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Looks up a word candidate in the dictionary.
     /// Normalizes punctuation and attempts standard English suffix stemming.
     pub fn lookup(&self, word: &str, min_word_len: usize) -> Option<(u8, u32)> {
         let stopwords = STOPWORDS_SET.get_or_init(|| ENGLISH_STOPWORDS.iter().copied().collect());
-        let vocab = VOCAB_MAP.get_or_init(|| {
-            BUILTIN_VOCABULARY
-                .iter()
-                .map(|&(w, d, s)| (w, (d, s)))
-                .collect()
-        });
+        let vocab = VOCAB_MAP.get_or_init(parse_builtin_and_ground_truth_vocab);
 
         let mut clean = word.trim().trim_matches(&['\'', '’', '"', '“', '”', '`', ',', '.', ';', ':', '!', '?'][..]).to_lowercase();
         if let Some(stripped) = clean.strip_suffix("'s").or_else(|| clean.strip_suffix("’s")) {
@@ -299,13 +383,13 @@ mod tests {
     fn test_lemma_dictionary_lookups() {
         let dict = LemmaDictionary::new();
 
-        // 1. Direct hit
+        // 1. Direct hit (Difficulty 1 GRE / CEFR C2)
         let res = dict.lookup("ameliorate", 3);
-        assert_eq!(res, Some((3, 35386)));
+        assert_eq!(res, Some((1, 35386)));
 
         // 2. Inflected form (-ing with added 'e')
         let res2 = dict.lookup("ameliorating", 3);
-        assert_eq!(res2, Some((3, 35386)));
+        assert_eq!(res2, Some((1, 35386)));
 
         // 3. Stopword filtered
         assert_eq!(dict.lookup("the", 3), None);
@@ -316,12 +400,46 @@ mod tests {
 
         // 5. Doubled consonant
         let res3 = dict.lookup("compelled", 3);
-        assert_eq!(res3, Some((4, 1286)));
+        assert_eq!(res3, Some((3, 1286)));
 
         // 6. Smart apostrophe (UTF-8 3-byte curly quote) - must not panic
         let res4 = dict.lookup("ameliorate’s", 3);
-        assert_eq!(res4, Some((3, 35386)));
+        assert_eq!(res4, Some((1, 35386)));
         let res5 = dict.lookup("ameliorate's", 3);
-        assert_eq!(res5, Some((3, 35386)));
+        assert_eq!(res5, Some((1, 35386)));
+    }
+
+    #[test]
+    fn test_ground_truth_vocabulary_scale_and_difficulties() {
+        let dict = LemmaDictionary::new();
+
+        // Ensure 20,000+ entries loaded
+        assert!(
+            dict.len() >= 20_000,
+            "Expected at least 20,000 ground truth lemmas, got {}",
+            dict.len()
+        );
+        assert!(!dict.is_empty());
+
+        // Test lookups across all 5 difficulty levels from ground truth dataset
+        let diff1 = dict.lookup("abstruse", 3);
+        assert!(diff1.is_some());
+        assert_eq!(diff1.unwrap().0, 1);
+
+        let diff2 = dict.lookup("zenith", 3);
+        assert!(diff2.is_some());
+        assert_eq!(diff2.unwrap().0, 2);
+
+        let diff3 = dict.lookup("plausibility", 3);
+        assert!(diff3.is_some());
+        assert_eq!(diff3.unwrap().0, 3);
+
+        let diff4 = dict.lookup("unearth", 3);
+        assert!(diff4.is_some());
+        assert_eq!(diff4.unwrap().0, 4);
+
+        let diff5 = dict.lookup("handbook", 3);
+        assert!(diff5.is_some());
+        assert_eq!(diff5.unwrap().0, 5);
     }
 }

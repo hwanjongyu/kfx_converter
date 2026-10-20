@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::enhancements::{CoverOptimizer, WordWiseBuilder};
 use crate::epub::{EpubError, EpubReader};
-use crate::packager::{self, KfxPackager, PackagerError};
+use crate::packager::{KfxPackager, PackagerError};
 use crate::sync::{KindleSync, SyncError};
 
 #[derive(Error, Debug)]
@@ -110,13 +110,9 @@ impl ConversionPipeline {
             cb(0.3, "Serializing Yellowjacket KFX container...");
         }
         let mut packager = KfxPackager::new(&ir, &options.content_type);
-        let seed = if !ir.metadata.identifier.is_empty() {
-            &ir.metadata.identifier
-        } else {
-            &ir.metadata.title
-        };
-        let content_id = packager::generate_content_id(seed);
-        let container_id = packager::generate_container_id(seed);
+        let content_id = packager.content_id().to_string();
+        let container_id = packager.container_id().to_string();
+        let asin = packager.asin().to_string();
 
         let total_bytes = packager.package_to_file(&output_path)?;
 
@@ -166,12 +162,13 @@ impl ConversionPipeline {
             if let Some(ref cb) = progress {
                 cb(0.75, "Generating Word Wise lemma sidecar database...");
             }
+            let book_revision = content_id[..8].to_lowercase();
             let mut ww_builder = WordWiseBuilder::new(
-                &content_id,
+                &asin,
                 &container_id,
                 "en",
                 "en",
-                "1",
+                &book_revision,
             );
             let gloss_count = ww_builder.generate_from_book(&ir);
             word_wise_glosses = Some(gloss_count);
@@ -191,9 +188,16 @@ impl ConversionPipeline {
             if let Some(ref kll) = kll_bytes {
                 let sdr_path = output_path.with_extension("sdr");
                 if std::fs::create_dir_all(&sdr_path).is_ok() {
-                    let safe_asin = KindleSync::sanitize_asin(&content_id);
+                    let safe_asin = KindleSync::sanitize_asin(&asin);
                     let kll_path = sdr_path.join(format!("LanguageLayer.en.{}.kll", safe_asin));
-                    let _ = std::fs::write(kll_path, kll);
+                    let _ = std::fs::write(&kll_path, kll);
+                    // Also write fallback with content_id for dual-lookup compatibility
+                    let fallback_asin = KindleSync::sanitize_asin(&content_id);
+                    if fallback_asin != safe_asin {
+                        let fallback_path =
+                            sdr_path.join(format!("LanguageLayer.en.{}.kll", fallback_asin));
+                        let _ = std::fs::write(fallback_path, kll);
+                    }
                 }
             }
         }
@@ -217,7 +221,7 @@ impl ConversionPipeline {
                     &device_root,
                     &output_path,
                     &ir.metadata.title,
-                    &content_id,
+                    &asin,
                     cover_jpeg.as_deref(),
                     kll_bytes.as_deref(),
                 ) {
