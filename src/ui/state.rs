@@ -235,9 +235,8 @@ pub fn scan_local_epub_directory(
     files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
     let mut items = Vec::new();
-    let mut id_counter = 1u64;
 
-    for path in files {
+    for (id_counter, path) in (1u64..).zip(files) {
         let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let file_size_str = match std::fs::metadata(&path) {
             Ok(meta) => {
@@ -290,14 +289,12 @@ pub fn scan_local_epub_directory(
         // Determine status
         let local_kfx_exists = path.with_extension("kfx").exists();
         let mut on_kindle = false;
-        if device.connected {
-            if let Some(ref doc_dir) = device.path {
-                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-                let kindle_kfx = doc_dir.join(format!("{}.kfx", stem));
-                let kindle_title_kfx = doc_dir.join(format!("{}.kfx", &title));
-                if kindle_kfx.exists() || kindle_title_kfx.exists() {
-                    on_kindle = true;
-                }
+        if device.connected && let Some(ref doc_dir) = device.path {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            let kindle_kfx = doc_dir.join(format!("{}.kfx", stem));
+            let kindle_title_kfx = doc_dir.join(format!("{}.kfx", title));
+            if kindle_kfx.exists() || kindle_title_kfx.exists() {
+                on_kindle = true;
             }
         }
 
@@ -320,8 +317,6 @@ pub fn scan_local_epub_directory(
             is_selected: false,
             status,
         });
-
-        id_counter += 1;
     }
 
     items

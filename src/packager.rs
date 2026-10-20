@@ -78,6 +78,12 @@ impl LocalSymbols {
     }
 }
 
+impl Default for LocalSymbols {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct SectionPackData {
     pub raw_id: String,
     pub name: String,
@@ -1075,7 +1081,7 @@ impl<'a> KfxPackager<'a> {
                                 (sym_style, IonValue::Symbol(styles.dropcap_2)),
                             ]));
                         } else if st.contains("dropcap") {
-                            let is_quote_dropcap = span.text.chars().count() == 2 && span.text.chars().next().map_or(false, |c| c == '“' || c == '"' || c == '‘' || c == '\'');
+                            let is_quote_dropcap = span.text.chars().count() == 2 && span.text.chars().next().is_some_and(|c| c == '“' || c == '"' || c == '‘' || c == '\'');
                             let target_style = if is_quote_dropcap { styles.dropcap_2 } else { styles.dropcap };
                             style_events.push(IonValue::Struct(vec![
                                 (sym_offset, IonValue::Int(offset as i64)),
@@ -1191,7 +1197,7 @@ impl<'a> KfxPackager<'a> {
 
                         let is_tiny_icon = self.book.resources.get(resource_id).and_then(|a| {
                             crate::enhancements::CoverOptimizer::get_image_dimensions(&a.data)
-                        }).map_or(false, |(w, h)| w <= 64 && h <= 64);
+                        }).is_some_and(|(w, h)| w <= 64 && h <= 64);
 
                         let img_style = if is_cover || is_tiny_icon {
                             styles.cover_img
@@ -2766,11 +2772,11 @@ mod tests {
 
         // Verify width 32 and height 48 are encoded in ext_res ($164)
         assert!(
-            ext_res.data.windows(2).any(|w| w == &[0x21, 32]),
+            ext_res.data.windows(2).any(|w| w == [0x21, 32]),
             "External resource entity ($164) must encode resource_width 32"
         );
         assert!(
-            ext_res.data.windows(2).any(|w| w == &[0x21, 48]),
+            ext_res.data.windows(2).any(|w| w == [0x21, 48]),
             "External resource entity ($164) must encode resource_height 48"
         );
 

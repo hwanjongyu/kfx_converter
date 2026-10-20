@@ -44,7 +44,7 @@ flowchart TD
 
 ### 2.2 Intermediate Representation & Section Fragmentation (`src/ir.rs`)
 - **`BookIR` Structure**: Standardizes metadata, ordered sections, plain text spans, and raw asset buffers.
-- **Hybrid Chapter Fragmentation**: Standard chapters are maintained 1:1. Oversized chapters or appendices exceeding calibrated thresholds (3,500 characters or 15 blocks) are automatically partitioned into sequential sub-sections (`sec_p1`, `sec_p2`). TOC navigation links and page lists are dynamically remapped to target fragmented parts (`_p1` or exact anchor-holding sub-fragments). This guarantees low-RAM Kindle devices (such as 512MB Paperwhite models) never crash the reader engine (`KPPMainApp` / Hermes JS) or trip the 240MB `pmond` memory threshold.
+- **Native Boundary Preservation & Smart Fragmentation**: Preserves native EPUB XHTML file boundaries without artificial mid-chapter page breaks (`DEFAULT_MAX_SECTION_CHARS = 1,000,000`, `DEFAULT_MAX_SECTION_BLOCKS = 10,000`), maintaining seamless continuous reading flow while strictly respecting author-intended CSS forced page breaks (`page_break_before` / `page_break_after`). Any chapters exceeding calibrated limits are automatically partitioned into sequential sub-sections (`sec_p1`, `sec_p2`) with dynamic TOC and page list remapping to protect low-RAM Kindle devices from hitting the 240MB `pmond` memory threshold.
 
 ### 2.3 Binary Amazon Ion Serializer (`src/ion.rs`)
 - **Ion 1.0 Specification**: Generates valid binary Ion streams beginning with the Binary Version Marker (`0xE0 0x01 0x00 0xEA`).

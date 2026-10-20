@@ -341,28 +341,25 @@ impl LemmaDictionary {
         for suffix in &["ed", "ing", "ly", "es", "s"] {
             if clean.ends_with(suffix) {
                 let stem = &clean[..clean.len() - suffix.len()];
-                if stem.len() >= min_word_len {
-                    if let Some(&res) = vocab.get(stem) {
+                if stem.len() >= min_word_len
+                    && let Some(&res) = vocab.get(stem) {
                         return Some(res);
                     }
-                }
                 // Try with trailing 'e' (e.g. "ameliorating" -> "ameliorat" -> "ameliorate")
                 let with_e = format!("{}e", stem);
-                if with_e.len() >= min_word_len {
-                    if let Some(&res) = vocab.get(with_e.as_str()) {
+                if with_e.len() >= min_word_len
+                    && let Some(&res) = vocab.get(with_e.as_str()) {
                         return Some(res);
                     }
-                }
                 // Doubled consonant (e.g. "compelled" -> "compel")
                 if stem.len() > 2 {
                     let bytes = stem.as_bytes();
                     if bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
                         let single = &stem[..stem.len() - 1];
-                        if single.len() >= min_word_len {
-                            if let Some(&res) = vocab.get(single) {
+                        if single.len() >= min_word_len
+                            && let Some(&res) = vocab.get(single) {
                                 return Some(res);
                             }
-                        }
                     }
                 }
             }

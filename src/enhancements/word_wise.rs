@@ -63,7 +63,7 @@ impl WordWiseBuilder {
     fn normalize_lang(lang: &str) -> String {
         let trimmed = lang.trim().to_ascii_lowercase();
         let primary = trimmed
-            .split(|c| c == '-' || c == '_')
+            .split(['-', '_'])
             .next()
             .unwrap_or("en");
         if primary.is_empty() {
@@ -145,11 +145,10 @@ impl WordWiseBuilder {
         if self.glosses.len() >= self.pacing.max_total_glosses {
             return false;
         }
-        if let Some(last) = self.last_gloss_pos {
-            if start.saturating_sub(last) < self.pacing.min_distance {
+        if let Some(last) = self.last_gloss_pos
+            && start.saturating_sub(last) < self.pacing.min_distance {
                 return false;
             }
-        }
         let cutoff = start.saturating_sub(self.pacing.window_size);
         self.window_positions.retain(|&p| p >= cutoff);
         if self.window_positions.len() >= self.pacing.max_glosses_per_window {
@@ -222,8 +221,8 @@ impl WordWiseBuilder {
                     char_idx += 1;
                 }
 
-                if let Some(start_c) = word_char_start.take() {
-                    if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
+                if let Some(start_c) = word_char_start.take()
+                    && let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
                         self.add_gloss_paced(
                             pid + start_c,
                             None,
@@ -232,7 +231,6 @@ impl WordWiseBuilder {
                             false,
                         );
                     }
-                }
 
                 let block_len = char_idx.max(1);
                 pid += block_len;

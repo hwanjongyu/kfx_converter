@@ -230,8 +230,8 @@ impl<'a> KfxPreflightValidator<'a> {
                         170 => {
                             if let IonValue::List(section_syms) = fval {
                                 for item in section_syms {
-                                    if let IonValue::Symbol(target_sym) = item {
-                                        if !entity_map.contains_key(&(260, *target_sym)) {
+                                    if let IonValue::Symbol(target_sym) = item
+                                        && !entity_map.contains_key(&(260, *target_sym)) {
                                             return Err(ValidationError::MissingFragment {
                                                 referrer_chunk: referrer.chunk_type,
                                                 referrer_eid: referrer.entity_id,
@@ -242,15 +242,14 @@ impl<'a> KfxPreflightValidator<'a> {
                                                 expected_chunk: 260,
                                             });
                                         }
-                                    }
                                 }
                             }
                         }
 
                         // $174 = section_name -> symbol referencing $260 (section)
                         174 => {
-                            if let IonValue::Symbol(target_sym) = fval {
-                                if !entity_map.contains_key(&(260, *target_sym)) {
+                            if let IonValue::Symbol(target_sym) = fval
+                                && !entity_map.contains_key(&(260, *target_sym)) {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
@@ -261,13 +260,12 @@ impl<'a> KfxPreflightValidator<'a> {
                                         expected_chunk: 260,
                                     });
                                 }
-                            }
                         }
 
                         // $176 = story_name -> symbol referencing $259 (storyline)
                         176 => {
-                            if let IonValue::Symbol(target_sym) = fval {
-                                if !entity_map.contains_key(&(259, *target_sym)) {
+                            if let IonValue::Symbol(target_sym) = fval
+                                && !entity_map.contains_key(&(259, *target_sym)) {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
@@ -278,13 +276,12 @@ impl<'a> KfxPreflightValidator<'a> {
                                         expected_chunk: 259,
                                     });
                                 }
-                            }
                         }
 
                         // $175 = resource_name -> symbol referencing $164 (external_resource)
                         175 => {
-                            if let IonValue::Symbol(target_sym) = fval {
-                                if !entity_map.contains_key(&(164, *target_sym)) {
+                            if let IonValue::Symbol(target_sym) = fval
+                                && !entity_map.contains_key(&(164, *target_sym)) {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
@@ -295,7 +292,6 @@ impl<'a> KfxPreflightValidator<'a> {
                                         expected_chunk: 164,
                                     });
                                 }
-                            }
                         }
 
                         // $165 = location in $164 -> symbol referencing $417 (bcRawMedia)
@@ -333,8 +329,8 @@ impl<'a> KfxPreflightValidator<'a> {
 
                         // $429 = style reference in storylines -> symbol referencing $157 (style)
                         429 => {
-                            if let IonValue::Symbol(target_sym) = fval {
-                                if !entity_map.contains_key(&(157, *target_sym)) {
+                            if let IonValue::Symbol(target_sym) = fval
+                                && !entity_map.contains_key(&(157, *target_sym)) {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
@@ -345,13 +341,12 @@ impl<'a> KfxPreflightValidator<'a> {
                                         expected_chunk: 157,
                                     });
                                 }
-                            }
                         }
 
                         // $245 = icon in representation -> symbol referencing $164 (external_resource)
                         245 => {
-                            if let IonValue::Symbol(target_sym) = fval {
-                                if !entity_map.contains_key(&(164, *target_sym)) {
+                            if let IonValue::Symbol(target_sym) = fval
+                                && !entity_map.contains_key(&(164, *target_sym)) {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
@@ -362,13 +357,12 @@ impl<'a> KfxPreflightValidator<'a> {
                                         expected_chunk: 164,
                                     });
                                 }
-                            }
                         }
 
                         // $181 = contains in container_entity_map ($419)
                         181 => {
-                            if referrer.chunk_type == 419 {
-                                if let IonValue::List(contains_syms) = fval {
+                            if referrer.chunk_type == 419
+                                && let IonValue::List(contains_syms) = fval {
                                     let mut contains_set = HashSet::new();
                                     for item in contains_syms {
                                         if let IonValue::Symbol(target_sym) = item {
@@ -393,16 +387,15 @@ impl<'a> KfxPreflightValidator<'a> {
                                         }
                                     }
                                 }
-                            }
                         }
 
                         // $254 = mandatory_dependencies in container_entity_map ($419)
                         254 => {
-                            if referrer.chunk_type == 419 {
-                                if let IonValue::List(dep_syms) = fval {
+                            if referrer.chunk_type == 419
+                                && let IonValue::List(dep_syms) = fval {
                                     for item in dep_syms {
-                                        if let IonValue::Symbol(target_sym) = item {
-                                            if !defined_eids.contains(target_sym) {
+                                        if let IonValue::Symbol(target_sym) = item
+                                            && !defined_eids.contains(target_sym) {
                                                 return Err(ValidationError::MissingFragment {
                                                     referrer_chunk: referrer.chunk_type,
                                                     referrer_eid: referrer.entity_id,
@@ -413,10 +406,8 @@ impl<'a> KfxPreflightValidator<'a> {
                                                     expected_chunk: 0,
                                                 });
                                             }
-                                        }
                                     }
                                 }
-                            }
                         }
 
                         _ => {}

@@ -51,6 +51,7 @@ impl KindleStudio {
             let (device, files) = cx
                 .background_executor()
                 .spawn(async move {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
                     let dev = detect_kindle_device();
                     let f = load_device_files(&dev);
                     (dev, f)
@@ -109,13 +110,13 @@ impl KindleStudio {
         });
 
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = receiver.await {
-                if let Some(folder) = paths.into_iter().next() {
-                    this.update(cx, |this, cx| {
-                        this.folder_state.current_folder = Some(folder);
-                        this.rescan_folder(cx);
-                    }).ok();
-                }
+            if let Ok(Ok(Some(paths))) = receiver.await
+                && let Some(folder) = paths.into_iter().next()
+            {
+                this.update(cx, |this, cx| {
+                    this.folder_state.current_folder = Some(folder);
+                    this.rescan_folder(cx);
+                }).ok();
             }
         }).detach();
     }
@@ -321,19 +322,19 @@ impl KindleStudio {
             {
                 self.process_epub_file(path, cx);
             }
-        } else if path.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    let child_path = entry.path();
-                    if child_path.is_file()
-                        && child_path
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .map(|ext| ext.eq_ignore_ascii_case("epub"))
-                            .unwrap_or(false)
-                    {
-                        self.process_epub_file(&child_path, cx);
-                    }
+        } else if path.is_dir()
+            && let Ok(entries) = std::fs::read_dir(path)
+        {
+            for entry in entries.flatten() {
+                let child_path = entry.path();
+                if child_path.is_file()
+                    && child_path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|ext| ext.eq_ignore_ascii_case("epub"))
+                        .unwrap_or(false)
+                {
+                    self.process_epub_file(&child_path, cx);
                 }
             }
         }
@@ -391,7 +392,7 @@ impl KindleStudio {
                                 t.status = TaskStatus::ConvertedLocalOnly;
                             }
                             if res.synced_to_device {
-                                this.files = super::state::load_device_files(&this.device);
+                                this.refresh_device(cx);
                             }
 
                             if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == target_path) {
@@ -700,7 +701,7 @@ impl KindleStudio {
                     .bg(Theme::bg_card())
                     .cursor_pointer()
                     .drag_over::<ExternalPaths>(|mut style, _paths, _window, _cx| {
-                        style.border_color = Some(Theme::accent_amber().into());
+                        style.border_color = Some(Theme::accent_amber());
                         style.background = Some(Theme::bg_card_hover().into());
                         style
                     })
@@ -883,7 +884,7 @@ impl KindleStudio {
                             TaskStatus::Queued => (
                                 Theme::border(),
                                 "Queued".to_string(),
-                                format!("{}", task.file_size_str),
+                                task.file_size_str.to_string(),
                             ),
                             TaskStatus::Failed(err) => (
                                 Theme::accent_red(),

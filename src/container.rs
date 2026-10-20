@@ -118,14 +118,14 @@ impl KfxContainer {
         if (info_offset as u64) + (info_length as u64) <= file_len && info_length > 0 {
             file.seek(SeekFrom::Start(info_offset as u64))?;
             let mut ci_bytes = vec![0u8; info_length as usize];
-            if file.read_exact(&mut ci_bytes).is_ok() {
-                if let Some(pos) = ci_bytes.windows(2).position(|w| w == [0x03, 0x9e]) {
+            if file.read_exact(&mut ci_bytes).is_ok()
+                && let Some(pos) = ci_bytes.windows(2).position(|w| w == [0x03, 0x9e]) {
                     let val_bytes = &ci_bytes[pos + 2..];
                     if !val_bytes.is_empty() {
                         let type_desc = val_bytes[0];
                         if (type_desc & 0xf0) == 0x20 {
                             let len = (type_desc & 0x0f) as usize;
-                            if len > 0 && len <= 8 && val_bytes.len() >= 1 + len {
+                            if len > 0 && len <= 8 && val_bytes.len() > len {
                                 let mut tab_len: u64 = 0;
                                 for b in &val_bytes[1..1 + len] {
                                     tab_len = (tab_len << 8) | (*b as u64);
@@ -137,7 +137,6 @@ impl KfxContainer {
                         }
                     }
                 }
-            }
         }
 
         let chunk_count = index_tab_len / 24;
@@ -184,7 +183,7 @@ impl KfxContainer {
     /// Reads the raw payload bytes for a specific chunk entry, stripping any ENTY envelope if present.
     pub fn read_chunk(&mut self, chunk: &ChunkEntry) -> Result<Vec<u8>, ContainerError> {
         let file_len = self.reader.metadata()?.len();
-        if chunk.offset.checked_add(chunk.length).map_or(true, |end| end > file_len) {
+        if chunk.offset.checked_add(chunk.length).is_none_or(|end| end > file_len) {
             return Err(ContainerError::CorruptedHeader(format!(
                 "Chunk offset ({}) + length ({}) exceeds file size ({})",
                 chunk.offset, chunk.length, file_len
@@ -351,7 +350,7 @@ impl KfxContainer {
             writer.write_all(&ent.data)?;
         }
 
-        let total_size = writer.seek(SeekFrom::Current(0))?;
+        let total_size = writer.stream_position()?;
         Ok(total_size)
     }
 }

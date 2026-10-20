@@ -258,7 +258,7 @@ impl IonWriter {
         if coef != 0 {
             let is_neg_coef = coef < 0;
             let mag = coef.unsigned_abs();
-            let byte_len = ((64 - mag.leading_zeros() + 7) / 8).max(1) as usize;
+            let byte_len = (64 - mag.leading_zeros()).div_ceil(8).max(1) as usize;
             let full_bytes = mag.to_be_bytes();
             let mag_bytes = &full_bytes[8 - byte_len..];
 
@@ -561,7 +561,7 @@ impl<'a> IonReader<'a> {
                     int_val = (int_val << 8) | (self.buf[payload_start + i] as u64);
                 }
                 self.offset = payload_end;
-                let signed = if int_val >= (i64::MAX as u64) + 1 {
+                let signed = if int_val > (i64::MAX as u64) {
                     i64::MIN
                 } else {
                     -(int_val as i64)

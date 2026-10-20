@@ -46,6 +46,8 @@ pub struct ManifestItem {
 /// Reads an EPUB archive and constructs a `BookIR`.
 pub struct EpubReader;
 
+pub type ParsedOpf = (BookMetadata, HashMap<String, ManifestItem>, Vec<String>);
+
 impl EpubReader {
     /// Fast-path to extract only metadata (title, author, identifier, language) without parsing chapters or assets.
     pub fn read_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<BookMetadata, EpubError> {
@@ -288,7 +290,7 @@ impl EpubReader {
 
     fn parse_opf(
         opf_xml: &str,
-    ) -> Result<(BookMetadata, HashMap<String, ManifestItem>, Vec<String>), EpubError> {
+    ) -> Result<ParsedOpf, EpubError> {
         let mut metadata = BookMetadata::default();
         let mut manifest = HashMap::new();
         let mut spine = Vec::new();
@@ -345,11 +347,10 @@ impl EpubReader {
                         }
 
                         if !id.is_empty() && !href.is_empty() {
-                            if let Some(ref props) = properties {
-                                if props.contains("cover-image") && metadata.cover_image_id.is_none() {
+                            if let Some(ref props) = properties
+                                && props.contains("cover-image") && metadata.cover_image_id.is_none() {
                                     metadata.cover_image_id = Some(id.clone());
                                 }
-                            }
                             manifest.insert(
                                 id.clone(),
                                 ManifestItem {
@@ -470,11 +471,10 @@ impl EpubReader {
                                     metadata.description = Some(text);
                                 }
                             }
-                            "date" => {
-                                if metadata.date.is_none() {
+                            "date"
+                                if metadata.date.is_none() => {
                                     metadata.date = Some(text);
                                 }
-                            }
                             _ => {}
                         }
                     }
@@ -558,14 +558,13 @@ impl EpubReader {
         }
 
         // Identifier selection:
-        if let Some(uid_name) = unique_identifier_id {
-            if let Some((_, text)) = identifiers
+        if let Some(uid_name) = unique_identifier_id
+            && let Some((_, text)) = identifiers
                 .iter()
                 .find(|(id, _)| id.as_deref() == Some(&uid_name))
             {
                 metadata.identifier = text.clone();
             }
-        }
         if metadata.identifier.is_empty() && !identifiers.is_empty() {
             metadata.identifier = identifiers[0].1.clone();
         }
@@ -730,8 +729,8 @@ impl EpubReader {
                                 });
                             }
                         }
-                        b"pageTarget" => {
-                            if !current_src.is_empty() {
+                        b"pageTarget"
+                            if !current_src.is_empty() => {
                                 let (target_sec, target_anchor) =
                                     Self::resolve_href_target(&current_src, href_to_section);
                                 let pnum = if !current_page_val.is_empty() {
@@ -747,7 +746,6 @@ impl EpubReader {
                                     target_anchor,
                                 });
                             }
-                        }
                         _ => {}
                     }
                 }
@@ -820,7 +818,7 @@ impl EpubReader {
                             }
                         }
 
-                        let ctx = detected_ctx.unwrap_or_else(|| {
+                        let ctx = detected_ctx.unwrap_or({
                             if !has_seen_toc {
                                 NavContext::Toc
                             } else {
@@ -986,7 +984,7 @@ impl EpubReader {
 
         let finish_paragraph_spans = |spans: &mut Vec<TextSpan>, p_dropcap: bool| {
             if p_dropcap && !spans.is_empty() {
-                let already_has_dropcap = spans.iter().any(|s| s.style.as_deref().map_or(false, |st| st.contains("dropcap")));
+                let already_has_dropcap = spans.iter().any(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
                 if !already_has_dropcap {
                     let first = &mut spans[0];
                     let trimmed = first.text.trim_start();
@@ -1807,15 +1805,14 @@ impl EpubReader {
                                 }
                             }
                             b"ul" | b"ol" => {
-                                if let Some((ordered, items)) = list_stack.pop() {
-                                    if !items.is_empty() {
+                                if let Some((ordered, items)) = list_stack.pop()
+                                    && !items.is_empty() {
                                         blocks.push(Block::List {
                                             id: format!("list_{}", blocks.len() + 1),
                                             ordered,
                                             items,
                                         });
                                     }
-                                }
                             }
                             _ => {}
                         }
@@ -1888,13 +1885,12 @@ impl EpubReader {
         let bytes = s.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
-            if bytes[i] == b'%' && i + 2 < bytes.len() {
-                if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            if bytes[i] == b'%' && i + 2 < bytes.len()
+                && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
                     result.push(byte);
                     i += 3;
                     continue;
                 }
-            }
             result.push(bytes[i]);
             i += 1;
         }

@@ -21,7 +21,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|cx| KindleStudio::new(cx)),
+            |_window, cx| cx.new(KindleStudio::new),
         )
         .unwrap();
     });

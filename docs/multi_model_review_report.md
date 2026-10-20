@@ -82,8 +82,8 @@ However, cross-perspective analysis by **Gemini Pro**, **Claude Sonnet**, and **
     - Relocated `KindleBookFile`, `scan_device_files`, and `delete_book_file` into `src/sync.rs`. `src/ui/state.rs` now cleanly forwards all device calls to `KindleSync`.
 11. **Harmonize In-Place Section Fragmentation in `pipeline.rs` ([`src/pipeline.rs#L125`](file:///home/drew/github/hwanjongyu/kfx_converter/src/pipeline.rs#L125))** `[RESOLVED]`:
     - Fragment `BookIR` once in-place inside `ConversionPipeline`, and centralized cover image resolution into `BookIR::resolve_cover_resource_id`.
-12. **Scope Footnote Anchor Keys to Prevent Cross-Chapter Overwrite ([`src/epub.rs#L198-L204`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L198-L204))**:
-    - Key footnotes by `section_href#id` rather than raw anchor IDs.
+12. **Scope Footnote Anchor Keys to Prevent Cross-Chapter Overwrite ([`src/epub.rs#L198-L204`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L198-L204))** `[RESOLVED]`:
+    - Keyed footnotes by `section_href#id`, `filename#id`, and `section_id#id` with unqualified fallback to prevent collisions across multiple chapters with identical footnote anchors (e.g. `#fn1`).
 13. **Fix Dropcap Quotes and Smart Contraction Stopwords ([`src/epub.rs#L986`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L986), [`src/enhancements/dictionary.rs#L323`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/dictionary.rs#L323))** `[RESOLVED]`:
     - Added `dropcap_2` style (`dropcap_chars = 2`) for opening quote + letter.
     - Normalized typographic curly apostrophes (`’`) to `'` and trimmed hyphens before stopword and lemma dictionary lookup.

@@ -134,20 +134,18 @@ impl ConversionPipeline {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string());
                 ir.resources.iter().find_map(|(k, v)| {
-                    if let Some(ref fn_str) = fn_opt {
-                        if k == fn_str || k.ends_with(fn_str) {
+                    if let Some(ref fn_str) = fn_opt
+                        && (k == fn_str || k.ends_with(fn_str)) {
                             return Some(v);
                         }
-                    }
                     None
                 })
             });
-            if let Some(asset) = asset {
-                if let Ok(optimized) = CoverOptimizer::optimize_thumbnail(&asset.data) {
+            if let Some(asset) = asset
+                && let Ok(optimized) = CoverOptimizer::optimize_thumbnail(&asset.data) {
                     cover_jpeg = Some(optimized);
                     cover_optimized = true;
                 }
-            }
         }
 
         // 4. Generate Word Wise Sidecar (.kll) if enabled
@@ -168,8 +166,8 @@ impl ConversionPipeline {
             let gloss_count = ww_builder.generate_from_book(&ir);
             word_wise_glosses = Some(gloss_count);
 
-            if let Ok(tmp_kll) = tempfile::NamedTempFile::new() {
-                if ww_builder.write_to_file(tmp_kll.path()).is_ok() {
+            if let Ok(tmp_kll) = tempfile::NamedTempFile::new()
+                && ww_builder.write_to_file(tmp_kll.path()).is_ok() {
                     use std::io::Read;
                     let mut buf = Vec::new();
                     if let Ok(mut f) = tmp_kll.reopen() {
@@ -177,7 +175,6 @@ impl ConversionPipeline {
                         kll_bytes = Some(buf);
                     }
                 }
-            }
 
             // Always deploy companion .sdr directory and .kll database alongside output_path
             if let Some(ref kll) = kll_bytes {

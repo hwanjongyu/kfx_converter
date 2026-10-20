@@ -206,7 +206,7 @@ impl BookIR {
             for block in section.blocks {
                 let block_chars = block.char_count();
                 let is_forced_break = block.has_page_break_before()
-                    || (!current_blocks.is_empty() && current_blocks.last().map_or(false, |b: &Block| b.has_page_break_after()));
+                    || (!current_blocks.is_empty() && current_blocks.last().is_some_and(|b: &Block| b.has_page_break_after()));
 
                 if !current_blocks.is_empty()
                     && (is_forced_break || current_chars + block_chars > max_chars || current_blocks.len() >= max_blocks)

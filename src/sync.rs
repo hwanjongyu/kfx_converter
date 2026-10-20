@@ -133,8 +133,8 @@ impl KindleSync {
         {
             let uid = unsafe { libc::getuid() };
             let gvfs_dir = PathBuf::from(format!("/run/user/{}/gvfs", uid));
-            if gvfs_dir.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&gvfs_dir) {
+            if gvfs_dir.is_dir()
+                && let Ok(entries) = std::fs::read_dir(&gvfs_dir) {
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if name.contains("Kindle") || name.contains("Scribe") || name.contains("Paperwhite") {
@@ -158,7 +158,6 @@ impl KindleSync {
                         }
                     }
                 }
-            }
         }
 
         // 2. Check UMS mount points across Linux, macOS, and Windows
@@ -198,11 +197,10 @@ impl KindleSync {
                     if parts.len() >= 2 {
                         let mount_point = parts[1];
                         let p = PathBuf::from(mount_point);
-                        if mount_point.contains("Kindle") || mount_point.contains("kindle") {
-                            if !candidates.contains(&p) {
+                        if (mount_point.contains("Kindle") || mount_point.contains("kindle"))
+                            && !candidates.contains(&p) {
                                 candidates.push(p);
                             }
-                        }
                     }
                 }
             }
@@ -226,11 +224,10 @@ impl KindleSync {
                         model_name = "Kindle Scribe".to_string();
                     } else if cand_str.contains("Paperwhite") {
                         model_name = "Kindle Paperwhite".to_string();
-                    } else if let Ok(ver) = std::fs::read_to_string(cand.join("system").join("version.txt")) {
-                        if ver.contains("Kindle") {
+                    } else if let Ok(ver) = std::fs::read_to_string(cand.join("system").join("version.txt"))
+                        && ver.contains("Kindle") {
                             model_name = "Kindle Paperwhite".to_string();
                         }
-                    }
 
                     return Some(KindleDeviceInfo {
                         root: cand,
@@ -348,8 +345,8 @@ impl KindleSync {
                             let sdr_path = parent.join(format!("{}.sdr", file_stem));
                             let has_sdr = sdr_path.is_dir();
                             let mut has_word_wise = false;
-                            if has_sdr {
-                                if let Ok(sdr_entries) = std::fs::read_dir(&sdr_path) {
+                            if has_sdr
+                                && let Ok(sdr_entries) = std::fs::read_dir(&sdr_path) {
                                     for sdr_entry in sdr_entries.flatten() {
                                         let sdr_name = sdr_entry.file_name().to_string_lossy().to_lowercase();
                                         if sdr_name.ends_with(".kll") {
@@ -358,7 +355,6 @@ impl KindleSync {
                                         }
                                     }
                                 }
-                            }
 
                             files.push(KindleBookFile {
                                 name,
@@ -376,7 +372,7 @@ impl KindleSync {
         }
 
         scan_dir_recursive(doc_path, 0, 3, &mut files);
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        files.sort_by_key(|a| a.name.to_lowercase());
         files
     }
 
@@ -499,11 +495,10 @@ impl KindleSync {
                     .map(|s| s.to_lowercase())
                     .unwrap_or_default();
 
-                if fname_lower.ends_with(".bad_file") {
-                    let _ = std::fs::remove_file(&path);
-                } else if stale_exts.iter().any(|ext| fname_lower.ends_with(ext)) {
-                    let _ = std::fs::remove_file(&path);
-                } else if purge_word_wise && fname_lower.contains(".kll") {
+                if fname_lower.ends_with(".bad_file")
+                    || stale_exts.iter().any(|ext| fname_lower.ends_with(ext))
+                    || (purge_word_wise && fname_lower.contains(".kll"))
+                {
                     let _ = std::fs::remove_file(&path);
                 } else if let Some(asin) = current_asin {
                     let asin_lower = asin.to_lowercase();
@@ -524,23 +519,13 @@ impl KindleSync {
             // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
-            let tmp_dst = dst.with_extension(format!(
-                "{}.tmp_{}",
-                dst.extension().and_then(|e| e.to_str()).unwrap_or("kfx"),
-                std::process::id()
-            ));
             let mut r = std::fs::File::open(src)?;
-            let mut w = std::fs::File::create(&tmp_dst)?;
+            let mut w = std::fs::File::create(dst)?;
             std::io::copy(&mut r, &mut w)?;
-            w.sync_all()?;
+            // Flush file content without invoking directory fsync, which triggers gadget resets on Kindle VFAT
+            let _ = w.sync_data();
             drop(w);
             drop(r);
-            std::fs::rename(&tmp_dst, dst)?;
-            if let Some(parent) = dst.parent() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
             // Brief settle delay to allow eMMC controller to commit blocks without SCSI reset
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -603,21 +588,10 @@ impl KindleSync {
             Self::copy_file(tmp.path(), dst)?;
         } else {
             use std::io::Write;
-            let tmp_dst = dst.with_extension(format!(
-                "{}.tmp_{}",
-                dst.extension().and_then(|e| e.to_str()).unwrap_or("dat"),
-                std::process::id()
-            ));
-            let mut f = std::fs::File::create(&tmp_dst)?;
+            let mut f = std::fs::File::create(dst)?;
             f.write_all(data)?;
-            f.sync_all()?;
+            let _ = f.sync_data();
             drop(f);
-            std::fs::rename(&tmp_dst, dst)?;
-            if let Some(parent) = dst.parent() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
-                }
-            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         Ok(())
