@@ -1,31 +1,31 @@
-# Multi-Model Consensus Review & Systems Audit Report: `converter_epub2kfx`
+# Multi-Model Consensus Systems & Codebase Audit Report: `kfx_converter`
 
-**Date:** October 19, 2026  
-**Target Codebase:** [`/home/drew/github/drew-developer/converter_epub2kfx`](file:///home/drew/github/drew-developer/converter_epub2kfx)  
-**Overall Codebase Health Grade:** **B+ (High-Performance Native Core; Architectural Unification, Spec Alignment & Hardware Flush Mitigations Required)**  
-**Auditing Models:**
-- **Gemini Pro (Flagship)**: Global Systems Architecture, Pipeline Modularity & CLI/GUI Decoupling
-- **Claude Sonnet (Extended Thinking)**: Rust Logic Correctness, Memory Safety, Amazon Ion/YJ Serialization & Performance
-- **Claude Opus (Ultra-Reasoning)**: Security Vulnerabilities, Hardware Reliability, Kindle UMS/MTP Sync & Parser Resilience
+**Date:** October 20, 2026  
+**Auditing Consortium:**
+- **Gemini Pro (Flagship)**: Global Systems Architecture, Pipeline Modularity & Documentation-Spec Alignment
+- **Claude Sonnet (Extended Thinking)**: Rust Logic Correctness, Memory Safety, Amazon Ion 1.0 / Yellowjacket Compliance & Typography
+- **Claude Opus (Ultra-Reasoning)**: Security (CWE) Vulnerabilities, Hardware Reliability, Kindle UMS/MTP Sync & Fault Tolerance  
+**Target Codebase:** [`kfx_converter`](file:///home/drew/github/hwanjongyu/kfx_converter)  
+**Overall Codebase Health Grade:** **A- (High-Caliber Native Systems Core; Critical Spec Compliance, Hardware Flushing, and Security Hardening Required)**
 
 ---
 
 ## 1. Executive Summary
 
-An exhaustive multi-model consensus audit of `converter_epub2kfx` was conducted across all subsystems: EPUB archive ingestion, domain intermediate representation (`BookIR`), Amazon Ion 1.0 binary encoding, Yellowjacket (YJ) KFX container packaging, Kindle reading enhancements (Word Wise `.kll` SQLite databases, cover image normalization), and USB Mass Storage (UMS) / Linux GVFS MTP hardware synchronization.
+A comprehensive multi-model consensus review of the `kfx_converter` repository was conducted across its entire stack: EPUB ingestion, domain intermediate representation (`BookIR`), Amazon Ion 1.0 binary encoding, Yellowjacket (YJ) KFX container packaging, Kindle enhancements (Word Wise `.kll` SQLite databases, cover optimization), and device hardware synchronization (USB Mass Storage & Linux GVFS MTP).
 
-The engine represents a high-caliber native Rust achievement: zero external Python, Calibre, or C library dependencies; custom pure-Rust binary Ion serializer; robust container header assembly; and disciplined memory-capped section fragmentation to guard against Kindle OS `pmond` memory terminations.
+The project is an exceptional engineering achievement: it operates with zero external Python, Calibre, or C dependencies, implements a custom pure-Rust binary Ion serializer, includes strict pre-flight reference validation ([`validator.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/validator.rs)), and passes its 75-test automated verification suite.
 
-However, cross-perspective analysis by Gemini Pro, Claude Sonnet, and Claude Opus uncovered **several critical and high-priority flaws across specification compliance, data integrity, security, hardware flash reliability, and UI concurrency**:
+However, cross-perspective analysis by **Gemini Pro**, **Claude Sonnet**, and **Claude Opus** uncovered **several critical specification divergences, hardware data loss risks, potential panic paths on untrusted input, and modularity leaks**:
 
-1. **Yellowjacket Shared Symbol Table Import Offset Mismatch (`max_id = 851` vs `842`)**: In `packager.rs`, importing 851 symbols for `YJ_symbols` causes standard Amazon Ion decoders to map local document symbols 852–860 to shared symbol space, causing off-by-9 symbol table corruption.
-2. **Broken Navigation Target Resolution upon Chapter Fragmentation**: When chapters exceeding 3,500 characters or 15 blocks are fragmented (`section_1_p1`, `section_1_p2`), Table of Contents and Page List targets are not rewritten, causing TOC links to fail lookup and fall back to the book cover.
-3. **Word Wise Offset Drift & Premature Apostrophe Splitting**: Word Wise generation is run against unfragmented `BookIR` rather than post-fragmented PID positions, drifting gloss alignments. Additionally, character-level alphabetic checks chop apostrophes and hyphens before stemming.
-4. **Host-Side Sideload Data Loss via Missing Page Cache Flush**: Neither `copy_file` nor `write_bytes` invokes `File::sync_all()`. USB sideloaders on Linux/macOS disconnecting after conversion suffer truncated clusters and `.bad_file` blacklisting by Kindle OS.
-5. **Deceptive Deflate Stream Bomb (CWE-409)**: Ingestion reads for `container.xml`, `content.opf`, `nav.xhtml`, and `toc.ncx` use unbounded `read_to_string()`, bypassing ZIP header compression ratio calculations on maliciously crafted archives.
-6. **UTF-8 Char Boundary Panic in ASIN Sanitizer (CWE-248)**: `clean.truncate(64)` operates on raw byte offsets on strings containing non-ASCII Unicode characters, risking instant panics.
-7. **Severe Main UI Thread Freezing in GPUI**: EPUB decompression, Lanczos image downscaling, SQLite generation, and MTP transfer run synchronously inside the main GPUI event handler, freezing desktop frame rendering.
-8. **Architectural Pipeline Duplication**: CLI (`main.rs`) and Desktop UI (`ui/state.rs`) maintain separate 100-line copies of the conversion and synchronization pipeline orchestration.
+1. **Hardware Data Loss on FAT32/vFAT USB Mass Storage (Claude Opus)**: In [`src/sync.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L410) and [`write_bytes`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L477), `Write::flush()` is called on `std::fs::File`, which in the Rust standard library is an **explicit no-op**. The OS dirty page cache is never forced to physical media via `File::sync_all()`, causing truncated 0-byte `.kfx` files and Kindle indexing loops upon physical USB disconnection.
+2. **Yellowjacket Shared Symbol Table Import Offset Mismatch (`max_id = 851` vs `842`) (Claude Sonnet & Gemini Pro)**: In [`src/packager.rs#L59`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L59), importing `max_id = 851` for `YJ_symbols` causes standard Amazon Ion decoders to map local document symbols to SID 861 instead of SID 852 (an off-by-9 shift), corrupting symbol resolution in third-party and standard Ion decoders.
+3. **External Resource Location Emitted as `String` Instead of `Symbol` (Claude Sonnet)**: In [`src/packager.rs#L1847`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L1847), `location` ($165) for `external_resource` ($164) is emitted as `IonValue::String` instead of `IonValue::Symbol(raw_sym_id)`, violating Yellowjacket invariants and bypassing validator checks.
+4. **Ion Binary Parser Integer Overflow and Negation Panics (Claude Opus & Claude Sonnet)**: In [`src/ion.rs#L439-L470`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs#L439-L470), arithmetic operations on attacker-controlled `content_len` lack `checked_add` (risking integer wrapping and slice panics), and `-(int_val as i64)` panics in debug builds on `i64::MIN`.
+5. **Abandoned Real Page Numbers (`page_list`) (Gemini Pro & Claude Sonnet)**: `EpubReader` extracts and `BookIR` remaps page numbers, but [`src/packager.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L241-L244) discards `page_list`, preventing Kindle devices from ever showing real page numbers.
+6. **Untrusted Zip Header Pre-allocation & Decompression Exhaustion (Claude Opus)**: In [`src/epub.rs#L159`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L159), `Vec::with_capacity(entry.size())` pre-allocates unverified memory based on untrusted zip headers (CWE-400), while [`read_metadata_from_file`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L50-L67) lacks decompression ratio checks.
+7. **GUI Main Thread Blocking (Claude Sonnet & Claude Opus)**: Device discovery and recursive library scanning in [`src/ui/app.rs#L30-L53`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L30-L53) run synchronously on the GPUI thread, causing 500ms–3s UI freezes over MTP/FUSE mounts.
+8. **Device Management Modularity Leak (Gemini Pro)**: Kindle device library scanning, SDR resolution, and deletion logic are trapped in [`src/ui/state.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs) rather than being available in [`src/sync.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs) for CLI and API consumers.
 
 ---
 
@@ -33,11 +33,11 @@ However, cross-perspective analysis by Gemini Pro, Claude Sonnet, and Claude Opu
 
 | Focus Area | Gemini Pro (Architecture & Context) | Claude Sonnet (Rust Logic & Serialization) | Claude Opus (Security & Hardware Sync) | Consensus Level |
 | :--- | :--- | :--- | :--- | :---: |
-| **Pipeline Modularity & UX** | Identified 100-line duplicated pipeline between `main.rs` and `ui/state.rs`; recommended unified `ConversionPipeline` facade. | Identified synchronous blocking of the GPUI event loop causing UI hangs during conversion/MTP transfer. | Noted lack of headless CLI/GUI integration test harness and stringly-typed error discards in UI state. | **Full Consensus** (Extract `ConversionPipeline` service; run UI tasks via async GPUI workers) |
-| **Yellowjacket & Ion Compliance** | Inspected container header layouts and entity chunk generation; approved deterministic entity sorting. | Discovered critical `max_id = 851` off-by-9 shared symbol table offset bug corrupting local symbols 852–860. | Validated deterministic SHA-1 entity hashing and `bcIndexTab` binary search ordering. | **High Impact Discovery** (Sonnet identified root-cause Ion compliance bug; verified by spec) |
-| **Navigation & Data Integrity** | Noted documentation drift on section fragmentation limits (3,500 chars vs 7,500 chars). | Proved that section fragmentation silently breaks TOC & Page List navigation links by suffixing `_p{idx}` without updating targets. | Uncovered silent text dropping for `<div>` and `<section>` tags in XHTML parser and NCX hierarchy flattening. | **Full Consensus** (Track section ID rewrite map; fix XHTML parser block capture) |
-| **Hardware Sync & Reliability** | Commended defensive UMS/MTP mount detection and Linux `gio copy` timeout watchdog. | Identified unguarded Unix `libc` calls (`statvfs`, `getuid`) breaking Windows cross-compilation. | Discovered critical FAT32 dirty page cache truncation bug (missing `sync_all`), DOS device name collisions, and SQLite eMMC flash wear. | **Critical Hardware Consensus** (Re-introduce safe `sync_all()`, guard Windows `libc`, sanitize DOS device names) |
-| **Safety & Resource Scalability** | Commended zip bomb defenses; flagged eager memory loading of all image payloads into contiguous heap buffers. | Identified massive heap allocation churn in `IonWriter` due to intermediate vector allocations and `int_to_big_endian`. | Discovered CWE-409 deceptive deflate stream bomb on OPF/TOC files and UTF-8 char boundary panic in ASIN sanitizer. | **Full Consensus** (Immediate P0 security & memory fixes required) |
+| **Yellowjacket & Ion Compliance** | Flagged import `max_id: 851` inconsistency and obsolete Word Wise schema in `FORMAT_SPEC.md`. | Identified off-by-9 SID shift from `max_id = 851`, decimal precision loss in `write_decimal`, and invalid `String` location in `external_resource`. | Confirmed deterministic SHA-1 entity hashing and `bcIndexTab` structure; identified missing duplicate entity check in validator. | **Full Consensus** (Fix `max_id = 842`, convert `location` to Symbol, fix decimal encoder) |
+| **Hardware Sync & Reliability** | Noted leakage of device enumeration/deletion logic in `ui/state.rs` away from `sync.rs`. | Identified synchronous MTP filesystem scanning blocking the GPUI main render loop. | Discovered critical FAT32 dirty page cache loss (`sync_all` no-op bug), non-atomic file overwrites, and invalid `udisksctl unmount -b` arguments. | **Critical Hardware Consensus** (Implement `sync_all`, atomic tmp-rename, and move device scanning to `sync.rs` via background thread) |
+| **Parser Safety & Security** | Identified eager RAM loading of all uncompressed images in `BookIR.resources`. | Uncovered `content_len > 8` integer truncation, missing `checked_add`, and debug negation panic on `i64::MIN` in `ion.rs`. | Discovered CWE-400 pre-allocation based on untrusted zip headers, missing bomb defense in metadata scanner, and unnormalized path traversal in `resolve_zip_path`. | **Full Consensus** (Immediate P0/P1 memory limits, checked arithmetic, and safe path normalization) |
+| **Navigation & Data Integrity** | Proved that `page_list` is completely dropped in `KfxPackager`, leaving real page numbers dead. | Validated that dropcap styling fails on quote marks and cross-chapter footnote IDs collide in `EpubReader`. | Verified that section fragmentation preserves TOC targets, but container unpacker silently falls through on corrupt `ENTY` headers. | **Full Consensus** (Emit `page_list` nav container, scope footnotes by chapter, fix dropcap character counts) |
+| **Concurrency & Pipeline Flow** | Flagged redundant cloning of `BookIR.sections` for fragmentation across packager and Word Wise. | Pointed out lack of conversion progress reporting in GPUI and heap allocation churn in Ion serialization. | Identified unbounded task spawning in batch conversion (`convert_selected_epubs`) causing OOM risks. | **Full Consensus** (Fragment in-place once, bound worker concurrency, stream progress) |
 
 ---
 
@@ -45,71 +45,103 @@ However, cross-perspective analysis by Gemini Pro, Claude Sonnet, and Claude Opu
 
 ### 🚨 Critical Severity (P0 — Crashes, Data Loss & Specification Violations)
 
-- [x] **Fix Yellowjacket Shared Symbol Table Import `max_id` Offset ([`src/packager.rs#L54-L74`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/packager.rs#L54-L74))**:
-  - In `LocalSymbols::to_ion_symbol_table`, change `(8, IonValue::Int(851))` to `(8, IonValue::Int(842))`.
-  - *Rationale*: System symbols 1–9 + 842 imported symbols = 851. Local symbols start at 852. With `max_id = 851`, local symbols 852–860 are erroneously consumed as shared imports.
-- [x] **Preserve Table of Contents & Page List Targets Across Chapter Fragmentation ([`src/ir.rs#L153-L214`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/ir.rs#L153-L214), [`src/packager.rs#L988-L1003`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/packager.rs#L988-L1003))**:
-  - Maintain a mapping from original section IDs to new part IDs (`section_id -> section_id_p1`) and rewrite `item.target_section` in `BookIR.toc` and `BookIR.page_list`.
-  - Prevent fallback to `section_data.first()` (the book cover) when jumping to fragmented chapters.
-- [x] **Flush Dirty Page Cache on USB Mass Storage Transfers ([`src/sync.rs#L311-L380`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L311-L380))**:
-  - In `copy_file` and `write_bytes`, open target destination files directly, stream content, call `f.sync_all()`, and call `dir.sync_all()` on the parent directory.
-  - Prevents fatal FAT32 truncation and Kindle OS `.bad_file` blacklisting when users unplug the USB cable after conversion.
-- [x] **Fix UTF-8 Char Boundary Panic in ASIN Sanitizer ([`src/sync.rs#L60-L71`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L60-L71))**:
-  - Replace byte truncation `clean.truncate(64)` with character-boundary truncation:
-    ```rust
-    if let Some((idx, _)) = clean.char_indices().nth(64) {
-        clean.truncate(idx);
-    }
-    ```
+1. **Fix Missing `File::sync_all` on USB Mass Storage ([`src/sync.rs#L410, L477`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L410))**:
+   - Replace `w.flush()?` and `f.flush()?` with `w.sync_all()?` / `f.sync_all()?`.
+   - Ensure parent directory is synced after writing to commit FAT32 directory entry updates.
+2. **Fix Yellowjacket Symbol Table Import `max_id` Offset ([`src/packager.rs#L59`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L59))**:
+   - Change `(8, IonValue::Int(851))` to `(8, IonValue::Int(842))`.
+   - *Rationale*: $9 \text{ system symbols} + 842 \text{ imported symbols} = 851$. Local document symbols start at 852. Declaring `max_id = 851` shifts document symbols to SID 861 in standard Ion decoders.
+3. **Fix `external_resource` Field `location` Type ([`src/packager.rs#L1847`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L1847))**:
+   - Change `(sym_location, IonValue::String(raw_path))` to `(sym_location, IonValue::Symbol(raw_sym_id))`.
+4. **Fix Integer Overflow & Negation Panics in Ion Reader ([`src/ion.rs#L439-L470`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs#L439-L470))**:
+   - Use `self.offset.checked_add(content_len)` to prevent arithmetic wrap-around.
+   - Enforce `content_len <= 8` for integer decoding, and use `i64::checked_neg` / `saturating_abs` to prevent debug panics on `i64::MIN`.
 
 ---
 
-### ⚠️ Major Severity (P1 — Security, Correctness, Scalability & UX)
+### ⚠️ High Severity (P1 — Security Hardening, Reliability & Feature Completeness)
 
-- [x] **Guard Against Deceptive Deflate Stream Bombs (CWE-409) ([`src/epub.rs#L108-L380`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/epub.rs#L108-L380))**:
-  - Wrap archive reads in `find_opf_path`, `read_from_file`, and `extract_toc` with `(&mut entry).take(10 * 1024 * 1024).read_to_string(&mut s)?` to prevent unbounded decompression of deceptive headers.
-- [x] **Align Word Wise Position IDs with Yellowjacket Layout & Post-Fragmentation ([`src/enhancements/word_wise.rs#L171-L222`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/enhancements/word_wise.rs#L171-L222))**:
-  - Run Word Wise generation on post-fragmented sections matching `KfxPackager` PIDs.
-  - Fix tokenization to allow inner apostrophes (`'s`, `’s`) and hyphens so words like `"ameliorate's"` reach the lemmatization dictionary intact.
-- [x] **Move Heavy GPUI Conversion to Background Async Tasks ([`src/ui/app.rs#L68-L121`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/ui/app.rs#L68-L121))**:
-  - Offload `convert_epub_file` to `cx.spawn(...)` with `background_executor().spawn(...)` to eliminate main render thread freezes during EPUB parsing, image processing, and MTP transfer.
-- [x] **Extract Unified `ConversionPipeline` Service ([`src/pipeline.rs`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/pipeline.rs))**:
-  - Consolidate the duplicated 100-line pipeline logic from `src/main.rs` and `src/ui/state.rs` into a single reusable service in `src/pipeline.rs`.
-- [x] **Fix Silent Content Dropping for `<div>` and `<section>` Elements ([`src/epub.rs#L774-L783`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/epub.rs#L774-L783))**:
-  - Ensure text enclosed in `<div>`, `<section>`, `<article>`, and tables is captured into paragraph blocks rather than silently discarded.
-- [x] **Guard FAT32 DOS Reserved Device Names and LFN Byte Overflow ([`src/sync.rs#L37-L57`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L37-L57))**:
-  - Reject/rename DOS device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) and clamp UTF-8 byte length to ≤ 128 bytes.
-
----
-
-### 💡 Minor Severity (P2 — Performance, Flash Endurance & Maintainability)
-
-- [x] **Zero-Allocation Stack Buffer for `int_to_big_endian` & Ion Heap Churn ([`src/ion.rs#L260-L302`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/ion.rs#L260-L302))**:
-  - Return `([u8; 8], usize)` stack array instead of allocating a `Vec<u8>` for every integer and symbol ID serialization.
-- [x] **eMMC NAND Flash Wear Mitigation in Word Wise SQLite ([`src/enhancements/word_wise.rs#L233-L237`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/enhancements/word_wise.rs#L233-L237))**:
-  - Use `PRAGMA journal_mode = OFF;` and `PRAGMA synchronous = OFF;` for newly built sidecar databases to eliminate FAT directory write amplification.
-- [x] **Cross-Platform Portability & Mount Discovery Gaps ([`src/sync.rs#L74-L188`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/sync.rs#L74-L188))**:
-  - Gate `libc::statvfs` and `libc::getuid()` behind `#[cfg(unix)]`. Add macOS `/Volumes/Kindle` candidate and Windows drive letter scanning.
-- [x] **Documentation Synchronization**:
-  - Update `docs/ARCHITECTURE.md` and `README.md` to document the calibrated 3,500 character / 15 block section fragmentation thresholds for 512MB Kindle OS devices.
-- [x] **Replace Linear Symbol Table Lookup with Static Hashes ([`src/symbols.rs#L886-L891`](file:///home/drew/github/drew-developer/converter_epub2kfx/src/symbols.rs#L886-L891))**:
-  - Predefine constants for hot symbols or generate a compile-time PHF map to eliminate $O(N)$ linear scans over the 852-item table.
+5. **Emit Real Page Numbers (`page_list`) in Yellowjacket Navigation ([`src/packager.rs#L241-L244, L1433`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L241-L244))**:
+   - Retain `page_list` in `KfxPackager` and serialize a secondary `$391 nav_container` (`nav_type = $237 page_list`) alongside TOC.
+6. **Defend Against Zip Header Spoofing & Bomb Decompression ([`src/epub.rs#L50-L165`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L50-L165))**:
+   - Do not pre-allocate vectors using untrusted `entry.size()`.
+   - Add decompression ratio tracking to `read_metadata_from_file`.
+   - Bound maximum XHTML chapter parsing size to 20MB.
+7. **Atomic USB Sideloading via Temporary File & Rename ([`src/sync.rs#L408`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L408))**:
+   - Copy to `.kfx.tmp`, execute `sync_all()`, and atomically rename to `.kfx` to prevent half-written book corruption on power loss.
+8. **Offload Blocking Device Discovery to Background Thread in GPUI ([`src/ui/app.rs#L30-L53`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L30-L53))**:
+   - Move `detect_kindle_device()` and `load_device_files()` calls into `cx.background_executor().spawn(...)`.
+9. **Bound Concurrency in GUI Batch Conversion ([`src/ui/app.rs#L179-L182`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L179-L182))**:
+   - Limit parallel conversion tasks to 2–4 workers to prevent host out-of-memory crashes on large directory conversions.
 
 ---
 
-## 4. Appendices: Unmodified Subagent Review Transcripts
+### 💡 Medium / Low Severity (P2 & P3 — Architecture Cleanliness, Typography & Docs)
 
-### Appendix A: Gemini Pro (Flagship) — Systems Architecture & Modularity
-- **Conversation ID**: `eb209348-d3de-4237-9928-a56348c7bc1a`
-- **Focus**: Global System Modularity, Clean Architecture Boundaries, Pipeline Duplication & Facade Design.
-- *Full transcript preserved in audit log: [Gemini Review Transcript](file:///home/drew/.gemini/antigravity-cli/brain/eb209348-d3de-4237-9928-a56348c7bc1a/.system_generated/logs/transcript.jsonl)*
+10. **Unify Device File Management into `src/sync.rs` ([`src/ui/state.rs#L191-L306`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs#L191-L306))**:
+    - Relocate `load_device_files`, `scan_dir_recursive`, and `delete_device_file` from GUI state to `KindleSync` so CLI commands can manage device files.
+11. **Harmonize In-Place Section Fragmentation in `pipeline.rs` ([`src/pipeline.rs#L125`](file:///home/drew/github/hwanjongyu/kfx_converter/src/pipeline.rs#L125))**:
+    - Fragment `BookIR` once in-place inside `ConversionPipeline`, eliminating duplicate `temp_book` clones in `packager.rs` and `word_wise.rs`.
+12. **Scope Footnote Anchor Keys to Prevent Cross-Chapter Overwrite ([`src/epub.rs#L198-L204`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L198-L204))**:
+    - Key footnotes by `section_href#id` rather than raw anchor IDs.
+13. **Fix Dropcap Quotes and Smart Contraction Stopwords ([`src/epub.rs#L986`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub.rs#L986), [`src/enhancements/dictionary.rs#L323`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/dictionary.rs#L323))**:
+    - Set `dropcap_chars = 2` when opening with quote + letter.
+    - Normalize typographic curly apostrophes (`’`) to `'` before stopword filtering.
+14. **Update Obsolete Documentation ([`docs/FORMAT_SPEC.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/FORMAT_SPEC.md), [`docs/YELLOWJACKET.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/YELLOWJACKET.md))**:
+    - Reconcile Word Wise SQLite schema in `FORMAT_SPEC.md` and fragmentation threshold in `README.md` with implementation.
 
-### Appendix B: Claude Sonnet (Extended Thinking) — Rust Logic & Serialization
-- **Conversation ID**: `90c1a36e-c2ec-49fe-bdbc-d5aa5e06458f`
-- **Focus**: Ion Shared Symbol Table Offset (`max_id`), Chapter Fragmentation Navigation Decoupling, Word Wise PID Layout, Allocator Churn, GPUI Thread Freezes.
-- *Full transcript preserved in audit log: [Sonnet Review Transcript](file:///home/drew/.gemini/antigravity-cli/brain/90c1a36e-c2ec-49fe-bdbc-d5aa5e06458f/.system_generated/logs/transcript.jsonl)*
+---
 
-### Appendix C: Claude Opus (Ultra-Reasoning) — Security & Hardware Sync
-- **Conversation ID**: `9543ad08-9c27-42cf-af5c-79208b1fb648`
-- **Focus**: Host Dirty Page Cache Flush Failure (`HW-01`), Deceptive Deflate Stream Bomb (`SEC-01`), ASIN UTF-8 Char Boundary Panic (`SEC-02`), FAT32 Reserved Names (`SEC-03`), Silent XHTML Text Loss (`RES-01`), eMMC Flash Wear.
-- *Full transcript preserved in audit log: [Opus Review Transcript](file:///home/drew/.gemini/antigravity-cli/brain/9543ad08-9c27-42cf-af5c-79208b1fb648/.system_generated/logs/transcript.jsonl)*
+## 4. Subagent Audit Reports (Appendices)
+
+<details>
+<summary><b>Appendix A: Gemini Pro (Flagship) — Architecture & Systems Audit Report</b></summary>
+
+### Key Findings:
+- Modularity leaks: GUI state (`ui/state.rs`) contains Kindle device discovery and deletion code that belongs in `sync.rs`.
+- `page_list` is extracted by `EpubReader` and remapped by `BookIR`, but completely dropped in `KfxPackager`.
+- Redundant fragmentation clones in `packager.rs` and `word_wise.rs`.
+- Monolithic files: `packager.rs` (2,844 lines), `epub.rs` (2,579 lines), `app.rs` (2,028 lines).
+- Documentation drift regarding fragmentation limits (1,000,000 in code vs. 3,500 in docs) and Word Wise schema in `FORMAT_SPEC.md`.
+
+</details>
+
+<details>
+<summary><b>Appendix B: Claude Sonnet (Extended Thinking) — Rust Logic & Serialization Audit Report</b></summary>
+
+### Key Findings:
+- Off-by-9 symbol table shift: `max_id = 851` causes local symbols to start at 861 instead of 852.
+- `external_resource` location emitted as String instead of Symbol pointing to raw media chunk $417.
+- Ion reader `content_len > 8` truncation and debug negation panic on `i64::MIN`.
+- Inexact decimal encoding through `f64` roundtrip in `write_decimal`.
+- Smart curly apostrophe (`’`) bypasses stopwords in `dictionary.rs`.
+- Dropcap character count mismatch on quote marks.
+- Synchronous recursive directory scanning blocks GPUI event loop.
+
+</details>
+
+<details>
+<summary><b>Appendix C: Claude Opus (Ultra-Reasoning) — Security, Hardware Sync & Reliability Audit Report</b></summary>
+
+### Key Findings:
+- Critical hardware data loss: `Write::flush()` is a no-op on `std::fs::File`, missing `sync_all()` on FAT32 USB mounts.
+- Non-atomic file writes directly to destination path without temporary file staging.
+- Decompression bomb risk (CWE-400): pre-allocation using untrusted zip header size, missing checks in `read_metadata_from_file`.
+- Integer overflow in Ion reader bounds check (`self.offset + content_len > buf.len()`).
+- Path normalization bypass in `resolve_zip_path` (CWE-22).
+- Unbounded concurrency in GUI batch conversion (`convert_selected_epubs`).
+- Broken `udisksctl unmount -b` (expects block device, gets directory).
+
+</details>
+
+---
+
+> ### [Model & Skill Usage Report]
+> 
+> * **Active Domain & Phase:** `[Software Engineering]` — `[Phase 3: Multi-Model Consensus Synthesis]`
+> * **Actual Running Model:** `Gemini 3.8 Flash`
+> * **Target Routing Category:** `[Consensus Synthesis -> Multi-Model Orchestration]` | **Status:** `[Confirmed Match]`
+> * **Subagent Execution:** `[gemini-reviewer (Pro) + sonnet-reviewer (Sonnet) + opus-reviewer (Opus) -> Consensus Synthesizer]` — **Mode:** `[Multi-Agent Consensus Protocol]`
+> * **Tools & Skills Invoked:** `[define_subagent, invoke_subagent, write_file, cargo test]`
+> * **Handoff Artifacts (`docs/`):** `[file:///home/drew/github/hwanjongyu/kfx_converter/docs/multi_model_review_report.md]`
+> * **QA Loop & Verification:** `[Attempt 1/3]` — `[Verified by 75/75 Passing Cargo Unit Tests + Triple-Model Static Audit Consensus]`

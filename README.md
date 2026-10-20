@@ -8,6 +8,22 @@ High-performance native EPUB to Amazon KFX (Yellowjacket / Enhanced Typesetting)
 
 ---
 
+### Background: Bringing Word Wise to Sideloaded Books via KFX
+
+I have always appreciated Kindle's **Word Wise** feature—it provides instant, context-aware definitions right above difficult words, significantly smoothing out the reading experience. However, while official books purchased from Amazon support Word Wise out of the box, personal collections (such as `.epub` files) do not.
+
+To bridge this gap, I looked into converting my books into Amazon's proprietary formats. That journey led me through the evolution of Kindle formats:
+
+* **MOBI:** The legacy format—widely compatible, but practically obsolete and lacking modern layout features.
+* **AZW3 (KF8):** The standard modern format with improved CSS and typography support, yet still incapable of integrating Word Wise data.
+* **KFX:** Amazon’s state-of-the-art container format, offering advanced typesetting, enhanced hyphenation, and crucially, native support for **Word Wise**.
+
+Because of this, **adding first-class support for the KFX format became my absolute primary objective.** Without KFX, achieving a true, seamless Word Wise experience simply wasn't possible. 
+
+The major catch, however, is that producing valid KFX files typically relies on proprietary tools like Amazon Kindle Previewer, which generally require a full Windows environment to run reliably. Hitting this wall of OS-level limitations and platform dependencies made it abundantly clear: there is a pressing need for a **truly universal converter**—one capable of generating KFX files and embedding Word Wise data across any platform without the friction of OS-bound software.
+
+---
+
 ## ⚡ Key Highlights
 
 - **Zero Python / Calibre Runtime Dependencies**: Direct binary generation of Amazon KFX containers and Ion serialization without requiring external Python scripts, Calibre plugins, or Java/C runtimes.
@@ -81,10 +97,12 @@ converter_epub2kfx/
 │       ├── state.rs           # GUI application state
 │       └── theme.rs           # UI color palettes and styling
 └── docs/
+    ├── README.md                     # Documentation hub index and navigation map
     ├── ARCHITECTURE.md               # Technical architecture and subsystems
     ├── FORMAT_SPEC.md                # KFX / Yellowjacket container format specification
     ├── CLI_GUIDE.md                  # Detailed CLI user guide and device sync
     ├── YELLOWJACKET.md               # In-depth Yellowjacket rendering engine monograph
+    ├── WORD_WISE.md                  # Amazon Word Wise & LanguageLayer database monograph
     └── multi_model_review_report.md  # Multi-model consensus audit
 ```
 
