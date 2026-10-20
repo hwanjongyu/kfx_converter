@@ -58,6 +58,21 @@ pub enum ValidationError {
         sym: u32,
         name: String,
     },
+
+    #[error("Duplicate entity in container: chunk_type={chunk_type}, entity_id={eid}")]
+    DuplicateEntity {
+        chunk_type: u32,
+        eid: u32,
+    },
+
+    #[error("Illegal field usage: entity (chunk_type={chunk_type}, entity_id={eid}) field {field_id} ('{field_name}'): {reason}")]
+    IllegalField {
+        chunk_type: u32,
+        eid: u32,
+        field_id: u32,
+        field_name: String,
+        reason: String,
+    },
 }
 
 /// Summary report produced by a successful pre-flight reference validation.
@@ -102,7 +117,12 @@ impl<'a> KfxPreflightValidator<'a> {
         let mut verified_chunk_types: HashSet<u32> = HashSet::new();
 
         for ent in self.entities {
-            entity_map.insert((ent.chunk_type, ent.entity_id), ent);
+            if entity_map.insert((ent.chunk_type, ent.entity_id), ent).is_some() {
+                return Err(ValidationError::DuplicateEntity {
+                    chunk_type: ent.chunk_type,
+                    eid: ent.entity_id,
+                });
+            }
             defined_eids.insert(ent.entity_id);
             verified_chunk_types.insert(ent.chunk_type);
         }
@@ -281,16 +301,30 @@ impl<'a> KfxPreflightValidator<'a> {
                         // $165 = location in $164 -> symbol referencing $417 (bcRawMedia)
                         165 => {
                             if referrer.chunk_type == 164 {
-                                if let IonValue::Symbol(target_sym) = fval {
-                                    if !entity_map.contains_key(&(417, *target_sym)) {
-                                        return Err(ValidationError::MissingFragment {
-                                            referrer_chunk: referrer.chunk_type,
-                                            referrer_eid: referrer.entity_id,
+                                match fval {
+                                    IonValue::Symbol(target_sym) => {
+                                        if !entity_map.contains_key(&(417, *target_sym)) {
+                                            return Err(ValidationError::MissingFragment {
+                                                referrer_chunk: referrer.chunk_type,
+                                                referrer_eid: referrer.entity_id,
+                                                field_id: 165,
+                                                field_name: "location".to_string(),
+                                                target_sym: *target_sym,
+                                                target_name: self.resolve_symbol_name(*target_sym),
+                                                expected_chunk: 417,
+                                            });
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(ValidationError::IllegalField {
+                                            chunk_type: 164,
+                                            eid: referrer.entity_id,
                                             field_id: 165,
                                             field_name: "location".to_string(),
-                                            target_sym: *target_sym,
-                                            target_name: self.resolve_symbol_name(*target_sym),
-                                            expected_chunk: 417,
+                                            reason: format!(
+                                                "Field 'location' ($165) in external_resource ($164) must be a Symbol referencing bcRawMedia ($417), found {:?}",
+                                                fval
+                                            ),
                                         });
                                     }
                                 }
@@ -586,6 +620,52 @@ mod tests {
                 assert_eq!(eid, sec_sym);
             }
             _ => panic!("Expected MissingFromContains error, got: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_validator_catches_duplicate_entities() {
+        let symbols = LocalSymbols::new();
+        let entities = vec![
+            KfxEntity { entity_id: 100, chunk_type: 260, data: vec![] },
+            KfxEntity { entity_id: 100, chunk_type: 260, data: vec![] },
+        ];
+        let validator = KfxPreflightValidator::new(&entities, Some(&symbols));
+        let err = validator.validate().unwrap_err();
+        match err {
+            ValidationError::DuplicateEntity { chunk_type, eid } => {
+                assert_eq!(chunk_type, 260);
+                assert_eq!(eid, 100);
+            }
+            _ => panic!("Expected DuplicateEntity error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_validator_catches_string_location_in_external_resource() {
+        let mut symbols = LocalSymbols::new();
+        let res_sym = symbols.intern("res_img1");
+
+        // External resource entity with invalid String location instead of Symbol
+        let mut w_res = IonWriter::new();
+        w_res.write_bvm();
+        w_res.write_value(&IonValue::Struct(vec![
+            (175, IonValue::Symbol(res_sym)),
+            (165, IonValue::String("resource/res_img1".to_string())), // Illegal String!
+        ]));
+
+        let entities = vec![
+            KfxEntity { entity_id: res_sym, chunk_type: 164, data: w_res.into_bytes() },
+        ];
+
+        let validator = KfxPreflightValidator::new(&entities, Some(&symbols));
+        let err = validator.validate().unwrap_err();
+        match err {
+            ValidationError::IllegalField { chunk_type, field_id, .. } => {
+                assert_eq!(chunk_type, 164);
+                assert_eq!(field_id, 165);
+            }
+            _ => panic!("Expected IllegalField error, got {:?}", err),
         }
     }
 }

@@ -56,7 +56,7 @@ impl LocalSymbols {
         let import_entry = IonValue::Struct(vec![
             (4, IonValue::String("YJ_symbols".to_string())), // $4 = name
             (5, IonValue::Int(10)),                         // $5 = version
-            (8, IonValue::Int(851)),                        // $8 = max_id in YJ_symbols shared table
+            (8, IonValue::Int(842)),                        // $8 = max_id in YJ_symbols shared table (842 symbols: 10..=851)
         ]);
         let sym_values: Vec<IonValue> = self
             .names
@@ -1844,7 +1844,7 @@ impl<'a> KfxPackager<'a> {
             // 1. External Resource metadata entity ($164)
             let mut ext_field_vec = vec![
                 (sym_resource_name, IonValue::Symbol(res_sym_id)),
-                (sym_location, IonValue::String(raw_path)),
+                (sym_location, IonValue::Symbol(raw_sym_id)),
                 (sym_format, IonValue::Symbol(format_sym)),
                 (sym_mime, IonValue::String(asset.mime_type.clone())),
             ];
@@ -2491,6 +2491,35 @@ mod tests {
         assert!(!symtab_bytes.is_empty());
         // Verify BVM magic
         assert_eq!(&symtab_bytes[0..4], &[0xE0, 0x01, 0x00, 0xEA]);
+
+        // Explicitly decode symbol table and verify max_id in YJ_symbols import is 842
+        let mut reader = crate::ion::IonReader::new(&symtab_bytes);
+        let values = reader.decode_all().expect("failed to decode symbol table");
+        assert_eq!(values.len(), 1);
+        let struct_val = match &values[0] {
+            crate::ion::IonValue::Annotated(ann, inner) => {
+                assert_eq!(ann.as_slice(), &[3]); // $ion_symbol_table ($3)
+                inner.as_ref()
+            }
+            crate::ion::IonValue::Struct(_) => &values[0],
+            _ => panic!("expected annotated or struct for symbol table"),
+        };
+        if let crate::ion::IonValue::Struct(fields) = struct_val {
+            let imports = fields.iter().find(|(k, _)| *k == 6).expect("missing imports field $6");
+            if let crate::ion::IonValue::List(import_list) = &imports.1 {
+                assert_eq!(import_list.len(), 1);
+                if let crate::ion::IonValue::Struct(import_fields) = &import_list[0] {
+                    let max_id = import_fields.iter().find(|(k, _)| *k == 8).expect("missing max_id field $8");
+                    assert_eq!(max_id.1, crate::ion::IonValue::Int(842));
+                } else {
+                    panic!("expected struct in import_list");
+                }
+            } else {
+                panic!("expected list in imports");
+            }
+        } else {
+            panic!("expected struct for symbol table");
+        }
     }
 
     #[test]

@@ -45,17 +45,19 @@ However, cross-perspective analysis by **Gemini Pro**, **Claude Sonnet**, and **
 
 ### 🚨 Critical Severity (P0 — Crashes, Data Loss & Specification Violations)
 
-1. **Fix Missing `File::sync_all` on USB Mass Storage ([`src/sync.rs#L410, L477`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L410))**:
-   - Replace `w.flush()?` and `f.flush()?` with `w.sync_all()?` / `f.sync_all()?`.
-   - Ensure parent directory is synced after writing to commit FAT32 directory entry updates.
-2. **Fix Yellowjacket Symbol Table Import `max_id` Offset ([`src/packager.rs#L59`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L59))**:
-   - Change `(8, IonValue::Int(851))` to `(8, IonValue::Int(842))`.
-   - *Rationale*: $9 \text{ system symbols} + 842 \text{ imported symbols} = 851$. Local document symbols start at 852. Declaring `max_id = 851` shifts document symbols to SID 861 in standard Ion decoders.
-3. **Fix `external_resource` Field `location` Type ([`src/packager.rs#L1847`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L1847))**:
-   - Change `(sym_location, IonValue::String(raw_path))` to `(sym_location, IonValue::Symbol(raw_sym_id))`.
-4. **Fix Integer Overflow & Negation Panics in Ion Reader ([`src/ion.rs#L439-L470`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs#L439-L470))**:
-   - Use `self.offset.checked_add(content_len)` to prevent arithmetic wrap-around.
-   - Enforce `content_len <= 8` for integer decoding, and use `i64::checked_neg` / `saturating_abs` to prevent debug panics on `i64::MIN`.
+1. - [x] **Fix Missing `File::sync_all` on USB Mass Storage ([`src/sync.rs#L410, L477`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L410))**:
+   - Replaced `w.flush()?` and `f.flush()?` with `w.sync_all()?` / `f.sync_all()?`.
+   - Parent directory handle synced after file write to commit FAT32 directory table updates.
+2. - [x] **Fix Yellowjacket Symbol Table Import `max_id` Offset ([`src/packager.rs#L59`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L59))**:
+   - Changed `(8, IonValue::Int(851))` to `(8, IonValue::Int(842))`.
+   - *Rationale*: $9 \text{ system symbols} + 842 \text{ imported symbols} = 851$. Local document symbols start at 852.
+3. - [x] **Fix `external_resource` Field `location` Type ([`src/packager.rs#L1847`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager.rs#L1847))**:
+   - Changed `(sym_location, IonValue::String(raw_path))` to `(sym_location, IonValue::Symbol(raw_sym_id))`.
+4. - [x] **Fix Integer Overflow & Negation Panics in Ion Reader ([`src/ion.rs#L439-L470`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs#L439-L470))**:
+   - Used `self.offset.checked_add(content_len)` to prevent arithmetic wrap-around.
+   - Enforced `content_len <= 8` for integer decoding, and protected `i64::MIN` negation from debug panics.
+   - Guarded `decode_varuint` against unbounded byte shifts ($> 10$ bytes).
+   - Guarded container index table chunk offsets with `checked_add` and rejected corrupted `ENTY` chunk headers.
 
 ---
 

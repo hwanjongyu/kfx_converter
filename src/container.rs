@@ -162,10 +162,14 @@ impl KfxContainer {
             let offset = file.read_u64::<LittleEndian>()?;
             let length = file.read_u64::<LittleEndian>()?;
 
+            let abs_offset = (header_length as u64)
+                .checked_add(offset)
+                .ok_or_else(|| ContainerError::CorruptedHeader(format!("Chunk offset arithmetic overflow: {}", offset)))?;
+
             chunks.push(ChunkEntry {
                 entity_id,
                 chunk_type,
-                offset: (header_length as u64) + offset,
+                offset: abs_offset,
                 length,
             });
         }
@@ -202,6 +206,12 @@ impl KfxContainer {
             let header_len = (&buf[6..10]).read_u32::<LittleEndian>()? as usize;
             if header_len <= buf.len() {
                 return Ok(buf[header_len..].to_vec());
+            } else {
+                return Err(ContainerError::CorruptedHeader(format!(
+                    "ENTY chunk header length ({}) exceeds chunk buffer length ({})",
+                    header_len,
+                    buf.len()
+                )));
             }
         }
 

@@ -337,14 +337,24 @@ pub enum IonError {
     MalformedVarUInt(usize),
     #[error("Malformed UTF-8 string at offset {0}")]
     MalformedUtf8(usize),
+    #[error("Malformed Ion payload: {0}")]
+    MalformedIon(String),
 }
 
 /// Decodes an unsigned integer from Ion 7-bit variable-length unsigned integer (VarUInt).
 pub fn decode_varuint(buf: &[u8], offset: &mut usize) -> Result<u64, IonError> {
     let mut val: u64 = 0;
+    let mut count = 0;
     while *offset < buf.len() {
         let b = buf[*offset];
         *offset += 1;
+        count += 1;
+        if count > 10 {
+            return Err(IonError::MalformedIon(format!(
+                "VarUInt sequence exceeded 10 bytes at offset {}",
+                *offset
+            )));
+        }
         val = (val << 7) | ((b & 0x7F) as u64);
         if (b & 0x80) != 0 {
             return Ok(val);
@@ -436,12 +446,13 @@ impl<'a> IonReader<'a> {
             return Ok(IonValue::Null);
         }
 
-        if self.offset + content_len > self.buf.len() {
-            return Err(IonError::UnexpectedEof(self.buf.len()));
-        }
+        let payload_end = self
+            .offset
+            .checked_add(content_len)
+            .filter(|&end| end <= self.buf.len())
+            .ok_or(IonError::UnexpectedEof(self.buf.len()))?;
 
         let payload_start = self.offset;
-        let payload_end = self.offset + content_len;
 
         let val = match type_code {
             0x0 => IonValue::Null,
@@ -453,20 +464,42 @@ impl<'a> IonReader<'a> {
                 }
             }
             0x2 => {
+                if content_len > 8 {
+                    return Err(IonError::MalformedIon(format!(
+                        "Integer payload exceeds 64 bits (length {})",
+                        content_len
+                    )));
+                }
                 let mut int_val: u64 = 0;
                 for i in 0..content_len {
                     int_val = (int_val << 8) | (self.buf[payload_start + i] as u64);
                 }
                 self.offset = payload_end;
-                IonValue::Int(int_val as i64)
+                let signed = if int_val > i64::MAX as u64 {
+                    i64::MAX
+                } else {
+                    int_val as i64
+                };
+                IonValue::Int(signed)
             }
             0x3 => {
+                if content_len > 8 {
+                    return Err(IonError::MalformedIon(format!(
+                        "Negative integer payload exceeds 64 bits (length {})",
+                        content_len
+                    )));
+                }
                 let mut int_val: u64 = 0;
                 for i in 0..content_len {
                     int_val = (int_val << 8) | (self.buf[payload_start + i] as u64);
                 }
                 self.offset = payload_end;
-                IonValue::Int(-(int_val as i64))
+                let signed = if int_val >= (i64::MAX as u64) + 1 {
+                    i64::MIN
+                } else {
+                    -(int_val as i64)
+                };
+                IonValue::Int(signed)
             }
             0x4 => {
                 let f_val = if content_len == 0 {
@@ -747,5 +780,39 @@ mod tests {
         let mut r = IonReader::new(&raw);
         let dec = r.decode_value().expect("Decode underline failed");
         assert_eq!(dec, underline_val);
+    }
+
+    #[test]
+    fn test_decode_varuint_length_bound() {
+        // 12 bytes with no high bit set (all 0x01)
+        let endless_varuint = [0x01u8; 12];
+        let mut offset = 0;
+        let err = decode_varuint(&endless_varuint, &mut offset).unwrap_err();
+        match err {
+            IonError::MalformedIon(msg) => {
+                assert!(msg.contains("VarUInt sequence exceeded 10 bytes"));
+            }
+            _ => panic!("Expected MalformedIon, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_ion_reader_integer_overflow_and_negation() {
+        // Type 0x2 (positive int) with length 9 (> 8 bytes)
+        let invalid_pos_int = [0x2E, 0x89, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // len 9 via 0x0E VarUInt
+        let mut r1 = IonReader::new(&invalid_pos_int);
+        assert!(matches!(r1.decode_value(), Err(IonError::MalformedIon(_))));
+
+        // Type 0x3 (negative int) with length 9 (> 8 bytes)
+        let invalid_neg_int = [0x3E, 0x89, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut r2 = IonReader::new(&invalid_neg_int);
+        assert!(matches!(r2.decode_value(), Err(IonError::MalformedIon(_))));
+
+        // Type 0x3 with magnitude 2^63 (0x80 0x00 0x00 0x00 0x00 0x00 0x00 0x00), which represents -2^63 = i64::MIN
+        // Must not panic with debug integer negation overflow!
+        let min_neg_int = [0x38, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut r3 = IonReader::new(&min_neg_int);
+        let val = r3.decode_value().expect("Should decode i64::MIN without negation panic");
+        assert_eq!(val, IonValue::Int(i64::MIN));
     }
 }

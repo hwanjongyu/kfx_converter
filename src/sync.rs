@@ -403,13 +403,17 @@ impl KindleSync {
             // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
-            use std::io::Write;
             let mut r = std::fs::File::open(src)?;
             let mut w = std::fs::File::create(dst)?;
             std::io::copy(&mut r, &mut w)?;
-            w.flush()?;
+            w.sync_all()?;
             drop(w);
             drop(r);
+            if let Some(parent) = dst.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
             // Brief settle delay to allow eMMC controller to commit blocks without SCSI reset
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -474,8 +478,13 @@ impl KindleSync {
             use std::io::Write;
             let mut f = std::fs::File::create(dst)?;
             f.write_all(data)?;
-            f.flush()?;
+            f.sync_all()?;
             drop(f);
+            if let Some(parent) = dst.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         Ok(())
