@@ -405,6 +405,14 @@ impl KindleSync {
             return Err(SyncError::DeviceNotFound(docs_dir));
         }
 
+        // Pre-flight check: ensure storage is not mounted read-only from previous unclean unmounts
+        if let Ok(metadata) = docs_dir.metadata()
+            && metadata.permissions().readonly() {
+                return Err(SyncError::SecurityViolation(
+                    "Kindle storage is mounted read-only (likely due to an unclean USB disconnect). Please reconnect the Kindle USB cable.".to_string(),
+                ));
+            }
+
         let safe_title = kfx_source
             .file_stem()
             .and_then(|s| s.to_str())
@@ -528,10 +536,18 @@ impl KindleSync {
             // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
             Self::execute_gio_copy_with_timeout(src, dst, std::time::Duration::from_secs(60))?;
         } else {
-            use std::io::Write;
+            use std::io::{Read, Write};
             let mut r = std::fs::File::open(src)?;
             let mut w = std::fs::File::create(dst)?;
-            std::io::copy(&mut r, &mut w)?;
+            // Stream in bounded 64KB chunks to avoid overflowing Kindle USB gadget FIFO buffers
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = r.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                w.write_all(&buf[..n])?;
+            }
             w.flush()?;
             drop(w);
             drop(r);
@@ -802,5 +818,35 @@ mod tests {
         let scanned_after = KindleSync::scan_device_files(doc_root);
         assert_eq!(scanned_after.len(), 1);
         assert_eq!(scanned_after[0].name, "Story.mobi");
+    }
+
+    #[test]
+    fn test_no_direct_file_sync_in_sync_engine() {
+        // PERMANENT GUARD: Prohibit sync_data(), sync_all(), or fdatasync() in copy_file or write_bytes.
+        // Calling fsync/fdatasync on USB mass storage file handles triggers SCSI SYNCHRONIZE CACHE
+        // on Kindle eMMC, causing the fsg USB gadget driver to reset and drop the medium (0B).
+        let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sync.rs");
+        if let Ok(content) = std::fs::read_to_string(&source_path) {
+            // Locate copy_file and write_bytes function bodies
+            let copy_file_start = content.find("fn copy_file(").expect("fn copy_file found");
+            let copy_file_end = content[copy_file_start..].find("fn execute_gio_copy").expect("copy_file end found");
+            let copy_file_code = &content[copy_file_start..copy_file_start + copy_file_end];
+
+            assert!(
+                !copy_file_code.contains(".sync_data()") && !copy_file_code.contains(".sync_all()"),
+                "FATAL REGRESSION: copy_file MUST NOT call sync_data() or sync_all() on file handles! \
+                 This triggers Kindle USB gadget resets."
+            );
+
+            let write_bytes_start = content.find("fn write_bytes(").expect("fn write_bytes found");
+            let write_bytes_end = content[write_bytes_start..].find("#[cfg(test)]").expect("write_bytes end found");
+            let write_bytes_code = &content[write_bytes_start..write_bytes_start + write_bytes_end];
+
+            assert!(
+                !write_bytes_code.contains(".sync_data()") && !write_bytes_code.contains(".sync_all()"),
+                "FATAL REGRESSION: write_bytes MUST NOT call sync_data() or sync_all() on file handles! \
+                 This triggers Kindle USB gadget resets."
+            );
+        }
     }
 }

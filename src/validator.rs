@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use crate::container::KfxEntity;
 use crate::ion::{IonReader, IonValue};
-use crate::packager::{LocalSymbols, SINGLETON_ID};
+use crate::packager::{LocalSymbols, FIRST_LOCAL_SYMBOL_ID, SINGLETON_ID};
 use crate::symbols::symbol_name;
 
 /// Validation errors indicating broken referential integrity in a KFX container.
@@ -96,12 +96,12 @@ impl<'a> KfxPreflightValidator<'a> {
 
     /// Resolves a symbol ID to a human-readable name.
     pub fn resolve_symbol_name(&self, sym_id: u32) -> String {
-        if sym_id < 852 {
+        if sym_id < FIRST_LOCAL_SYMBOL_ID {
             if let Some(name) = symbol_name(sym_id as u64) {
                 return name.to_string();
             }
         } else if let Some(local_syms) = self.symbols {
-            let idx = (sym_id - 852) as usize;
+            let idx = (sym_id - FIRST_LOCAL_SYMBOL_ID) as usize;
             if idx < local_syms.names.len() {
                 return local_syms.names[idx].clone();
             }
@@ -300,7 +300,7 @@ impl<'a> KfxPreflightValidator<'a> {
                                 match fval {
                                     IonValue::String(raw_path) => {
                                         let target_sym = self.symbols.and_then(|syms| {
-                                            syms.names.iter().position(|s| s == raw_path).map(|pos| 852 + pos as u32)
+                                            syms.names.iter().position(|s| s == raw_path).map(|pos| FIRST_LOCAL_SYMBOL_ID + pos as u32)
                                         });
                                         if let Some(target_sym) = target_sym
                                             && !entity_map.contains_key(&(417, target_sym)) {

@@ -30,6 +30,14 @@ pub enum PackagerError {
     Validation(#[from] crate::validator::ValidationError),
 }
 
+/// Amazon KFX Yellowjacket Specification Ground Truth:
+/// The shared `YJ_symbols` table version 10 defines exactly 851 symbols (SIDs 1..=851).
+/// All document-local symbols (cover, content images, styles, section names) MUST begin at SID 852.
+/// Diverging from 851 breaks the local symbol table offset and causes Kindle to display
+/// completely incorrect images (e.g. swapping chapter illustrations with the book cover).
+pub const AMAZON_YJ_SYMBOLS_MAX_ID: u32 = 851;
+pub const FIRST_LOCAL_SYMBOL_ID: u32 = AMAZON_YJ_SYMBOLS_MAX_ID + 1;
+
 /// Dynamic local symbol manager for KFX documents.
 /// Per Yellowjacket standard, shared YJ_symbols end at 851,
 /// and local document symbols begin strictly at SID 852.
@@ -44,9 +52,9 @@ impl LocalSymbols {
 
     pub fn intern(&mut self, name: &str) -> u32 {
         if let Some(pos) = self.names.iter().position(|s| s == name) {
-            852 + pos as u32
+            FIRST_LOCAL_SYMBOL_ID + pos as u32
         } else {
-            let id = 852 + self.names.len() as u32;
+            let id = FIRST_LOCAL_SYMBOL_ID + self.names.len() as u32;
             self.names.push(name.to_string());
             id
         }
@@ -56,7 +64,7 @@ impl LocalSymbols {
         let import_entry = IonValue::Struct(vec![
             (4, IonValue::String("YJ_symbols".to_string())), // $4 = name
             (5, IonValue::Int(10)),                         // $5 = version
-            (8, IonValue::Int(851)),                        // $8 = max_id in YJ_symbols shared table (Amazon KFX specification: max_id = 851)
+            (8, IonValue::Int(AMAZON_YJ_SYMBOLS_MAX_ID as i64)), // $8 = max_id in YJ_symbols shared table (Amazon KFX specification: max_id = 851)
         ]);
         let sym_values: Vec<IonValue> = self
             .names
@@ -64,7 +72,7 @@ impl LocalSymbols {
             .cloned()
             .map(IonValue::String)
             .collect();
-        let max_sid = 851 + self.names.len() as i64;
+        let max_sid = AMAZON_YJ_SYMBOLS_MAX_ID as i64 + self.names.len() as i64;
         let symtab_struct = IonValue::Struct(vec![
             (8, IonValue::Int(max_sid)),             // $8 = max_id of this document symbol table
             (6, IonValue::List(vec![import_entry])), // $6 = imports
@@ -262,7 +270,7 @@ impl<'a> KfxPackager<'a> {
             asin,
             book_id,
             entities: Vec::new(),
-            next_eid: 852,
+            next_eid: FIRST_LOCAL_SYMBOL_ID,
         }
     }
 
@@ -1647,7 +1655,7 @@ impl<'a> KfxPackager<'a> {
             (sym_sections, IonValue::List(section_sym_vals)),
         ]);
 
-        let max_sym = 852 + symbols.names.len() as u32;
+        let max_sym = FIRST_LOCAL_SYMBOL_ID + symbols.names.len() as u32;
         let max_id = (max_sym.max(self.next_eid) + 1) as i64;
 
         let doc_fields = vec![
@@ -2619,6 +2627,162 @@ mod tests {
         } else {
             panic!("expected struct for symbol table");
         }
+    }
+
+    #[test]
+    fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
+        use image::{ImageBuffer, Rgb};
+
+        // Create 3 distinct images in memory: Cover (60x80), Ch1 (30x30), Ch2 (40x40)
+        let make_png = |w: u32, h: u32| -> Vec<u8> {
+            let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w, h);
+            let mut bytes = Cursor::new(Vec::new());
+            img.write_to(&mut bytes, image::ImageFormat::Png).expect("Encode test png");
+            bytes.into_inner()
+        };
+
+        let cover_png = make_png(60, 80);
+        let ch1_png = make_png(30, 30);
+        let ch2_png = make_png(40, 40);
+
+        let mut book = BookIR::default();
+        book.metadata.title = "Multi-Image Ground Truth Guard".to_string();
+        book.metadata.cover_image_id = Some("cover_res".to_string());
+
+        book.resources.insert(
+            "cover_res".to_string(),
+            crate::ir::ResourceAsset {
+                id: "cover_res".to_string(),
+                mime_type: "image/png".to_string(),
+                data: cover_png,
+            },
+        );
+        book.resources.insert(
+            "ch1_res".to_string(),
+            crate::ir::ResourceAsset {
+                id: "ch1_res".to_string(),
+                mime_type: "image/png".to_string(),
+                data: ch1_png,
+            },
+        );
+        book.resources.insert(
+            "ch2_res".to_string(),
+            crate::ir::ResourceAsset {
+                id: "ch2_res".to_string(),
+                mime_type: "image/png".to_string(),
+                data: ch2_png,
+            },
+        );
+
+        book.sections.push(Section {
+            id: "sec_ch1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Text in Chapter 1".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                },
+                Block::Image {
+                    id: "img_ch1".to_string(),
+                    resource_id: "ch1_res".to_string(),
+                    alt: Some("Illustration 1".to_string()),
+                    width: None,
+                    height: None,
+                },
+            ],
+        });
+
+        book.sections.push(Section {
+            id: "sec_ch2".to_string(),
+            title: "Chapter 2".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "p2".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Text in Chapter 2".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                },
+                Block::Image {
+                    id: "img_ch2".to_string(),
+                    resource_id: "ch2_res".to_string(),
+                    alt: Some("Illustration 2".to_string()),
+                    width: None,
+                    height: None,
+                },
+            ],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        packager.package(&mut buffer).expect("Packaging multi-image book failed");
+
+        // 1. Verify Ground Truth Symbol Offsets
+        assert_eq!(AMAZON_YJ_SYMBOLS_MAX_ID, 851, "Amazon Yellowjacket max_id MUST be 851");
+        assert_eq!(FIRST_LOCAL_SYMBOL_ID, 852, "First local symbol MUST be 852");
+
+        // 2. Locate Storylines (SYM_STORYLINE = 259)
+        let sym_storyline = SYM_STORYLINE;
+        let storylines: Vec<&KfxEntity> = packager
+            .entities
+            .iter()
+            .filter(|e| e.chunk_type == sym_storyline)
+            .collect();
+        assert!(storylines.len() >= 2, "Expected at least 2 storyline entities");
+
+        // Parse each storyline and extract any sym_resource_name (175) symbols referenced
+        let mut chapter_image_sids = Vec::new();
+        for sl in &storylines {
+            let mut reader = crate::ion::IonReader::new(&sl.data);
+            if let Ok(vals) = reader.decode_all() {
+                for val in vals {
+                    fn find_res_sym(v: &crate::ion::IonValue, out: &mut Vec<u32>) {
+                        match v {
+                            crate::ion::IonValue::Struct(fields) => {
+                                for (k, val) in fields {
+                                    if *k == 175 { // resource_name
+                                        if let crate::ion::IonValue::Symbol(s) = val {
+                                            out.push(*s);
+                                        }
+                                    } else {
+                                        find_res_sym(val, out);
+                                    }
+                                }
+                            }
+                            crate::ion::IonValue::List(items) => {
+                                for it in items {
+                                    find_res_sym(it, out);
+                                }
+                            }
+                            crate::ion::IonValue::Annotated(_, inner) => find_res_sym(inner, out),
+                            _ => {}
+                        }
+                    }
+                    find_res_sym(&val, &mut chapter_image_sids);
+                }
+            }
+        }
+
+        // Verify that 2 chapter images were referenced
+        assert_eq!(chapter_image_sids.len(), 2, "Expected exactly 2 image references across chapters");
+        let ch1_sid = chapter_image_sids[0];
+        let ch2_sid = chapter_image_sids[1];
+
+        // Crucial Invariant: The cover resource SID must NOT match Chapter 1 or Chapter 2 image SIDs!
+        assert_ne!(ch1_sid, ch2_sid, "Chapter 1 and Chapter 2 must have distinct image SIDs");
+        assert!(ch1_sid >= FIRST_LOCAL_SYMBOL_ID, "Image SID must be in local symbol range");
+        assert!(ch2_sid >= FIRST_LOCAL_SYMBOL_ID, "Image SID must be in local symbol range");
     }
 
     #[test]
