@@ -1344,6 +1344,54 @@ impl KindleStudio {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.select_unconverted_only(cx);
                                     })),
+                            )
+                            .child(
+                                div()
+                                    .w(px(1.0))
+                                    .h(px(16.0))
+                                    .bg(Theme::border())
+                            )
+                            .child(
+                                div()
+                                    .id("folder_toggle_content_type")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(Theme::bg_card_hover())
+                                    .border_1()
+                                    .border_color(Theme::border())
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::text_primary())
+                                    .child(format!("Format: {}", self.settings.content_type))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings.content_type = if this.settings.content_type == "PDOC" {
+                                            "EBOK".into()
+                                        } else {
+                                            "PDOC".into()
+                                        };
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("folder_toggle_word_wise")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(if self.settings.word_wise { Theme::accent_purple() } else { Theme::bg_card_hover() })
+                                    .border_1()
+                                    .border_color(if self.settings.word_wise { Theme::accent_purple() } else { Theme::border() })
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if self.settings.word_wise { Theme::text_primary() } else { Theme::text_muted() })
+                                    .child(if self.settings.word_wise { "🟣 Word Wise ON" } else { "⚪ Word Wise OFF" })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings.word_wise = !this.settings.word_wise;
+                                        cx.notify();
+                                    })),
                             ),
                     )
                     .child(
