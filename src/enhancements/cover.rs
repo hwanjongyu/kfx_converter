@@ -11,6 +11,8 @@ use thiserror::Error;
 pub const KINDLE_THUMB_MAX_WIDTH: u32 = 440;
 pub const KINDLE_THUMB_MAX_HEIGHT: u64 = 660;
 pub const KINDLE_MAX_CONTENT_IMAGE_DIM: u32 = 2560;
+pub const MAX_SAFE_IMAGE_DIMENSION: u32 = 8192;
+pub const MAX_SAFE_IMAGE_PIXELS: u64 = 30_000_000;
 
 #[derive(Error, Debug)]
 pub enum CoverError {
@@ -20,6 +22,8 @@ pub enum CoverError {
     Io(#[from] std::io::Error),
     #[error("Unsupported or empty image data")]
     EmptyData,
+    #[error("Image dimensions ({0}x{1}) exceed safe limits")]
+    ImageTooLarge(u32, u32),
 }
 
 pub struct CoverOptimizer;
@@ -35,6 +39,16 @@ impl CoverOptimizer {
 
         let is_jpeg = data.starts_with(b"\xff\xd8");
         let is_progressive_jpeg = is_jpeg && data.windows(2).any(|w| w == [0xff, 0xc2]);
+
+        // Pre-flight dimension check to prevent pixel flood decompression bombs (CWE-400)
+        if let Some((w, h)) = Self::get_image_dimensions(data) {
+            if w > MAX_SAFE_IMAGE_DIMENSION
+                || h > MAX_SAFE_IMAGE_DIMENSION
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
+            {
+                return Err(CoverError::ImageTooLarge(w, h));
+            }
+        }
 
         let img = image::load_from_memory(data)?;
         let (w, h) = (img.width(), img.height());
@@ -79,6 +93,16 @@ impl CoverOptimizer {
     pub fn optimize_thumbnail(data: &[u8]) -> Result<Vec<u8>, CoverError> {
         if data.is_empty() {
             return Err(CoverError::EmptyData);
+        }
+
+        // Pre-flight dimension check to prevent pixel flood decompression bombs (CWE-400)
+        if let Some((w, h)) = Self::get_image_dimensions(data) {
+            if w > MAX_SAFE_IMAGE_DIMENSION
+                || h > MAX_SAFE_IMAGE_DIMENSION
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
+            {
+                return Err(CoverError::ImageTooLarge(w, h));
+            }
         }
 
         let img = image::load_from_memory(data)?;
@@ -194,5 +218,18 @@ mod tests {
         // Verify converted to baseline JPEG (has SOF0 [0xFF, 0xC0] and NO SOF2 [0xFF, 0xC2])
         assert!(baseline_res.windows(2).any(|w| w == [0xff, 0xc0]));
         assert!(!baseline_res.windows(2).any(|w| w == [0xff, 0xc2]));
+    }
+
+    #[test]
+    fn test_image_bomb_dimension_rejection() {
+        // Minimal valid PNG (65 bytes) with 10,000 x 10,000 dimensions
+        let png_bytes: [u8; 65] = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 39, 16, 0, 0,
+            39, 16, 8, 0, 0, 0, 0, 159, 37, 61, 251, 0, 0, 0, 8, 73, 68, 65, 84, 120, 156, 3,
+            0, 0, 0, 0, 1, 72, 6, 137, 210, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+
+        let res = CoverOptimizer::optimize_content_image(&png_bytes, 2560);
+        assert!(matches!(res, Err(CoverError::ImageTooLarge(10000, 10000))));
     }
 }

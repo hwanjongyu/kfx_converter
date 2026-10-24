@@ -58,13 +58,13 @@ Because Yellowjacket pre-allocates structures for loaded chapter chunks:
 Yellowjacket utilizes string interning via the Amazon Ion symbol protocol to minimize file size and avoid repetitive string comparisons in resource-constrained CPU environments.
 
 ### 3.1 Standard Shared Symbols (`$0` – `$851`)
-Every Kindle e-reader running Enhanced Typesetting maintains a shared, immutable symbol dictionary named `YJ_symbols` (version `10`, imported with `max_id = 842`).
-In the Amazon Ion binary specification, symbols `$1`–`$9` are reserved system symbols. The 842 imported symbols in `YJ_symbols` occupy SIDs `$10`–`$851`.
+Every Kindle e-reader running Enhanced Typesetting maintains a shared, immutable symbol dictionary named `YJ_symbols` (version `10`, imported with `max_id = 851`).
+In the Amazon Ion binary specification, symbols `$1`–`$9` are reserved system symbols. The imported symbols in `YJ_symbols` occupy SIDs `$1`–`$851`.
 
 ### 3.2 Document-Local Symbols (`$852+`)
 Any identifier, anchor, CSS class, or section name unique to an individual book is allocated dynamically as a document-local symbol:
-- Local symbols **must strictly start at SID `852`** ($9 \text{ system} + 842 \text{ imported} + 1$).
-- Setting `max_id = 842` in the `$ion_symbol_table` import entry guarantees local symbols align exactly at `$852` without an off-by-9 shift.
+- Local symbols **must strictly start at SID `852`** (`AMAZON_YJ_SYMBOLS_MAX_ID = 851`).
+- Setting `max_id = 851` in the `$ion_symbol_table` import entry guarantees local symbols align exactly at `$852` without an off-by-9 shift (which previously caused cover and chapter images to swap).
 - These symbols are serialized into an Ion symbol table chunk annotated with Ion Symbol `3` (`$ion_symbol_table`) and referenced by ID throughout the entity payloads.
 
 ```
@@ -320,7 +320,7 @@ In East Asian typography (Japanese, Chinese, Korean), phonetic glosses (furigana
 
 ```ion
 $157 /* style */: {
-    $4 /* name */: $style_ruby,
+    $173 /* style_name */: $style_ruby,
     $765 /* ruby_text_align */: $773 /* space_around */,
     $766 /* ruby_base_align */: $773 /* space_around */,
     $770 /* ruby_base_edge_align */: $771 /* separate */

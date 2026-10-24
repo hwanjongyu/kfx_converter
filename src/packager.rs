@@ -358,19 +358,20 @@ impl<'a> KfxPackager<'a> {
         // 7. Build metadata ($258) with synchronized reading_orders
         self.build_metadata(&section_data);
 
-        // 8. Build document data ($538) with Decimal font_size & line_height
-        self.build_document_data(&section_data, &symbols);
-
-        // 6. Build Kindle OS position maps ($609, $264, $265, $550, $621)
-        self.build_position_maps(&section_data);
-
-        // 7. Build resource entities ($164 external_resource and $417 bcRawMedia)
+        // 8. Build resource entities ($164 external_resource and $417 bcRawMedia)
+        // Must be built before document_data so all media symbols and EIDs are interned
         self.build_resources(&mut symbols);
 
-        // 8. Build container_entity_map ($419) annotated entity with entity_dependencies ($253)
+        // 9. Build Kindle OS position maps ($609, $264, $265, $550, $621)
+        self.build_position_maps(&section_data);
+
+        // 10. Build document data ($538) with Decimal font_size & line_height
+        self.build_document_data(&section_data, &symbols);
+
+        // 11. Build container_entity_map ($419) annotated entity with entity_dependencies ($253)
         self.build_container_entity_map(&section_data, &mut symbols);
 
-        // 9. Build $ion_symbol_table document symbols data
+        // 12. Build $ion_symbol_table document symbols data
         let doc_sym_data = symbols.to_ion_symbol_table();
 
         // 9. Pre-flight reference validation to ensure 100% referential integrity

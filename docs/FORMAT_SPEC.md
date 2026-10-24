@@ -26,7 +26,7 @@ Immediately following the 18-byte header is the index table. It contains an arra
 | :--- | :--- | :--- | :--- | :--- |
 | `0x00..0x03` | 4 | `u32` (LE) | `entity_id` | Document-unique entity ID ($852+ or 348 for singleton) |
 | `0x04..0x07` | 4 | `u32` (LE) | `chunk_type` | Yellowjacket Symbol ID representing entity type |
-| `0x08..0x0F` | 8 | `u64` (LE) | `offset` | Absolute byte offset to entity payload from file start |
+| `0x08..0x0F` | 8 | `u64` (LE) | `offset` | Byte offset to entity payload relative to start of payload segment (`header_length`) |
 | `0x10..0x17` | 8 | `u64` (LE) | `length` | Byte length of the entity payload (including ENTY header) |
 
 ---
@@ -347,7 +347,7 @@ Every book container registers a global `style_ruby` entity configuring ruby ali
 
 ```ion
 $157 /* style */: {
-    $4 /* name */: $style_ruby,
+    $173 /* style_name */: $style_ruby,
     $765 /* ruby_text_align */: $773 /* space_around */,
     $766 /* ruby_base_align */: $773 /* space_around */,
     $770 /* ruby_base_edge_align */: $771 /* separate */

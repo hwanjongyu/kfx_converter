@@ -70,34 +70,69 @@ impl KindleStudio {
     }
 
     pub fn eject_device(&mut self, cx: &mut Context<Self>) {
-        match super::state::eject_kindle_device(&self.device) {
-            Ok(_) => {
-                self.status_message = Some(("Kindle device safely ejected.".into(), false));
-                self.device = DeviceStatus::default();
-                self.files.clear();
-            }
-            Err(err) => {
-                self.status_message = Some((format!("Eject failed: {}", err), true));
-            }
-        }
+        let device = self.device.clone();
+        self.status_message = Some(("Ejecting Kindle device...".into(), false));
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move { super::state::eject_kindle_device(&device) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(_) => {
+                        this.status_message = Some(("Kindle device safely ejected.".into(), false));
+                        this.device = DeviceStatus::default();
+                        this.files.clear();
+                    }
+                    Err(err) => {
+                        this.status_message = Some((format!("Eject failed: {}", err), true));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn delete_file(&mut self, file_name: &str, cx: &mut Context<Self>) {
         if let Some(pos) = self.files.iter().position(|f| f.name == file_name) {
-            let file = &self.files[pos];
-            match super::state::delete_device_file(file) {
-                Ok(_) => {
-                    let msg = format!("'{}' book and cache deleted.", file_name);
-                    self.files.remove(pos);
-                    self.status_message = Some((msg, false));
-                    self.device = detect_kindle_device();
-                }
-                Err(err) => {
-                    self.status_message = Some((err, true));
-                }
-            }
+            let file = self.files[pos].clone();
+            let file_name_owned = file_name.to_string();
+            self.status_message = Some((format!("Deleting '{}'...", file_name), false));
             cx.notify();
+
+            cx.spawn(async move |this, cx| {
+                let (del_res, new_device) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let res = super::state::delete_device_file(&file);
+                        let dev = detect_kindle_device();
+                        (res, dev)
+                    })
+                    .await;
+
+                this.update(cx, |this, cx| {
+                    match del_res {
+                        Ok(_) => {
+                            if let Some(idx) = this.files.iter().position(|f| f.name == file_name_owned) {
+                                this.files.remove(idx);
+                            }
+                            this.status_message = Some((format!("'{}' book and cache deleted.", file_name_owned), false));
+                            this.device = new_device;
+                        }
+                        Err(err) => {
+                            this.status_message = Some((err, true));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         }
     }
 
@@ -284,12 +319,13 @@ impl KindleStudio {
                                         item.status = LocalEpubStatus::OnDevice;
                                         let kfx_name = r.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                                         if !this.files.iter().any(|f| f.name == kfx_name) {
+                                            let dev_path = this.device.path.as_ref().map(|p| p.join(&kfx_name)).unwrap_or_else(|| r.output_path.clone());
                                             this.files.push(kfx_converter::KindleBookFile {
                                                 name: kfx_name,
                                                 format: "KFX".into(),
                                                 size_formatted: "Synced".into(),
                                                 modified: "Just now".into(),
-                                                full_path: r.output_path.clone(),
+                                                full_path: dev_path,
                                                 has_word_wise: true,
                                                 has_sdr: true,
                                             });
@@ -405,12 +441,13 @@ impl KindleStudio {
                             if res.synced_to_device {
                                 let kfx_name = res.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                                 if !this.files.iter().any(|f| f.name == kfx_name) {
+                                    let dev_path = this.device.path.as_ref().map(|p| p.join(&kfx_name)).unwrap_or_else(|| res.output_path.clone());
                                     this.files.push(kfx_converter::KindleBookFile {
                                         name: kfx_name,
                                         format: "KFX".into(),
                                         size_formatted: "Synced".into(),
                                         modified: "Just now".into(),
-                                        full_path: res.output_path.clone(),
+                                        full_path: dev_path,
                                         has_word_wise: true,
                                         has_sdr: true,
                                     });

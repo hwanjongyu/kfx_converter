@@ -265,12 +265,31 @@ impl KindleSync {
         {
             let root_str = root.to_string_lossy();
             if root_str.contains("/gvfs/mtp:") {
-                let _ = Command::new("gio").args(["mount", "-u", &root_str]).status();
+                let mtp_mount = if let Some(idx) = root_str.find("/Internal Storage") {
+                    &root_str[..idx]
+                } else {
+                    &root_str
+                };
+                let _ = Command::new("gio").args(["mount", "-u", mtp_mount]).status();
             } else {
                 let status = Command::new("gio").args(["mount", "-u"]).arg(root).status();
                 if status.is_err() || !status.unwrap().success() {
-                    let _ = Command::new("udisksctl").args(["unmount", "-p"]).arg(root).status();
-                    let _ = Command::new("umount").arg(root).status();
+                    let block_dev = std::fs::read_to_string("/proc/mounts").ok().and_then(|mounts| {
+                        for line in mounts.lines() {
+                            let mut parts = line.split_whitespace();
+                            if let (Some(dev), Some(mount)) = (parts.next(), parts.next()) {
+                                if mount == root.to_str().unwrap_or_default() {
+                                    return Some(dev.to_string());
+                                }
+                            }
+                        }
+                        None
+                    });
+                    if let Some(dev) = block_dev {
+                        let _ = Command::new("udisksctl").args(["unmount", "-b", &dev]).status();
+                    } else {
+                        let _ = Command::new("umount").arg(root).status();
+                    }
                 }
             }
         }
@@ -538,7 +557,8 @@ impl KindleSync {
         } else {
             use std::io::{Read, Write};
             let mut r = std::fs::File::open(src)?;
-            let mut w = std::fs::File::create(dst)?;
+            let part_dst = PathBuf::from(format!("{}.part", dst.display()));
+            let mut w = std::fs::File::create(&part_dst)?;
             // Stream in bounded 64KB chunks to avoid overflowing Kindle USB gadget FIFO buffers
             let mut buf = [0u8; 64 * 1024];
             loop {
@@ -551,6 +571,7 @@ impl KindleSync {
             w.flush()?;
             drop(w);
             drop(r);
+            std::fs::rename(&part_dst, dst)?;
             // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
@@ -613,10 +634,12 @@ impl KindleSync {
             Self::copy_file(tmp.path(), dst)?;
         } else {
             use std::io::Write;
-            let mut f = std::fs::File::create(dst)?;
+            let part_dst = PathBuf::from(format!("{}.part", dst.display()));
+            let mut f = std::fs::File::create(&part_dst)?;
             f.write_all(data)?;
             f.flush()?;
             drop(f);
+            std::fs::rename(&part_dst, dst)?;
             // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
             std::thread::sleep(std::time::Duration::from_millis(150));
         }

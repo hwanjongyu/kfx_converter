@@ -318,6 +318,7 @@ impl EpubReader {
         let mut xml_reader = XmlReader::from_str(opf_xml);
         let mut buf = Vec::new();
         let mut current_tag = String::new();
+        let mut current_text = String::new();
         let mut current_title_id: Option<String> = None;
         let mut current_title_type: Option<String> = None;
         let mut current_identifier_id: Option<String> = None;
@@ -326,6 +327,7 @@ impl EpubReader {
         loop {
             match xml_reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                    current_text.clear();
                     let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
 
                     if local == "package" {
@@ -456,7 +458,29 @@ impl EpubReader {
                     }
                 }
                 Ok(Event::Text(ref e)) => {
-                    let text = e.unescape().unwrap_or_default().trim().to_string();
+                    let decoded = match e.unescape() {
+                        Ok(s) => s.to_string(),
+                        Err(_) => {
+                            let raw = String::from_utf8_lossy(e.as_ref()).to_string();
+                            raw.replace("&amp;", "&")
+                                .replace("&lt;", "<")
+                                .replace("&gt;", ">")
+                                .replace("&quot;", "\"")
+                                .replace("&apos;", "'")
+                                .replace("&mdash;", "—")
+                                .replace("&ndash;", "–")
+                                .replace("&hellip;", "…")
+                                .replace("&lsquo;", "‘")
+                                .replace("&rsquo;", "’")
+                                .replace("&ldquo;", "“")
+                                .replace("&rdquo;", "”")
+                                .replace("&nbsp;", " ")
+                        }
+                    };
+                    current_text.push_str(&decoded);
+                }
+                Ok(Event::End(_)) => {
+                    let text = current_text.trim().to_string();
                     if !text.is_empty() {
                         match current_tag.as_str() {
                             "title" => {
@@ -493,9 +517,8 @@ impl EpubReader {
                             _ => {}
                         }
                     }
-                }
-                Ok(Event::End(_)) => {
                     current_tag.clear();
+                    current_text.clear();
                     current_title_id = None;
                     current_title_type = None;
                     current_identifier_id = None;
@@ -2796,6 +2819,30 @@ mod tests {
 </package>"##;
         let (metadata, _, _) = EpubReader::parse_opf(opf).expect("parse_opf should succeed");
         assert_eq!(metadata.title, "The Deep History of Ourselves");
+    }
+
+    #[test]
+    fn test_parse_opf_xml_entities_in_title_and_description() {
+        let opf = r##"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>War &amp; Peace &mdash; Complete Edition</dc:title>
+        <dc:description>A classic tale of love &amp; war.</dc:description>
+        <dc:creator>Leo &amp; Sofia Tolstoy</dc:creator>
+        <dc:language>en</dc:language>
+        <dc:identifier>9780000000000</dc:identifier>
+    </metadata>
+    <manifest>
+        <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    </manifest>
+    <spine>
+        <itemref idref="c1"/>
+    </spine>
+</package>"##;
+        let (metadata, _, _) = EpubReader::parse_opf(opf).expect("parse_opf should succeed");
+        assert_eq!(metadata.title, "War & Peace — Complete Edition");
+        assert_eq!(metadata.description.as_deref(), Some("A classic tale of love & war."));
+        assert!(metadata.creators.contains(&"Leo & Sofia Tolstoy".to_string()));
     }
 }
 
