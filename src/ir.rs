@@ -375,6 +375,35 @@ impl BookIR {
                 })
             })
     }
+
+    /// Ensures that if a cover image resource exists, the book has a dedicated cover section at index 0.
+    /// This guarantees that section indexing and Yellowjacket PID maps ($265) are deterministic
+    /// across both `KfxPackager` and `WordWiseBuilder`.
+    pub fn ensure_cover_section(&mut self) {
+        if let Some(cover_res_id) = self.resolve_cover_resource_id() {
+            let first_is_cover = self.sections.first().map(|s| {
+                s.blocks.iter().any(|b| match b {
+                    Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                    _ => false,
+                })
+            }).unwrap_or(false);
+
+            if !first_is_cover {
+                let cover_section = Section {
+                    id: "cover".to_string(),
+                    title: "Cover".to_string(),
+                    blocks: vec![Block::Image {
+                        id: "cover_img_block".to_string(),
+                        resource_id: cover_res_id,
+                        alt: Some("Cover".to_string()),
+                        width: None,
+                        height: None,
+                    }],
+                };
+                self.sections.insert(0, cover_section);
+            }
+        }
+    }
 }
 
 fn extract_anchors_from_block(block: &Block) -> Vec<String> {
@@ -581,6 +610,44 @@ mod tests {
         );
         // Must reject the non-image cover_xhtml_doc and fall back to cover_img
         assert_eq!(book.resolve_cover_resource_id(), Some("cover_img".to_string()));
+    }
+
+    #[test]
+    fn test_ensure_cover_section_idempotent() {
+        let mut book = BookIR::default();
+        book.resources.insert(
+            "cover.jpg".to_string(),
+            crate::ir::ResourceAsset {
+                id: "cover.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xE0],
+            },
+        );
+        book.sections.push(Section {
+            id: "chapter1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Hello world".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }],
+        });
+
+        assert_eq!(book.sections.len(), 1);
+        book.ensure_cover_section();
+        assert_eq!(book.sections.len(), 2);
+        assert_eq!(book.sections[0].id, "cover");
+        assert_eq!(book.sections[1].id, "chapter1");
+
+        // Calling it again should be idempotent
+        book.ensure_cover_section();
+        assert_eq!(book.sections.len(), 2);
     }
 }
 

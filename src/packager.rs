@@ -325,38 +325,16 @@ impl<'a> KfxPackager<'a> {
         let book_id = generate_book_id(&seed);
 
         let mut temp_book = BookIR {
+            metadata: book.metadata.clone(),
+            resources: book.resources.clone(),
             sections: book.sections.clone(),
             toc: book.toc.clone(),
             page_list: book.page_list.clone(),
             ..Default::default()
         };
         temp_book.fragment_large_sections(DEFAULT_MAX_SECTION_CHARS, DEFAULT_MAX_SECTION_BLOCKS);
-        let mut sections = temp_book.sections;
-
-        // Ensure book has a dedicated cover section at index 0 if cover image exists
-        if let Some(cover_res_id) = book.resolve_cover_resource_id() {
-            let first_is_cover = sections.first().map(|s| {
-                s.blocks.iter().any(|b| match b {
-                    Block::Image { resource_id, .. } => resource_id == &cover_res_id,
-                    _ => false,
-                })
-            }).unwrap_or(false);
-
-            if !first_is_cover {
-                let cover_section = Section {
-                    id: "cover".to_string(),
-                    title: "Cover".to_string(),
-                    blocks: vec![Block::Image {
-                        id: "cover_img_block".to_string(),
-                        resource_id: cover_res_id,
-                        alt: Some("Cover".to_string()),
-                        width: None,
-                        height: None,
-                    }],
-                };
-                sections.insert(0, cover_section);
-            }
-        }
+        temp_book.ensure_cover_section();
+        let sections = temp_book.sections;
 
         let toc = temp_book.toc;
         let page_list = temp_book.page_list;

@@ -172,6 +172,8 @@ impl WordWiseBuilder {
         let initial_count = self.glosses.len();
 
         let mut temp_book = crate::ir::BookIR {
+            metadata: book.metadata.clone(),
+            resources: book.resources.clone(),
             sections: book.sections.clone(),
             ..Default::default()
         };
@@ -179,6 +181,7 @@ impl WordWiseBuilder {
             crate::ir::DEFAULT_MAX_SECTION_CHARS,
             crate::ir::DEFAULT_MAX_SECTION_BLOCKS,
         );
+        temp_book.ensure_cover_section();
 
         let mut pid = 0usize;
 
@@ -504,5 +507,65 @@ mod tests {
         let count = builder.generate_from_book(&ir);
         // "abstruse's" has 's stripped by dictionary and matches abstruse
         assert!(count >= 2, "Expected at least 2 glosses, got {}", count);
+    }
+
+    #[test]
+    fn test_word_wise_pid_matches_cover_section_offset() {
+        use crate::ir::{Block, BookIR, BookMetadata, Section, TextSpan};
+
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "cover.jpg".to_string(),
+            crate::ir::ResourceAsset {
+                id: "cover.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xE0],
+            },
+        );
+
+        let ir = BookIR {
+            metadata: BookMetadata::default(),
+            sections: vec![Section {
+                id: "sec1".to_string(),
+                title: "Chapter 1".to_string(),
+                blocks: vec![
+                    Block::Paragraph {
+                        id: "p1".to_string(),
+                        spans: vec![TextSpan {
+                            text: "The abstruse theorem.".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        }],
+                        style: None,
+                    },
+                ],
+            }],
+            resources,
+            toc: Vec::new(),
+            page_list: Vec::new(),
+            footnotes: std::collections::HashMap::new(),
+        };
+
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
+            .with_pacing(WordWisePacingConfig {
+                min_difficulty: 1,
+                target_difficulty: 5,
+                min_distance: 1,
+                max_glosses_per_window: 10,
+                window_size: 500,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 100,
+            });
+
+        let count = builder.generate_from_book(&ir);
+        assert_eq!(count, 2);
+        let gloss = builder.glosses.values().next().unwrap();
+        // Cover section: 1 (root) + 5 ("Cover") = 6 PIDs
+        // Chapter 1: 1 (root) = PID 7
+        // "The " = 4 chars, so "abstruse" starts at offset 4 within block
+        // Expected start: 6 (cover) + 1 (root) + 4 ("The ") = 11
+        assert_eq!(gloss.start, 11, "Expected PID 11 with cover offset, got {}", gloss.start);
     }
 }

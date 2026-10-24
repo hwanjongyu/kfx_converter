@@ -395,19 +395,53 @@ impl KindleSync {
         files
     }
 
-    /// Deletes an e-book file and its companion `.sdr` directory from the device.
-    pub fn delete_book_file(full_path: &Path) -> Result<(), std::io::Error> {
+    /// Deletes an e-book file and its companion `.sdr` directory from the device safely.
+    ///
+    /// # Security Guardrails:
+    /// - Rejects non-ebook files (only allows .kfx, .azw3, .azw, .mobi, .epub, .pdf, .txt, .prc).
+    /// - If `allowed_root` is provided, ensures `full_path` is strictly contained within `allowed_root`.
+    /// - Verifies `.sdr` directory extension before recursive removal to prevent path traversal.
+    pub fn delete_book_file_safe(allowed_root: Option<&Path>, full_path: &Path) -> Result<(), std::io::Error> {
+        let ext = full_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        let allowed_exts = ["kfx", "azw3", "azw", "mobi", "epub", "pdf", "txt", "prc"];
+        if !allowed_exts.contains(&ext.as_str()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Refusing to delete non-ebook file {:?}", full_path),
+            ));
+        }
+
+        if let Some(root) = allowed_root {
+            if let (Ok(canon_root), Ok(canon_target)) = (root.canonicalize(), full_path.canonicalize()) {
+                if !canon_target.starts_with(&canon_root) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("Target path {:?} is outside allowed directory {:?}", full_path, root),
+                    ));
+                }
+            }
+        }
+
         if full_path.is_file() {
             std::fs::remove_file(full_path)?;
         }
         let file_stem = full_path.file_stem().unwrap_or_default().to_string_lossy();
         if let Some(parent) = full_path.parent() {
             let sdr_path = parent.join(format!("{}.sdr", file_stem));
-            if sdr_path.is_dir() {
+            if sdr_path.is_dir() && sdr_path.extension().and_then(|e| e.to_str()) == Some("sdr") {
                 let _ = std::fs::remove_dir_all(&sdr_path);
             }
         }
         Ok(())
+    }
+
+    /// Deletes an e-book file and its companion `.sdr` directory from the device.
+    pub fn delete_book_file(full_path: &Path) -> Result<(), std::io::Error> {
+        Self::delete_book_file_safe(None, full_path)
     }
 
     /// Synchronizes a converted KFX file, multi-identifier cover thumbnails, and optional sidecars to the Kindle.
@@ -1008,5 +1042,39 @@ mod tests {
                  This triggers Kindle USB gadget resets."
             );
         }
+    }
+
+    #[test]
+    fn test_delete_book_file_safe_guards() {
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        // 1. Valid ebook deletion
+        let book_kfx = docs.join("SafeBook.kfx");
+        let book_sdr = docs.join("SafeBook.sdr");
+        std::fs::write(&book_kfx, b"dummy kfx").unwrap();
+        std::fs::create_dir_all(&book_sdr).unwrap();
+        std::fs::write(book_sdr.join("cache.bin"), b"cache").unwrap();
+
+        assert!(KindleSync::delete_book_file_safe(Some(&docs), &book_kfx).is_ok());
+        assert!(!book_kfx.exists());
+        assert!(!book_sdr.exists());
+
+        // 2. Reject non-ebook files (e.g. .rs or .sh)
+        let script = docs.join("run.sh");
+        std::fs::write(&script, b"echo hello").unwrap();
+        let res = KindleSync::delete_book_file_safe(Some(&docs), &script);
+        assert!(res.is_err());
+        assert!(script.exists()); // must not be deleted
+
+        // 3. Reject file outside allowed_root
+        let outside_dir = temp.path().join("outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_book = outside_dir.join("Outside.kfx");
+        std::fs::write(&outside_book, b"outside").unwrap();
+        let res = KindleSync::delete_book_file_safe(Some(&docs), &outside_book);
+        assert!(res.is_err());
+        assert!(outside_book.exists()); // must not be deleted
     }
 }

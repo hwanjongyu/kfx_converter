@@ -190,7 +190,8 @@ pub fn load_device_files(device: &DeviceStatus) -> Vec<KindleFile> {
 
 /// Deletes an e-book file and its companion .sdr cache directory from the Kindle device.
 pub fn delete_device_file(file: &KindleFile) -> Result<(), String> {
-    kfx_converter::KindleSync::delete_book_file(&file.full_path)
+    let parent = file.full_path.parent();
+    kfx_converter::KindleSync::delete_book_file_safe(parent, &file.full_path)
         .map_err(|e| format!("Failed to delete book file: {}", e))
 }
 

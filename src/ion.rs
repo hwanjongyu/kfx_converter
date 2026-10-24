@@ -416,9 +416,9 @@ pub fn decode_varuint(buf: &[u8], offset: &mut usize) -> Result<u64, IonError> {
         let b = buf[*offset];
         *offset += 1;
         count += 1;
-        if count > 10 {
+        if count > 10 || (count == 10 && val > (u64::MAX >> 7)) {
             return Err(IonError::MalformedIon(format!(
-                "VarUInt sequence exceeded 10 bytes at offset {}",
+                "VarUInt sequence exceeded 10 bytes or overflowed at offset {}",
                 *offset
             )));
         }
@@ -445,11 +445,14 @@ pub fn decode_varint_slice(buf: &[u8], offset: &mut usize) -> Result<i64, IonErr
     let mut count = 1;
     while *offset < buf.len() {
         count += 1;
-        if count > 10 {
-            return Err(IonError::MalformedIon("VarInt exceeds 10 bytes".into()));
+        if count > 10 || (count == 10 && mag > (u64::MAX >> 7)) {
+            return Err(IonError::MalformedIon("VarInt exceeds 10 bytes or overflows".into()));
         }
         let b = buf[*offset];
         *offset += 1;
+        if mag > (u64::MAX >> 7) {
+            return Err(IonError::MalformedIon("VarInt shift overflow".into()));
+        }
         mag = (mag << 7) | ((b & 0x7F) as u64);
         if (b & 0x80) != 0 {
             if is_neg {
@@ -616,6 +619,12 @@ impl<'a> IonReader<'a> {
                 } else {
                     let mut cur = payload_start;
                     let exp = decode_varint_slice(self.buf, &mut cur)?;
+                    if cur > payload_end {
+                        return Err(IonError::MalformedIon(format!(
+                            "Decimal exponent VarInt extends beyond payload boundary: cur {} > end {}",
+                            cur, payload_end
+                        )));
+                    }
                     let mantissa_bytes = &self.buf[cur..payload_end];
                     if mantissa_bytes.len() > 8 {
                         return Err(IonError::MalformedIon("Mantissa length exceeds 8 bytes".into()));
@@ -1006,5 +1015,30 @@ mod tests {
         let mut offset = 0;
         let err = decode_varint_slice(&endless_varint, &mut offset).unwrap_err();
         assert!(matches!(err, IonError::MalformedIon(_)));
+    }
+
+    #[test]
+    fn test_ion_rejects_truncated_decimal_without_panic() {
+        // Decimal descriptor 0x51: declared content_len = 1 byte.
+        // VarInt exponent is multi-byte [0x01, 0x81] (2 bytes).
+        // decode_varint_slice advances cur to 3, but payload_end is 2.
+        // Must return Err instead of slicing out of bounds panic!
+        let malformed = [0x51, 0x01, 0x81];
+        let mut reader = IonReader::new(&malformed);
+        let err = reader.decode_value().unwrap_err();
+        assert!(matches!(err, IonError::MalformedIon(_)));
+    }
+
+    #[test]
+    fn test_ion_varuint_varint_no_shift_overflow_panic() {
+        // 10 bytes with all bits set (0x7F): would overflow u64 on 10th shift
+        let overflow_bytes = [0x7Fu8; 10];
+        let mut offset = 0;
+        let err_u = decode_varuint(&overflow_bytes, &mut offset).unwrap_err();
+        assert!(matches!(err_u, IonError::MalformedIon(_)));
+
+        let mut offset_s = 0;
+        let err_s = decode_varint_slice(&overflow_bytes, &mut offset_s).unwrap_err();
+        assert!(matches!(err_s, IonError::MalformedIon(_)));
     }
 }
