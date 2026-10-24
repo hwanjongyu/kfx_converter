@@ -5,7 +5,6 @@
 
 use std::io::{Seek, Write};
 use std::path::Path;
-use sha1::{Digest, Sha1};
 use thiserror::Error;
 
 use crate::container::{ContainerError, KfxContainer, KfxEntity};
@@ -18,7 +17,13 @@ use crate::symbols::{
     SYM_SECTION_POSITION_ID_MAP, SYM_STORYLINE, SYM_YJ_LOCATION_PID_MAP,
 };
 
-pub const SINGLETON_ID: u32 = 348; // $null in KFX symbol table
+pub mod accumulator;
+pub mod styles;
+pub mod symbols;
+
+pub use accumulator::*;
+pub use styles::*;
+pub use symbols::*;
 
 #[derive(Error, Debug)]
 pub enum PackagerError {
@@ -30,68 +35,6 @@ pub enum PackagerError {
     Validation(#[from] crate::validator::ValidationError),
 }
 
-/// Amazon KFX Yellowjacket Specification Ground Truth:
-/// The shared `YJ_symbols` table version 10 defines exactly 851 symbols (SIDs 1..=851).
-/// All document-local symbols (cover, content images, styles, section names) MUST begin at SID 852.
-/// Diverging from 851 breaks the local symbol table offset and causes Kindle to display
-/// completely incorrect images (e.g. swapping chapter illustrations with the book cover).
-pub const AMAZON_YJ_SYMBOLS_MAX_ID: u32 = 851;
-pub const FIRST_LOCAL_SYMBOL_ID: u32 = AMAZON_YJ_SYMBOLS_MAX_ID + 1;
-
-/// Dynamic local symbol manager for KFX documents.
-/// Per Yellowjacket standard, shared YJ_symbols end at 851,
-/// and local document symbols begin strictly at SID 852.
-pub struct LocalSymbols {
-    pub names: Vec<String>,
-}
-
-impl LocalSymbols {
-    pub fn new() -> Self {
-        Self { names: Vec::new() }
-    }
-
-    pub fn intern(&mut self, name: &str) -> u32 {
-        if let Some(pos) = self.names.iter().position(|s| s == name) {
-            FIRST_LOCAL_SYMBOL_ID + pos as u32
-        } else {
-            let id = FIRST_LOCAL_SYMBOL_ID + self.names.len() as u32;
-            self.names.push(name.to_string());
-            id
-        }
-    }
-
-    pub fn to_ion_symbol_table(&self) -> Vec<u8> {
-        let import_entry = IonValue::Struct(vec![
-            (4, IonValue::String("YJ_symbols".to_string())), // $4 = name
-            (5, IonValue::Int(10)),                         // $5 = version
-            (8, IonValue::Int(AMAZON_YJ_SYMBOLS_MAX_ID as i64)), // $8 = max_id in YJ_symbols shared table (Amazon KFX specification: max_id = 851)
-        ]);
-        let sym_values: Vec<IonValue> = self
-            .names
-            .iter()
-            .cloned()
-            .map(IonValue::String)
-            .collect();
-        let max_sid = AMAZON_YJ_SYMBOLS_MAX_ID as i64 + self.names.len() as i64;
-        let symtab_struct = IonValue::Struct(vec![
-            (8, IonValue::Int(max_sid)),             // $8 = max_id of this document symbol table
-            (6, IonValue::List(vec![import_entry])), // $6 = imports
-            (7, IonValue::List(sym_values)),         // $7 = symbols
-        ]);
-
-        let mut sym_writer = IonWriter::new();
-        sym_writer.write_bvm();
-        sym_writer.write_annotated_value(&[3], &symtab_struct); // Annotated with symbol 3 ($ion_symbol_table)
-        sym_writer.into_bytes()
-    }
-}
-
-impl Default for LocalSymbols {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 pub struct SectionPackData {
     pub raw_id: String,
     pub name: String,
@@ -99,195 +42,6 @@ pub struct SectionPackData {
     pub sec_eid: u32,
     pub story_sym_id: u32,
     pub block_info: Vec<(u32, usize)>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct StyleSymMap {
-    pub h1: u32,
-    pub h2: u32,
-    pub h3: u32,
-    pub p: u32,
-    pub p_first: u32,
-    pub align_center: u32,
-    pub align_right: u32,
-    pub align_justify: u32,
-    pub blockquote: u32,
-    pub bold: u32,
-    pub italic: u32,
-    pub underline: u32,
-    pub strikethrough: u32,
-    pub superscript: u32,
-    pub subscript: u32,
-    pub code: u32,
-    pub small_caps: u32,
-    pub dropcap: u32,
-    pub dropcap_2: u32,
-    pub uppercase: u32,
-    pub ruby: u32,
-    pub img: u32,
-    pub cover_img: u32,
-    pub h1_center: u32,
-    pub h2_center: u32,
-    pub h3_center: u32,
-    pub font_size_xs: u32,
-    pub font_size_sm: u32,
-    pub font_size_lg: u32,
-    pub font_size_xl: u32,
-    pub font_size_xxl: u32,
-    pub dropcap_l2: u32,
-    pub dropcap_l2_bold: u32,
-    pub dropcap_l2_c2: u32,
-    pub dropcap_l2_c2_bold: u32,
-    pub dropcap_l3_bold: u32,
-    pub dropcap_l3_c2_bold: u32,
-    pub hanging_indent: u32,
-}
-
-
-/// Extracts block-level text styling tokens that must cascade down to child spans
-/// (CSS inheritance emulation). Headings exclude font-size (their own style sets size).
-fn inherited_text_tokens(block_style: Option<&str>, include_size: bool) -> String {
-    let Some(st) = block_style else { return String::new() };
-    st.split_whitespace()
-        .filter(|t| {
-            matches!(*t, "italic" | "bold" | "small_caps" | "uppercase" | "underline")
-                || (include_size && t.starts_with("font_size_"))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Generates deterministic Amazon Content Repository container ID.
-/// Format: 'CR!' + 28 uppercase alphanumeric characters (31 chars total).
-pub fn generate_container_id(seed: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(seed.as_bytes());
-    let digest = hasher.finalize();
-
-    let mut state = u128::from_be_bytes(digest[..16].try_into().unwrap());
-    let chars = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let mut id_chars = Vec::with_capacity(28);
-
-    for _ in 0..28 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let idx = ((state >> 56) as usize) % chars.len();
-        id_chars.push(chars[idx]);
-    }
-
-    format!("CR!{}", String::from_utf8(id_chars).unwrap())
-}
-
-/// Generates deterministic 32-character uppercase hex personal-document ID.
-/// Keys sideloaded cover thumbnails on Kindle devices.
-pub fn generate_content_id(seed: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(seed.as_bytes());
-    let digest = hasher.finalize();
-
-    let mut hex = String::with_capacity(32);
-    for b in &digest[..16] {
-        hex.push_str(&format!("{:02X}", b));
-    }
-    hex
-}
-
-/// Resolves or deterministically generates an Amazon ASIN conforming to regex `^B[0-9A-Z]{9}$`.
-pub fn resolve_asin(identifier: &str, content_id: &str) -> String {
-    let cleaned = identifier
-        .trim()
-        .trim_start_matches("urn:asin:")
-        .trim_start_matches("mobi-asin:")
-        .trim_start_matches("asin:")
-        .trim();
-
-    if cleaned.len() == 10
-        && (cleaned.starts_with('B') || cleaned.starts_with('b'))
-        && cleaned.chars().all(|c| c.is_ascii_alphanumeric())
-    {
-        cleaned.to_uppercase()
-    } else {
-        // Deterministic 10-character Amazon ASIN: 'B' followed by first 9 hex digits of content_id
-        format!("B{}", &content_id[..9])
-    }
-}
-
-/// Generates 23-character URL-safe Base64 publication ID (version byte 0x05 + 16 derived bytes).
-pub fn generate_book_id(seed: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(seed.as_bytes());
-    let digest = hasher.finalize();
-
-    let mut raw = Vec::with_capacity(17);
-    raw.push(0x05);
-    raw.extend_from_slice(&digest[..16]);
-
-    const URL_SAFE_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut result = String::with_capacity(23);
-    let mut i = 0;
-    while i + 3 <= raw.len() {
-        let b0 = raw[i] as usize;
-        let b1 = raw[i + 1] as usize;
-        let b2 = raw[i + 2] as usize;
-        result.push(URL_SAFE_CHARS[(b0 >> 2) & 0x3F] as char);
-        result.push(URL_SAFE_CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) & 0x3F] as char);
-        result.push(URL_SAFE_CHARS[(((b1 & 0x0F) << 2) | (b2 >> 6)) & 0x3F] as char);
-        result.push(URL_SAFE_CHARS[b2 & 0x3F] as char);
-        i += 3;
-    }
-    if raw.len() - i == 2 {
-        let b0 = raw[i] as usize;
-        let b1 = raw[i + 1] as usize;
-        result.push(URL_SAFE_CHARS[(b0 >> 2) & 0x3F] as char);
-        result.push(URL_SAFE_CHARS[(((b0 & 0x03) << 4) | (b1 >> 4)) & 0x3F] as char);
-        result.push(URL_SAFE_CHARS[((b1 & 0x0F) << 2) & 0x3F] as char);
-    }
-    result
-}
-
-/// Yellowjacket e-ink reader content buffer limit per $145 entity.
-pub const MAX_CONTENT_CHUNK_BYTES: usize = 8192;
-
-/// Book-global text accumulator for Yellowjacket content entities ($145).
-///
-/// Text is packed into `content_1..content_N` chunks of at most [`MAX_CONTENT_CHUNK_BYTES`]
-/// (measured in UTF-8 bytes), spanning section boundaries without exceeding Kindle memory bounds.
-#[derive(Default)]
-pub struct TextAccumulator {
-    finished: Vec<(usize, Vec<String>)>,
-    segments: Vec<String>,
-    current_bytes: usize,
-    current_chunk: usize,
-}
-
-impl TextAccumulator {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push(&mut self, text: &str) -> (usize, usize) {
-        if self.current_chunk == 0 {
-            self.current_chunk = 1;
-        } else if self.current_bytes >= MAX_CONTENT_CHUNK_BYTES {
-            self.finished
-                .push((self.current_chunk, std::mem::take(&mut self.segments)));
-            self.current_chunk += 1;
-            self.current_bytes = 0;
-        }
-        let index = self.segments.len();
-        self.current_bytes += text.len();
-        self.segments.push(text.to_string());
-        (self.current_chunk, index)
-    }
-
-    pub fn drain_chunks(&mut self) -> Vec<(usize, Vec<String>)> {
-        let mut chunks = std::mem::take(&mut self.finished);
-        if !self.segments.is_empty() {
-            chunks.push((self.current_chunk, std::mem::take(&mut self.segments)));
-        }
-        self.current_bytes = 0;
-        self.current_chunk = 0;
-        chunks
-    }
 }
 
 /// Packages a `BookIR` into an Amazon KFX container.
@@ -1421,117 +1175,134 @@ impl<'a> KfxPackager<'a> {
 
                 for span in spans {
                     let span_len = span.text.chars().count();
-                    let effective_style: Option<String> = match (&span.style, inherited.is_empty()) {
-                        (Some(s), true) => Some(s.clone()),
-                        (Some(s), false) => Some(format!("{} {}", s, inherited)),
-                        (None, false) => Some(inherited.to_string()),
-                        (None, true) => None,
-                    };
-                    if let Some(st) = &effective_style {
-                        if st.contains("bold") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.bold)),
-                            ]));
-                        }
-                        if st.contains("italic") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.italic)),
-                            ]));
-                        }
-                        if st.contains("underline") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.underline)),
-                            ]));
-                        }
-                        if st.contains("strike") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.strikethrough)),
-                            ]));
-                        }
-                        if st.contains("sup") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.superscript)),
-                            ]));
-                        }
-                        if st.contains("sub") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.subscript)),
-                            ]));
-                        }
-                        if st.contains("code") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.code)),
-                            ]));
-                        }
-                        if st.contains("small_caps") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.small_caps)),
-                            ]));
-                        }
-                        if st.contains("dropcap") {
-                            let char_count = span.text.chars().count();
-                            let has_quote = char_count == 2 && span.text.chars().next().is_some_and(crate::epub::is_opening_quote);
-                            let is_two_char = st.contains("dropcap_2") || has_quote;
-                            let is_l2 = st.contains("dropcap_l2");
-                            let is_bold = st.contains("bold");
+                    let span_st = span.style.as_deref();
+                    let has_bold = span_st.is_some_and(|s| s.contains("bold")) || (!inherited.is_empty() && inherited.contains("bold"));
+                    let has_italic = span_st.is_some_and(|s| s.contains("italic")) || (!inherited.is_empty() && inherited.contains("italic"));
+                    let has_underline = span_st.is_some_and(|s| s.contains("underline")) || (!inherited.is_empty() && inherited.contains("underline"));
+                    let has_strike = span_st.is_some_and(|s| s.contains("strike")) || (!inherited.is_empty() && inherited.contains("strike"));
+                    let has_sup = span_st.is_some_and(|s| s.contains("sup")) || (!inherited.is_empty() && inherited.contains("sup"));
+                    let has_sub = span_st.is_some_and(|s| s.contains("sub")) || (!inherited.is_empty() && inherited.contains("sub"));
+                    let has_code = span_st.is_some_and(|s| s.contains("code")) || (!inherited.is_empty() && inherited.contains("code"));
+                    let has_small_caps = span_st.is_some_and(|s| s.contains("small_caps")) || (!inherited.is_empty() && inherited.contains("small_caps"));
+                    let has_uppercase = span_st.is_some_and(|s| s.contains("uppercase")) || (!inherited.is_empty() && inherited.contains("uppercase"));
 
-                            let target_style = match (is_l2, is_two_char, is_bold) {
-                                (true, false, false) => styles.dropcap_l2,
-                                (true, false, true) => styles.dropcap_l2_bold,
-                                (true, true, false) => styles.dropcap_l2_c2,
-                                (true, true, true) => styles.dropcap_l2_c2_bold,
-                                (false, false, false) => styles.dropcap,
-                                (false, false, true) => styles.dropcap_l3_bold,
-                                (false, true, false) => styles.dropcap_2,
-                                (false, true, true) => styles.dropcap_l3_c2_bold,
-                            };
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(target_style)),
-                            ]));
-                        }
-                        if st.contains("uppercase") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.uppercase)),
-                            ]));
-                        }
-                        // Relative font size tokens (exact token match, resolved from EPUB CSS).
-                        // Dropcap spans keep their own sizing and are excluded.
-                        if !st.contains("dropcap") {
-                            let size_style = st.split_whitespace().find_map(|tok| match tok {
+                    if has_bold {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.bold)),
+                        ]));
+                    }
+                    if has_italic {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.italic)),
+                        ]));
+                    }
+                    if has_underline {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.underline)),
+                        ]));
+                    }
+                    if has_strike {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.strikethrough)),
+                        ]));
+                    }
+                    if has_sup {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.superscript)),
+                        ]));
+                    }
+                    if has_sub {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.subscript)),
+                        ]));
+                    }
+                    if has_code {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.code)),
+                        ]));
+                    }
+                    if has_small_caps {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.small_caps)),
+                        ]));
+                    }
+                    if let Some(st) = span_st
+                        && st.contains("dropcap")
+                    {
+                        let char_count = span.text.chars().count();
+                        let has_quote = char_count == 2 && span.text.chars().next().is_some_and(crate::epub::is_opening_quote);
+                        let is_two_char = st.contains("dropcap_2") || has_quote;
+                        let is_l2 = st.contains("dropcap_l2");
+                        let is_bold = st.contains("bold");
+
+                        let target_style = match (is_l2, is_two_char, is_bold) {
+                            (true, false, false) => styles.dropcap_l2,
+                            (true, false, true) => styles.dropcap_l2_bold,
+                            (true, true, false) => styles.dropcap_l2_c2,
+                            (true, true, true) => styles.dropcap_l2_c2_bold,
+                            (false, false, false) => styles.dropcap,
+                            (false, false, true) => styles.dropcap_l3_bold,
+                            (false, true, false) => styles.dropcap_2,
+                            (false, true, true) => styles.dropcap_l3_c2_bold,
+                        };
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(target_style)),
+                        ]));
+                    }
+                    if has_uppercase {
+                        style_events.push(IonValue::Struct(vec![
+                            (sym_offset, IonValue::Int(offset as i64)),
+                            (sym_length, IonValue::Int(span_len as i64)),
+                            (sym_style, IonValue::Symbol(styles.uppercase)),
+                        ]));
+                    }
+                    // Relative font size tokens: child span precedence over inherited block style.
+                    // Dropcap spans keep their own sizing and are excluded.
+                    let is_dropcap = span_st.is_some_and(|s| s.contains("dropcap"));
+                    if !is_dropcap {
+                        let find_font_size = |s: &str| {
+                            s.split_whitespace().find_map(|tok| match tok {
                                 "font_size_xs" => Some(styles.font_size_xs),
                                 "font_size_sm" => Some(styles.font_size_sm),
                                 "font_size_lg" => Some(styles.font_size_lg),
                                 "font_size_xl" => Some(styles.font_size_xl),
                                 "font_size_xxl" => Some(styles.font_size_xxl),
                                 _ => None,
+                            })
+                        };
+                        let size_style = span_st
+                            .and_then(find_font_size)
+                            .or_else(|| {
+                                if !inherited.is_empty() {
+                                    find_font_size(inherited)
+                                } else {
+                                    None
+                                }
                             });
-                            if let Some(sz) = size_style {
-                                style_events.push(IonValue::Struct(vec![
-                                    (sym_offset, IonValue::Int(offset as i64)),
-                                    (sym_length, IonValue::Int(span_len as i64)),
-                                    (sym_style, IonValue::Symbol(sz)),
-                                ]));
-                            }
+                        if let Some(sz) = size_style {
+                            style_events.push(IonValue::Struct(vec![
+                                (sym_offset, IonValue::Int(offset as i64)),
+                                (sym_length, IonValue::Int(span_len as i64)),
+                                (sym_style, IonValue::Symbol(sz)),
+                            ]));
                         }
                     }
                     if let Some(ref rt) = span.ruby {

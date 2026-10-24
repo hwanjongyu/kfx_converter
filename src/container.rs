@@ -260,6 +260,11 @@ impl KfxContainer {
             current_raw_offset += payload_len;
         }
 
+        if entity_table_entries.len() > u32::MAX as usize {
+            return Err(ContainerError::CorruptedHeader(
+                "Entity table size exceeds 4GB limit".to_string(),
+            ));
+        }
         let index_tab_offset: u32 = 18;
         let index_tab_length: u32 = entity_table_entries.len() as u32;
 

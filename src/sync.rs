@@ -439,6 +439,10 @@ impl KindleSync {
         if full_path.is_file() {
             std::fs::remove_file(full_path)?;
         }
+        let part_path = PathBuf::from(format!("{}.part", full_path.display()));
+        if part_path.is_file() {
+            let _ = std::fs::remove_file(&part_path);
+        }
         let file_stem = full_path.file_stem().unwrap_or_default().to_string_lossy();
         if let Some(parent) = full_path.parent() {
             let sdr_path = parent.join(format!("{}.sdr", file_stem));
@@ -642,7 +646,7 @@ impl KindleSync {
         if !sdr_dir.is_dir() {
             return;
         }
-        let stale_exts = [".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea", ".yjf", ".yjr"];
+        let stale_exts = [".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea", ".yjf", ".yjr", ".part"];
         if let Ok(entries) = std::fs::read_dir(sdr_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -722,7 +726,8 @@ impl KindleSync {
         Ok(())
     }
 
-    /// Spawns `gio copy` with an explicit watchdog timeout to prevent UI/CLI thread freezes.
+    /// Spawns `gio copy` with an explicit watchdog timeout and concurrent stderr draining
+    /// to prevent UI/CLI thread freezes and kernel pipe buffer deadlocks.
     fn execute_gio_copy_with_timeout(
         src: &Path,
         dst: &Path,
@@ -737,18 +742,25 @@ impl KindleSync {
             .stderr(std::process::Stdio::piped())
             .spawn()?;
 
+        // Drain stderr concurrently in a background thread to prevent the 64KB OS kernel pipe
+        // buffer from filling up and deadlocking the child process on write() calls.
+        let stderr_thread = child.stderr.take().map(|mut stderr| {
+            std::thread::spawn(move || {
+                let mut err_msg = String::new();
+                use std::io::Read;
+                let _ = stderr.read_to_string(&mut err_msg);
+                err_msg
+            })
+        });
+
         let start = std::time::Instant::now();
         loop {
             match child.try_wait()? {
                 Some(status) => {
+                    let err_msg = stderr_thread.and_then(|t| t.join().ok()).unwrap_or_default();
                     if status.success() {
                         return Ok(());
                     } else {
-                        let mut err_msg = String::new();
-                        if let Some(mut stderr) = child.stderr.take() {
-                            use std::io::Read;
-                            let _ = stderr.read_to_string(&mut err_msg);
-                        }
                         return Err(SyncError::GioFailed(err_msg));
                     }
                 }
@@ -756,6 +768,7 @@ impl KindleSync {
                     if start.elapsed() >= timeout {
                         let _ = child.kill();
                         let _ = child.wait(); // Reap zombie process
+                        let _ = stderr_thread.and_then(|t| t.join().ok());
                         return Err(SyncError::GioFailed(format!(
                             "gio copy timed out after {} seconds",
                             timeout.as_secs()
@@ -928,6 +941,32 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_stderr_drain_large_buffer() {
+        // Verify that writing >128KB to stderr in a child process is drained concurrently without pipe buffer deadlocks (exceeding standard 64KB kernel buffer)
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("head -c 131072 /dev/zero | tr '\\0' 'x' >&2; exit 1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stderr_thread = child.stderr.take().map(|mut stderr| {
+            std::thread::spawn(move || {
+                let mut err_msg = String::new();
+                use std::io::Read;
+                let _ = stderr.read_to_string(&mut err_msg);
+                err_msg
+            })
+        });
+
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+        let err_msg = stderr_thread.and_then(|t| t.join().ok()).unwrap_or_default();
+        assert_eq!(err_msg.len(), 131072);
+    }
+
+    #[test]
     fn test_clean_stale_sdr_files() {
         let temp = tempfile::tempdir().unwrap();
         let sdr = temp.path().join("TestBook.sdr");
@@ -942,6 +981,7 @@ mod tests {
         std::fs::write(sdr.join("test.ea"), b"stale_ea").unwrap();
         std::fs::write(sdr.join("test.yjf"), b"stale_yjf").unwrap();
         std::fs::write(sdr.join("test.yjr"), b"stale_yjr").unwrap();
+        std::fs::write(sdr.join("aborted_transfer.part"), b"stale_part").unwrap();
         let pag_cache = sdr.join("data").join(".pagination.cache");
         std::fs::create_dir_all(&pag_cache).unwrap();
         std::fs::write(pag_cache.join("cache.bin"), b"stale_pag").unwrap();
@@ -963,6 +1003,7 @@ mod tests {
         assert!(!sdr.join("test.ea").exists());
         assert!(!sdr.join("test.yjf").exists());
         assert!(!sdr.join("test.yjr").exists());
+        assert!(!sdr.join("aborted_transfer.part").exists());
         assert!(!sdr.join("data").join(".pagination.cache").exists());
         assert!(!sdr.join("old.mbp1.bad_file").exists());
         assert!(!sdr.join("corrupted.han.BAD_FILE").exists());
@@ -1077,13 +1118,16 @@ mod tests {
 
         // 1. Valid ebook deletion
         let book_kfx = docs.join("SafeBook.kfx");
+        let book_kfx_part = docs.join("SafeBook.kfx.part");
         let book_sdr = docs.join("SafeBook.sdr");
         std::fs::write(&book_kfx, b"dummy kfx").unwrap();
+        std::fs::write(&book_kfx_part, b"part data").unwrap();
         std::fs::create_dir_all(&book_sdr).unwrap();
         std::fs::write(book_sdr.join("cache.bin"), b"cache").unwrap();
 
         assert!(KindleSync::delete_book_file_safe(Some(&docs), &book_kfx).is_ok());
         assert!(!book_kfx.exists());
+        assert!(!book_kfx_part.exists());
         assert!(!book_sdr.exists());
 
         // 2. Reject non-ebook files (e.g. .rs or .sh)
