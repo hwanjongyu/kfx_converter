@@ -21,9 +21,36 @@ pub enum ConverterMode {
 pub enum LocalEpubStatus {
     Unconverted,
     InQueue,
+    Processing { stage: String, progress: u8 },
     ConvertedLocal,
     OnDevice,
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BatchProgressState {
+    pub total_tasks: usize,
+    pub completed_tasks: usize,
+    pub failed_tasks: usize,
+    pub active_tasks: usize,
+    pub current_filename: String,
+    pub current_stage: String,
+    pub is_sync: bool,
+    pub is_cancelled: bool,
+}
+
+impl BatchProgressState {
+    pub fn overall_progress(&self) -> f32 {
+        if self.total_tasks == 0 {
+            0.0
+        } else {
+            ((self.completed_tasks as f32) / (self.total_tasks as f32)).clamp(0.0, 1.0)
+        }
+    }
+
+    pub fn overall_percentage(&self) -> u8 {
+        (self.overall_progress() * 100.0).round() as u8
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +74,7 @@ pub struct LocalFolderState {
     pub search_query: String,
     pub filter_status: Option<String>,
     pub is_scanning: bool,
+    pub batch_progress: Option<BatchProgressState>,
 }
 
 impl Default for LocalFolderState {
@@ -58,6 +86,7 @@ impl Default for LocalFolderState {
             search_query: String::new(),
             filter_status: None,
             is_scanning: false,
+            batch_progress: None,
         }
     }
 }
@@ -153,11 +182,15 @@ pub struct ConversionResult {
 
 /// Executes the complete EPUB to KFX conversion pipeline, including optional
 /// baseline cover optimization, Word Wise sidecar (.kll) generation, and Kindle synchronization.
-pub fn convert_epub_file(
+pub fn convert_epub_file<F>(
     input_path: &PathBuf,
     settings: &ConversionSettings,
     device: &DeviceStatus,
-) -> Result<ConversionResult, String> {
+    progress: Option<F>,
+) -> Result<ConversionResult, String>
+where
+    F: Fn(f32, &str) + Send + Sync + 'static,
+{
     let options = kfx_converter::ConversionOptions {
         content_type: settings.content_type.clone(),
         word_wise: settings.word_wise,
@@ -169,7 +202,7 @@ pub fn convert_epub_file(
         input_path,
         None,
         &options,
-        None::<fn(f32, &str)>,
+        progress,
     ).map_err(|e| e.to_string())?;
 
     Ok(ConversionResult {
@@ -462,6 +495,32 @@ mod tests {
         let items_flat = scan_local_epub_directory(&epub_dir, false, &dummy_dev);
         assert_eq!(items_flat.len(), 1);
         assert_eq!(items_flat[0].filename, "BookOne.epub");
+    }
+
+    #[test]
+    fn test_batch_progress_state_and_processing_status() {
+        let mut bp = BatchProgressState {
+            total_tasks: 10,
+            completed_tasks: 3,
+            failed_tasks: 1,
+            active_tasks: 2,
+            current_filename: "Originals.epub".into(),
+            current_stage: "Packaging KFX".into(),
+            is_sync: true,
+            is_cancelled: false,
+        };
+
+        assert_eq!(bp.overall_percentage(), 30);
+        assert!((bp.overall_progress() - 0.3).abs() < 1e-5);
+
+        bp.completed_tasks = 10;
+        assert_eq!(bp.overall_percentage(), 100);
+
+        let proc_status = LocalEpubStatus::Processing {
+            stage: "Ingesting EPUB".into(),
+            progress: 15,
+        };
+        assert!(matches!(proc_status, LocalEpubStatus::Processing { progress: 15, .. }));
     }
 }
 

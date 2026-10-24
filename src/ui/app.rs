@@ -5,9 +5,9 @@
 use gpui::*;
 use super::theme::Theme;
 use super::state::{
-    detect_kindle_device, load_device_files, ConversionSettings, ConversionTask, ConverterMode,
-    DeviceStatus, KindleFile, LocalEpubItem, LocalEpubStatus, LocalFolderState, StudioTab,
-    TaskStatus,
+    detect_kindle_device, load_device_files, BatchProgressState, ConversionSettings, ConversionTask,
+    ConverterMode, DeviceStatus, KindleFile, LocalEpubItem, LocalEpubStatus, LocalFolderState,
+    StudioTab, TaskStatus,
 };
 
 pub struct KindleStudio {
@@ -21,6 +21,7 @@ pub struct KindleStudio {
     filter_format: Option<String>,
     search_query: String,
     status_message: Option<(String, bool)>, // (text, is_error)
+    batch_cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     folder_scroll_handle: UniformListScrollHandle,
     explorer_scroll_handle: UniformListScrollHandle,
 }
@@ -41,6 +42,7 @@ impl KindleStudio {
             filter_format: None,
             search_query: String::new(),
             status_message: None,
+            batch_cancel_token: None,
             folder_scroll_handle: UniformListScrollHandle::new(),
             explorer_scroll_handle: UniformListScrollHandle::new(),
         }
@@ -201,6 +203,23 @@ impl KindleStudio {
         cx.notify();
     }
 
+    pub fn cancel_batch_conversion(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref token) = self.batch_cancel_token {
+            token.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        for item in self.folder_state.items.iter_mut() {
+            if item.status == LocalEpubStatus::InQueue {
+                item.status = LocalEpubStatus::Unconverted;
+            }
+        }
+        if let Some(ref mut bp) = self.folder_state.batch_progress {
+            bp.is_cancelled = true;
+            bp.current_stage = "Cancelled remaining queue.".into();
+        }
+        self.status_message = Some(("Batch operation cancelled.".into(), false));
+        cx.notify();
+    }
+
     pub fn convert_selected_epubs(&mut self, sync_to_kindle: bool, cx: &mut Context<Self>) {
         let selected_paths: Vec<std::path::PathBuf> = self.folder_state.items
             .iter()
@@ -220,6 +239,20 @@ impl KindleStudio {
         if sync_to_kindle {
             self.settings.auto_deploy = true;
         }
+
+        let cancel_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.batch_cancel_token = Some(cancel_token.clone());
+
+        self.folder_state.batch_progress = Some(BatchProgressState {
+            total_tasks: count,
+            completed_tasks: 0,
+            failed_tasks: 0,
+            active_tasks: 0,
+            current_filename: String::new(),
+            current_stage: if sync_to_kindle { "Preparing transfer...".into() } else { "Preparing conversion...".into() },
+            is_sync: sync_to_kindle,
+            is_cancelled: false,
+        });
 
         for item in self.folder_state.items.iter_mut() {
             if item.is_selected {
@@ -266,9 +299,14 @@ impl KindleStudio {
             let q = queue.clone();
             let s_clone = settings.clone();
             let d_clone = device.clone();
+            let cancel = cancel_token.clone();
 
             cx.spawn(async move |this, cx| {
                 loop {
+                    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+
                     let next = {
                         let mut guard = match q.lock() {
                             Ok(g) => g,
@@ -281,10 +319,23 @@ impl KindleStudio {
                         break;
                     };
 
+                    let filename = path_buf.file_name().unwrap_or_default().to_string_lossy().to_string();
+
                     let _ = this.update(cx, |this, cx| {
                         if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
                             t.status = TaskStatus::Converting;
-                            t.progress = 0.5;
+                            t.progress = 0.3;
+                        }
+                        if let Some(ref mut bp) = this.folder_state.batch_progress {
+                            bp.active_tasks += 1;
+                            bp.current_filename = filename.clone();
+                            bp.current_stage = if s_clone.auto_deploy { "Packaging & Transferring...".into() } else { "Packaging KFX...".into() };
+                        }
+                        if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == path_buf) {
+                            item.status = LocalEpubStatus::Processing {
+                                stage: if s_clone.auto_deploy { "Packaging & Sync".into() } else { "Packaging KFX".into() },
+                                progress: 30,
+                            };
                         }
                         cx.notify();
                     });
@@ -293,10 +344,18 @@ impl KindleStudio {
                     let s = s_clone.clone();
                     let d = d_clone.clone();
                     let res = cx.background_executor().spawn(async move {
-                        super::state::convert_epub_file(&target_path, &s, &d)
+                        super::state::convert_epub_file(&target_path, &s, &d, None::<fn(f32, &str)>)
                     }).await;
 
                     let _ = this.update(cx, |this, cx| {
+                        if let Some(ref mut bp) = this.folder_state.batch_progress {
+                            bp.active_tasks = bp.active_tasks.saturating_sub(1);
+                            if res.is_ok() {
+                                bp.completed_tasks += 1;
+                            } else {
+                                bp.failed_tasks += 1;
+                            }
+                        }
                         if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
                             t.progress = 1.0;
                             match &res {
@@ -350,7 +409,10 @@ impl KindleStudio {
 
     pub fn convert_single_epub(&mut self, path: std::path::PathBuf, sync_to_kindle: bool, cx: &mut Context<Self>) {
         if let Some(item) = self.folder_state.items.iter_mut().find(|i| i.path == path) {
-            item.status = LocalEpubStatus::InQueue;
+            item.status = LocalEpubStatus::Processing {
+                stage: if sync_to_kindle { "Packaging & Sync".into() } else { "Packaging KFX".into() },
+                progress: 30,
+            };
         }
         if sync_to_kindle {
             self.settings.auto_deploy = true;
@@ -422,7 +484,7 @@ impl KindleStudio {
 
         cx.spawn(async move |this, cx| {
             let task = cx.background_executor().spawn(async move {
-                super::state::convert_epub_file(&path_buf, &settings, &device)
+                super::state::convert_epub_file(&path_buf, &settings, &device, None::<fn(f32, &str)>)
             });
             let res = task.await;
 
@@ -1312,49 +1374,64 @@ impl KindleStudio {
                             ),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(Theme::text_muted())
-                                    .child(format!("{}/{} books selected", selected_count, total_count)),
-                            )
-                            .child(
-                                div()
-                                    .id("btn_top_batch_convert")
-                                    .px_3()
-                                    .py_1p5()
-                                    .rounded_md()
-                                    .bg(if selected_count > 0 { Theme::accent_amber() } else { Theme::bg_card_hover() })
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(if selected_count > 0 { Theme::bg_root() } else { Theme::text_muted() })
-                                    .cursor_pointer()
-                                    .child(format!("⚡ Convert ({})", selected_count))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.convert_selected_epubs(false, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("btn_top_batch_convert_sync")
-                                    .px_3()
-                                    .py_1p5()
-                                    .rounded_md()
-                                    .bg(if selected_count > 0 && self.device.connected { Theme::accent_green() } else { Theme::bg_card_hover() })
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(if selected_count > 0 && self.device.connected { Theme::bg_root() } else { Theme::text_muted() })
-                                    .cursor_pointer()
-                                    .child(format!("📲 Sync to Kindle ({})", selected_count))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.convert_selected_epubs(true, cx);
-                                    })),
-                            ),
+                        if let Some(ref bp) = self.folder_state.batch_progress {
+                            let waiting = bp.total_tasks.saturating_sub(bp.completed_tasks + bp.failed_tasks + bp.active_tasks);
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(Theme::bg_card_hover())
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(Theme::accent_green())
+                                        .child(format!("✓ {} done", bp.completed_tasks)),
+                                )
+                                .child(
+                                    div()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(Theme::bg_card_hover())
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(Theme::accent_amber())
+                                        .child(format!("⚡ {} active", bp.active_tasks)),
+                                )
+                                .child(
+                                    div()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(Theme::bg_card_hover())
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(Theme::text_muted())
+                                        .child(format!("⏳ {} waiting", waiting)),
+                                )
+                                .into_any_element()
+                        } else {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .px_3()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(if selected_count > 0 { Theme::bg_card_hover() } else { hsla(0.0, 0.0, 0.0, 0.0) })
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(if selected_count > 0 { Theme::text_primary() } else { Theme::text_muted() })
+                                        .child(format!("{}/{} books selected", selected_count, total_count)),
+                                )
+                                .into_any_element()
+                        }
                     ),
             )
             // 3. Scrollable EPUB List Table with Visible Scrollbar
@@ -1432,49 +1509,198 @@ impl KindleStudio {
             )
             // 4. Bottom Batch Actions Bar
             .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .pt_2()
-                    .child(
-                        div()
-                            .id("btn_batch_convert")
-                            .flex_1()
-                            .py_2p5()
-                            .rounded_xl()
-                            .bg(if selected_count > 0 { Theme::accent_amber() } else { Theme::bg_card_hover() })
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(if selected_count > 0 { Theme::bg_root() } else { Theme::text_muted() })
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(format!("⚡ Convert Selected ({})", selected_count))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.convert_selected_epubs(false, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("btn_batch_convert_sync")
-                            .flex_1()
-                            .py_2p5()
-                            .rounded_xl()
-                            .bg(if selected_count > 0 && self.device.connected { Theme::accent_green() } else { Theme::bg_card_hover() })
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(if selected_count > 0 && self.device.connected { Theme::bg_root() } else { Theme::text_muted() })
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(format!("📲 Convert & Sync to Kindle ({})", selected_count))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.convert_selected_epubs(true, cx);
-                            })),
-                    )
+                if let Some(ref bp) = self.folder_state.batch_progress {
+                    self.render_batch_progress_bar(bp, cx)
+                } else {
+                    div()
+                        .flex()
+                        .gap_3()
+                        .pt_2()
+                        .child(
+                            div()
+                                .id("btn_batch_convert")
+                                .flex_1()
+                                .py_2p5()
+                                .rounded_xl()
+                                .bg(if selected_count > 0 { Theme::accent_amber() } else { Theme::bg_card_hover() })
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(if selected_count > 0 { Theme::bg_root() } else { Theme::text_muted() })
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(format!("⚡ Convert Selected ({})", selected_count))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.convert_selected_epubs(false, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("btn_batch_convert_sync")
+                                .flex_1()
+                                .py_2p5()
+                                .rounded_xl()
+                                .bg(if selected_count > 0 && self.device.connected { Theme::accent_green() } else { Theme::bg_card_hover() })
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(if selected_count > 0 && self.device.connected { Theme::bg_root() } else { Theme::text_muted() })
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(format!("📲 Transfer to Kindle ({})", selected_count))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.convert_selected_epubs(true, cx);
+                                })),
+                        )
+                        .into_any_element()
+                }
             )
+    }
+
+    fn render_batch_progress_bar(&self, bp: &BatchProgressState, cx: &mut Context<Self>) -> AnyElement {
+        let pct = bp.overall_percentage();
+        let frac = bp.overall_progress();
+        let is_done = bp.completed_tasks + bp.failed_tasks >= bp.total_tasks && bp.active_tasks == 0;
+        let is_sync = bp.is_sync;
+
+        div()
+            .w_full()
+            .pt_2()
+            .child(
+                div()
+                    .relative()
+                    .overflow_hidden()
+                    .w_full()
+                    .h(px(52.0))
+                    .rounded_xl()
+                    .bg(Theme::bg_card())
+                    .border_1()
+                    .border_color(if is_done { Theme::accent_green() } else { Theme::border() })
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .h_full()
+                            .bg(if is_done {
+                                hsla(142.0 / 360.0, 0.70, 0.45, 0.25)
+                            } else if is_sync {
+                                hsla(160.0 / 360.0, 0.84, 0.39, 0.25)
+                            } else {
+                                hsla(38.0 / 360.0, 0.92, 0.50, 0.25)
+                            })
+                            .w(DefiniteLength::Fraction(frac.clamp(0.02, 1.0))),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .size_full()
+                            .px_4()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .child(if is_done { "✓" } else if is_sync { "📲" } else { "⚡" }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(Theme::text_primary())
+                                                            .child(if is_done {
+                                                                format!("Finished processing {} books successfully!", bp.completed_tasks)
+                                                            } else if is_sync {
+                                                                format!("Transferring to Kindle: {} of {} done ({}%)", bp.completed_tasks, bp.total_tasks, pct)
+                                                            } else {
+                                                                format!("Converting Books: {} of {} done ({}%)", bp.completed_tasks, bp.total_tasks, pct)
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        if bp.failed_tasks > 0 {
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(Theme::accent_red())
+                                                                .child(format!("({} failed)", bp.failed_tasks))
+                                                                .into_any_element()
+                                                        } else {
+                                                            div().into_any_element()
+                                                        }
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(Theme::text_muted())
+                                                    .child(if is_done {
+                                                        "All tasks finished. Click Dismiss to close.".to_string()
+                                                    } else if !bp.current_filename.is_empty() {
+                                                        format!("Active: {} ({})", bp.current_filename, bp.current_stage)
+                                                    } else {
+                                                        bp.current_stage.clone()
+                                                    }),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                if is_done {
+                                    div()
+                                        .id("btn_batch_dismiss")
+                                        .cursor_pointer()
+                                        .px_3()
+                                        .py_1p5()
+                                        .rounded_lg()
+                                        .bg(Theme::accent_green())
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(Theme::bg_root())
+                                        .child("✓ Dismiss")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.folder_state.batch_progress = None;
+                                            cx.notify();
+                                        }))
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .id("btn_batch_cancel")
+                                        .cursor_pointer()
+                                        .px_3()
+                                        .py_1p5()
+                                        .rounded_lg()
+                                        .bg(Theme::bg_card_hover())
+                                        .border_1()
+                                        .border_color(Theme::border())
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(Theme::accent_red())
+                                        .child("⏹ Cancel")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_batch_conversion(cx);
+                                        }))
+                                        .into_any_element()
+                                }
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// Renders a single EPUB item card with strict 68px height for virtualization.
@@ -1482,12 +1708,22 @@ impl KindleStudio {
         let item_id = item.id;
         let item_path = item.path.clone();
         let is_sel = item.is_selected;
+        let is_processing = matches!(&item.status, LocalEpubStatus::Processing { .. });
+        let progress_val = if let LocalEpubStatus::Processing { progress, .. } = &item.status {
+            *progress
+        } else {
+            0
+        };
+
         let status_badge = match &item.status {
             LocalEpubStatus::Unconverted => {
                 div().px_2().py_0p5().rounded_md().bg(Theme::bg_card_hover()).text_xs().text_color(Theme::text_muted()).child("⚪ Unconverted")
             }
             LocalEpubStatus::InQueue => {
-                div().px_2().py_0p5().rounded_md().bg(Theme::accent_amber()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child("🟡 Converting")
+                div().px_2().py_0p5().rounded_md().bg(Theme::bg_card_hover()).border_1().border_color(Theme::border()).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(Theme::text_muted()).child("⏳ In Queue")
+            }
+            LocalEpubStatus::Processing { stage, progress } => {
+                div().px_2().py_0p5().rounded_md().bg(Theme::accent_amber()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child(format!("🟡 {} ({}%)", stage, progress))
             }
             LocalEpubStatus::ConvertedLocal => {
                 div().px_2().py_0p5().rounded_md().bg(Theme::accent_blue()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::text_primary()).child("🔵 Local KFX")
@@ -1534,6 +1770,8 @@ impl KindleStudio {
             .child(
                 div()
                     .id(("epub_item", item_id as usize))
+                    .relative()
+                    .overflow_hidden()
                     .flex()
                     .justify_between()
                     .items_center()
@@ -1550,6 +1788,20 @@ impl KindleStudio {
                             this.toggle_item_selection(item_id, cx);
                         }).ok();
                     })
+                    .child(
+                        if is_processing {
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .h(px(3.0))
+                                .bg(Theme::accent_amber())
+                                .w(DefiniteLength::Fraction((progress_val as f32 / 100.0).clamp(0.08, 1.0)))
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        }
+                    )
                     .child(
                         div()
                             .flex()
