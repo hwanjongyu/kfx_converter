@@ -21,8 +21,8 @@ pub struct KindleStudio {
     filter_format: Option<String>,
     search_query: String,
     status_message: Option<(String, bool)>, // (text, is_error)
-    folder_scroll_handle: ScrollHandle,
-    explorer_scroll_handle: ScrollHandle,
+    folder_scroll_handle: UniformListScrollHandle,
+    explorer_scroll_handle: UniformListScrollHandle,
 }
 
 impl KindleStudio {
@@ -41,8 +41,8 @@ impl KindleStudio {
             filter_format: None,
             search_query: String::new(),
             status_message: None,
-            folder_scroll_handle: ScrollHandle::new(),
-            explorer_scroll_handle: ScrollHandle::new(),
+            folder_scroll_handle: UniformListScrollHandle::new(),
+            explorer_scroll_handle: UniformListScrollHandle::new(),
         }
     }
 
@@ -1085,27 +1085,34 @@ impl KindleStudio {
         let selected_count = self.folder_state.items.iter().filter(|i| i.is_selected).count();
         let total_count = self.folder_state.items.len();
 
-        let filtered_items: Vec<&LocalEpubItem> = self.folder_state.items.iter().filter(|item| {
-            if !self.folder_state.search_query.is_empty() {
-                let q = self.folder_state.search_query.to_lowercase();
-                if !item.title.to_lowercase().contains(&q)
-                    && !item.author.to_lowercase().contains(&q)
-                    && !item.filename.to_lowercase().contains(&q)
+        let search_query = self.folder_state.search_query.to_lowercase();
+        let filter_status = self.folder_state.filter_status.as_deref();
+
+        let filtered_indices: Vec<usize> = self.folder_state.items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                if !search_query.is_empty()
+                    && !item.title.to_lowercase().contains(&search_query)
+                    && !item.author.to_lowercase().contains(&search_query)
+                    && !item.filename.to_lowercase().contains(&search_query)
                 {
                     return false;
                 }
-            }
-            if let Some(ref filter) = self.folder_state.filter_status {
-                match filter.as_str() {
-                    "unconverted" => item.status == LocalEpubStatus::Unconverted,
-                    "converted" => item.status == LocalEpubStatus::ConvertedLocal,
-                    "on_device" => item.status == LocalEpubStatus::OnDevice,
-                    _ => true,
+                if let Some(st) = filter_status {
+                    match st {
+                        "unconverted" => item.status == LocalEpubStatus::Unconverted,
+                        "in_queue" => item.status == LocalEpubStatus::InQueue,
+                        "converted" => item.status == LocalEpubStatus::ConvertedLocal,
+                        "on_device" => item.status == LocalEpubStatus::OnDevice,
+                        _ => true,
+                    }
+                } else {
+                    true
                 }
-            } else {
-                true
-            }
-        }).collect();
+            })
+            .map(|(idx, _)| idx)
+            .collect();
 
         div()
             .flex()
@@ -1319,173 +1326,57 @@ impl KindleStudio {
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .overflow_y_scroll()
-                            .overflow_x_hidden()
-                            .track_scroll(&self.folder_scroll_handle)
+                            .overflow_hidden()
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .w_full()
-                                    .gap_1p5()
-                                    .pr_1p5()
-                                    .children(if filtered_items.is_empty() {
-                                        vec![
+                                if filtered_indices.is_empty() {
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .p_8()
+                                        .rounded_xl()
+                                        .child(
                                             div()
-                                                .flex()
-                                                .flex_col()
-                                                .items_center()
-                                                .justify_center()
-                                                .p_8()
-                                                .rounded_xl()
+                                                .text_base()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(Theme::text_muted())
                                                 .child(
-                                                    div()
-                                                        .text_base()
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(Theme::text_muted())
-                                                        .child(
-                                                            if self.folder_state.current_folder.is_none() {
-                                                                "Click 'Choose Folder' above to select your EPUB directory."
-                                                            } else {
-                                                                "No EPUB books found in this folder."
-                                                            }
-                                                        ),
-                                                )
-                                                .into_any_element(),
-                                        ]
-                                    } else {
-                                        filtered_items.iter().map(|item| {
-                                            let item_id = item.id;
-                                            let item_path = item.path.clone();
-                                            let is_sel = item.is_selected;
-                                            let status_badge = match &item.status {
-                                                LocalEpubStatus::Unconverted => {
-                                                    div().px_2().py_0p5().rounded_md().bg(Theme::bg_card_hover()).text_xs().text_color(Theme::text_muted()).child("⚪ Unconverted")
-                                                }
-                                                LocalEpubStatus::InQueue => {
-                                                    div().px_2().py_0p5().rounded_md().bg(Theme::accent_amber()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child("🟡 Converting")
-                                                }
-                                                LocalEpubStatus::ConvertedLocal => {
-                                                    div().px_2().py_0p5().rounded_md().bg(Theme::accent_blue()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::text_primary()).child("🔵 Local KFX")
-                                                }
-                                                LocalEpubStatus::OnDevice => {
-                                                    div().px_2().py_0p5().rounded_md().bg(Theme::accent_green()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child("🟢 On Kindle")
-                                                }
-                                                LocalEpubStatus::Error(err) => {
-                                                    div().px_2().py_0p5().rounded_md().bg(Theme::accent_red()).text_xs().text_color(Theme::text_primary()).child(format!("Error: {}", err))
-                                                }
-                                            };
-
-                                            let quick_btn = if item.status == LocalEpubStatus::Unconverted {
-                                                let p = item_path.clone();
-                                                Some(
-                                                    div()
-                                                        .id(("btn_quick_convert", item_id as usize))
-                                                        .px_2()
-                                                        .py_0p5()
-                                                        .rounded_md()
-                                                        .bg(Theme::accent_amber())
-                                                        .text_xs()
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_color(Theme::bg_root())
-                                                        .cursor_pointer()
-                                                        .child("⚡ Convert")
-                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                            this.convert_single_epub(p.clone(), false, cx);
-                                                        }))
-                                                )
-                                            } else {
-                                                None
-                                            };
-
-                                            div()
-                                                .id(("epub_item", item_id as usize))
-                                                .flex()
-                                                .justify_between()
-                                                .items_center()
-                                                .w_full()
-                                                .overflow_hidden()
-                                                .p_3()
-                                                .rounded_xl()
-                                                .bg(if is_sel { Theme::bg_card_hover() } else { Theme::bg_card() })
-                                                .border_1()
-                                                .border_color(if is_sel { Theme::accent_amber() } else { Theme::border() })
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.toggle_item_selection(item_id, cx);
-                                                }))
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_3()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .overflow_hidden()
-                                                        .child(
-                                                            div()
-                                                                .flex_shrink_0()
-                                                                .w_5()
-                                                                .h_5()
-                                                                .rounded_md()
-                                                                .border_1()
-                                                                .border_color(if is_sel { Theme::accent_amber() } else { Theme::border() })
-                                                                .bg(if is_sel { Theme::accent_amber() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .text_xs()
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .text_color(Theme::bg_root())
-                                                                .child(if is_sel { "✓" } else { "" }),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .flex_col()
-                                                                .gap_0p5()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .overflow_hidden()
-                                                                .child(
-                                                                    div()
-                                                                        .text_sm()
-                                                                        .font_weight(FontWeight::BOLD)
-                                                                        .text_color(Theme::text_primary())
-                                                                        .truncate()
-                                                                        .child(item.title.clone()),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .flex()
-                                                                        .gap_2()
-                                                                        .text_xs()
-                                                                        .text_color(Theme::text_muted())
-                                                                        .truncate()
-                                                                        .child(format!("Author: {}", item.author))
-                                                                        .child("•")
-                                                                        .child(item.file_size_str.clone())
-                                                                        .child("•")
-                                                                        .child(item.modified_str.clone()),
-                                                                ),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_shrink_0()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .child(status_badge)
-                                                        .children(quick_btn)
-                                                )
-                                                .into_any_element()
-                                        }).collect()
-                                    })
+                                                    if self.folder_state.current_folder.is_none() {
+                                                        "Click 'Choose Folder' above to select your EPUB directory."
+                                                    } else {
+                                                        "No EPUB books found in this folder."
+                                                    }
+                                                ),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    let view = cx.entity().downgrade();
+                                    let indices = filtered_indices.clone();
+                                    uniform_list(
+                                        "folder_epub_uniform_list",
+                                        indices.len(),
+                                        cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+                                            range
+                                                .map(|r_idx| {
+                                                    let item_idx = indices[r_idx];
+                                                    let item = &this.folder_state.items[item_idx];
+                                                    Self::render_epub_card(item, &view)
+                                                })
+                                                .collect()
+                                        }),
+                                    )
+                                    .track_scroll(self.folder_scroll_handle.clone())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .into_any_element()
+                                }
                             )
                     )
                     .child(
-                        self.render_custom_scrollbar(&self.folder_scroll_handle, filtered_items.len(), "folder", cx)
+                        self.render_custom_scrollbar(&self.folder_scroll_handle, filtered_indices.len(), px(68.0), "folder", cx)
                     )
             )
             // 4. Bottom Batch Actions Bar
@@ -1535,11 +1426,154 @@ impl KindleStudio {
             )
     }
 
-    /// Renders a visible custom scrollbar track & thumb bound to a GPUI ScrollHandle.
+    /// Renders a single EPUB item card with strict 68px height for virtualization.
+    fn render_epub_card(item: &LocalEpubItem, view: &WeakEntity<Self>) -> AnyElement {
+        let item_id = item.id;
+        let item_path = item.path.clone();
+        let is_sel = item.is_selected;
+        let status_badge = match &item.status {
+            LocalEpubStatus::Unconverted => {
+                div().px_2().py_0p5().rounded_md().bg(Theme::bg_card_hover()).text_xs().text_color(Theme::text_muted()).child("⚪ Unconverted")
+            }
+            LocalEpubStatus::InQueue => {
+                div().px_2().py_0p5().rounded_md().bg(Theme::accent_amber()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child("🟡 Converting")
+            }
+            LocalEpubStatus::ConvertedLocal => {
+                div().px_2().py_0p5().rounded_md().bg(Theme::accent_blue()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::text_primary()).child("🔵 Local KFX")
+            }
+            LocalEpubStatus::OnDevice => {
+                div().px_2().py_0p5().rounded_md().bg(Theme::accent_green()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child("🟢 On Kindle")
+            }
+            LocalEpubStatus::Error(err) => {
+                div().px_2().py_0p5().rounded_md().bg(Theme::accent_red()).text_xs().text_color(Theme::text_primary()).child(format!("Error: {}", err))
+            }
+        };
+
+        let quick_btn = if item.status == LocalEpubStatus::Unconverted {
+            let p = item_path.clone();
+            let view_quick = view.clone();
+            Some(
+                div()
+                    .id(("btn_quick_convert", item_id as usize))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(Theme::accent_amber())
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(Theme::bg_root())
+                    .cursor_pointer()
+                    .child("⚡ Convert")
+                    .on_click(move |_ev, _window, cx| {
+                        view_quick.update(cx, |this, cx| {
+                            this.convert_single_epub(p.clone(), false, cx);
+                        }).ok();
+                    })
+            )
+        } else {
+            None
+        };
+
+        let view_select = view.clone();
+
+        div()
+            .w_full()
+            .h(px(68.0))
+            .pb(px(6.0))
+            .child(
+                div()
+                    .id(("epub_item", item_id as usize))
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .w_full()
+                    .h(px(62.0))
+                    .p_3()
+                    .rounded_xl()
+                    .bg(if is_sel { Theme::bg_card_hover() } else { Theme::bg_card() })
+                    .border_1()
+                    .border_color(if is_sel { Theme::accent_amber() } else { Theme::border() })
+                    .cursor_pointer()
+                    .on_click(move |_ev, _window, cx| {
+                        view_select.update(cx, |this, cx| {
+                            this.toggle_item_selection(item_id, cx);
+                        }).ok();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .w_5()
+                                    .h_5()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(if is_sel { Theme::accent_amber() } else { Theme::border() })
+                                    .bg(if is_sel { Theme::accent_amber() } else { hsla(0.0, 0.0, 0.0, 0.0) })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::bg_root())
+                                    .child(if is_sel { "✓" } else { "" }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(Theme::text_primary())
+                                            .truncate()
+                                            .child(item.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .text_xs()
+                                            .text_color(Theme::text_muted())
+                                            .truncate()
+                                            .child(format!("Author: {}", item.author))
+                                            .child("•")
+                                            .child(item.file_size_str.clone())
+                                            .child("•")
+                                            .child(item.modified_str.clone()),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(status_badge)
+                            .children(quick_btn),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Renders a visible custom scrollbar track & thumb bound to a GPUI UniformListScrollHandle.
     fn render_custom_scrollbar(
         &self,
-        scroll_handle: &ScrollHandle,
+        scroll_handle: &UniformListScrollHandle,
         item_count: usize,
+        item_height: Pixels,
         id_prefix: &'static str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1558,45 +1592,67 @@ impl KindleStudio {
             .rounded_md()
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(move |_this, ev: &MouseDownEvent, _, cx| {
-                let track_bounds = handle_for_down.bounds();
-                let measured_max = handle_for_down.max_offset().height;
+                let state = handle_for_down.0.borrow();
+                let track_bounds = state.base_handle.bounds();
+                let viewport_h = track_bounds.size.height;
+                let (measured_max, total_content_h) = if let Some(size) = state.last_item_size {
+                    (
+                        (size.contents.height - size.item.height).max(px(0.0)),
+                        size.contents.height,
+                    )
+                } else {
+                    let max = state.base_handle.max_offset().height;
+                    let est = item_height * item_count;
+                    (max.max(px(0.0)), est)
+                };
+
                 let effective_max = if measured_max > px(1.0) {
                     measured_max
-                } else if item_count > 0 {
-                    let est = px((item_count as f32) * 68.0);
-                    (est - track_bounds.size.height).max(px(0.0))
+                } else if item_count > 0 && total_content_h > viewport_h {
+                    total_content_h - viewport_h
                 } else {
                     px(0.0)
                 };
 
-                if track_bounds.size.height > px(0.0) && effective_max > px(1.0) {
+                if viewport_h > px(0.0) && effective_max > px(1.0) {
                     let click_y = ev.position.y;
-                    let rel_y = (click_y - track_bounds.origin.y).clamp(px(0.0), track_bounds.size.height);
-                    let target_ratio = (rel_y / track_bounds.size.height).clamp(0.0, 1.0);
+                    let rel_y = (click_y - track_bounds.origin.y).clamp(px(0.0), viewport_h);
+                    let target_ratio = (rel_y / viewport_h).clamp(0.0, 1.0);
                     let target_offset = -(effective_max * target_ratio);
-                    handle_for_down.set_offset(point(px(0.0), target_offset));
+                    state.base_handle.set_offset(point(px(0.0), target_offset));
                     cx.notify();
                 }
             }))
             .on_mouse_move(cx.listener(move |_this, ev: &MouseMoveEvent, _, cx| {
                 if ev.dragging() {
-                    let track_bounds = handle_for_move.bounds();
-                    let measured_max = handle_for_move.max_offset().height;
+                    let state = handle_for_move.0.borrow();
+                    let track_bounds = state.base_handle.bounds();
+                    let viewport_h = track_bounds.size.height;
+                    let (measured_max, total_content_h) = if let Some(size) = state.last_item_size {
+                        (
+                            (size.contents.height - size.item.height).max(px(0.0)),
+                            size.contents.height,
+                        )
+                    } else {
+                        let max = state.base_handle.max_offset().height;
+                        let est = item_height * item_count;
+                        (max.max(px(0.0)), est)
+                    };
+
                     let effective_max = if measured_max > px(1.0) {
                         measured_max
-                    } else if item_count > 0 {
-                        let est = px((item_count as f32) * 68.0);
-                        (est - track_bounds.size.height).max(px(0.0))
+                    } else if item_count > 0 && total_content_h > viewport_h {
+                        total_content_h - viewport_h
                     } else {
                         px(0.0)
                     };
 
-                    if track_bounds.size.height > px(0.0) && effective_max > px(1.0) {
+                    if viewport_h > px(0.0) && effective_max > px(1.0) {
                         let click_y = ev.position.y;
-                        let rel_y = (click_y - track_bounds.origin.y).clamp(px(0.0), track_bounds.size.height);
-                        let target_ratio = (rel_y / track_bounds.size.height).clamp(0.0, 1.0);
+                        let rel_y = (click_y - track_bounds.origin.y).clamp(px(0.0), viewport_h);
+                        let target_ratio = (rel_y / viewport_h).clamp(0.0, 1.0);
                         let target_offset = -(effective_max * target_ratio);
-                        handle_for_move.set_offset(point(px(0.0), target_offset));
+                        state.base_handle.set_offset(point(px(0.0), target_offset));
                         cx.notify();
                     }
                 }
@@ -1613,31 +1669,37 @@ impl KindleStudio {
                         window.paint_quad(track_quad);
 
                         // 2. Real-time thumb geometry calculation at paint time
+                        let state = handle_for_paint.0.borrow();
                         let viewport_h = track_bounds.size.height;
-                        let measured_max = handle_for_paint.max_offset().height;
+                        let (measured_max, total_content_h) = if let Some(size) = state.last_item_size {
+                            (
+                                (size.contents.height - size.item.height).max(px(0.0)),
+                                size.contents.height,
+                            )
+                        } else {
+                            let max = state.base_handle.max_offset().height;
+                            let est = item_height * item_count;
+                            (max.max(px(0.0)), est)
+                        };
+
                         let effective_max = if measured_max > px(1.0) {
                             measured_max
-                        } else if item_count > 0 {
-                            let est_content = px((item_count as f32) * 68.0);
-                            if est_content > viewport_h {
-                                est_content - viewport_h
-                            } else {
-                                px(0.0)
-                            }
+                        } else if item_count > 0 && total_content_h > viewport_h {
+                            total_content_h - viewport_h
                         } else {
                             px(0.0)
                         };
 
                         // Only render thumb if there is scrollable content
                         if effective_max > px(1.0) && viewport_h > px(20.0) {
-                            let total_content_h = viewport_h + effective_max;
-                            let scroll_offset_y = (-handle_for_paint.offset().y).clamp(px(0.0), effective_max);
+                            let total_content = total_content_h.max(viewport_h + px(1.0));
+                            let scroll_offset_y = (-state.base_handle.offset().y).clamp(px(0.0), effective_max);
                             let scroll_ratio = (scroll_offset_y / effective_max).clamp(0.0, 1.0);
 
                             // Proportional thumb size, clamped:
                             // Min: 36px so it's always easily draggable
                             // Max: 70% of viewport so it NEVER fills the entire height and always leaves dragging room
-                            let raw_thumb_h = (viewport_h / total_content_h) * viewport_h;
+                            let raw_thumb_h = (viewport_h / total_content) * viewport_h;
                             let max_allowed_thumb = (viewport_h * 0.70).max(px(36.0));
                             let thumb_h = raw_thumb_h.clamp(px(36.0), max_allowed_thumb.min(viewport_h - px(10.0)));
 
@@ -1686,9 +1748,10 @@ impl KindleStudio {
         let count_mobi = self.files.iter().filter(|f| f.format == "MOBI").count();
         let count_all = self.files.len();
 
-        let filtered_files: Vec<&KindleFile> = self.files
+        let filtered_indices: Vec<usize> = self.files
             .iter()
-            .filter(|f| {
+            .enumerate()
+            .filter(|(_, f)| {
                 let fmt_match = match self.filter_format.as_deref() {
                     Some("KFX") => f.format == "KFX",
                     Some("WORDWISE") => f.has_word_wise,
@@ -1703,8 +1766,9 @@ impl KindleStudio {
                 };
                 fmt_match && query_match
             })
+            .map(|(idx, _)| idx)
             .collect();
-        let file_count = filtered_files.len();
+        let file_count = filtered_indices.len();
 
         let free_gb = (self.device.total_gb - self.device.used_gb).max(0.0);
         let used_pct = if self.device.total_gb > 0.0 {
@@ -1745,7 +1809,7 @@ impl KindleStudio {
                             .child(if is_offline {
                                 "Disconnected".to_string()
                             } else {
-                                format!("Total {} books (Filtered: {})", count_all, filtered_files.len())
+                                format!("Total {} books (Filtered: {})", count_all, file_count)
                             }),
                     ),
             )
@@ -1940,7 +2004,7 @@ impl KindleStudio {
                                 })),
                         )
                         .into_any_element()
-                } else if filtered_files.is_empty() {
+                } else if filtered_indices.is_empty() {
                     div()
                         .flex()
                         .flex_col()
@@ -1968,6 +2032,8 @@ impl KindleStudio {
                         )
                         .into_any_element()
                 } else {
+                    let view = cx.entity().downgrade();
+                    let indices = filtered_indices.clone();
                     div()
                         .flex()
                         .flex_1()
@@ -1986,127 +2052,149 @@ impl KindleStudio {
                                 .flex_1()
                                 .min_w_0()
                                 .h_full()
-                                .overflow_y_scroll()
-                                .overflow_x_hidden()
-                                .track_scroll(&self.explorer_scroll_handle)
+                                .overflow_hidden()
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .w_full()
-                                        .gap_2()
-                                        .pr_1p5()
-                                        .children(filtered_files.into_iter().map(|file| {
-                                            let badge_bg = match file.format.as_str() {
-                                                "KFX" => Theme::accent_amber(),
-                                                "AZW3" => Theme::accent_blue(),
-                                                "MOBI" => Theme::accent_purple(),
-                                                _ => Theme::text_muted(),
-                                            };
-
-                                            let file_name = file.name.clone();
-
-                                            div()
-                                                .flex()
-                                                .justify_between()
-                                                .items_center()
-                                                .w_full()
-                                                .overflow_hidden()
-                                                .p_2p5()
-                                                .rounded_md()
-                                                .bg(Theme::bg_card())
-                                                .border_1()
-                                                .border_color(Theme::border())
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2p5()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .overflow_hidden()
-                                                        .child(
-                                                            div()
-                                                                .flex_shrink_0()
-                                                                .px_1p5()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(badge_bg)
-                                                                .text_xs()
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .text_color(hsla(0.0, 0.0, 0.0, 1.0))
-                                                                .child(file.format.clone()),
-                                                        )
-                                                        .children(if file.has_word_wise {
-                                                            Some(
-                                                                div()
-                                                                    .flex_shrink_0()
-                                                                    .px_1p5()
-                                                                    .py_0p5()
-                                                                    .rounded_sm()
-                                                                    .bg(Theme::accent_purple())
-                                                                    .text_xs()
-                                                                    .font_weight(FontWeight::BOLD)
-                                                                    .text_color(Theme::text_primary())
-                                                                    .child("Word Wise"),
-                                                            )
-                                                        } else {
-                                                            None
-                                                        })
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .text_xs()
-                                                                .font_weight(FontWeight::SEMIBOLD)
-                                                                .text_color(Theme::text_primary())
-                                                                .truncate()
-                                                                .child(file.name.clone()),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_shrink_0()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_3()
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(Theme::text_muted())
-                                                                .child(file.size_formatted.clone()),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(Theme::text_muted())
-                                                                .child(file.modified.clone()),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id(ElementId::Name(format!("del_{}", file_name).into()))
-                                                                .cursor_pointer()
-                                                                .px_2()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(Theme::bg_card_hover())
-                                                                .text_xs()
-                                                                .text_color(Theme::accent_red())
-                                                                .child("🗑")
-                                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                                    this.delete_file(&file_name, cx);
-                                                                })),
-                                                        ),
-                                                )
-                                        }))
+                                    uniform_list(
+                                        "kindle_files_uniform_list",
+                                        indices.len(),
+                                        cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+                                            range
+                                                .map(|r_idx| {
+                                                    let file_idx = indices[r_idx];
+                                                    let file = &this.files[file_idx];
+                                                    Self::render_kindle_file_row(file, &view)
+                                                })
+                                                .collect()
+                                        }),
+                                    )
+                                    .track_scroll(self.explorer_scroll_handle.clone())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full(),
                                 )
                         )
                         .child(
-                            self.render_custom_scrollbar(&self.explorer_scroll_handle, file_count, "kindle", cx)
+                            self.render_custom_scrollbar(&self.explorer_scroll_handle, filtered_indices.len(), px(48.0), "kindle", cx)
                         )
                         .into_any_element()
                 }
             )
+    }
+
+    /// Renders a single Kindle file row with strict 48px height for virtualization.
+    fn render_kindle_file_row(file: &KindleFile, view: &WeakEntity<Self>) -> AnyElement {
+        let badge_bg = match file.format.as_str() {
+            "KFX" => Theme::accent_amber(),
+            "AZW3" => Theme::accent_blue(),
+            "MOBI" => Theme::accent_purple(),
+            _ => Theme::text_muted(),
+        };
+
+        let file_name = file.name.clone();
+        let view_del = view.clone();
+        let f_del = file_name.clone();
+
+        div()
+            .w_full()
+            .h(px(48.0))
+            .pb(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .w_full()
+                    .h(px(44.0))
+                    .p_2p5()
+                    .rounded_md()
+                    .bg(Theme::bg_card())
+                    .border_1()
+                    .border_color(Theme::border())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2p5()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(badge_bg)
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(hsla(0.0, 0.0, 0.0, 1.0))
+                                    .child(file.format.clone()),
+                            )
+                            .children(if file.has_word_wise {
+                                Some(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(Theme::accent_purple())
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(Theme::text_primary())
+                                        .child("Word Wise"),
+                                )
+                            } else {
+                                None
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(Theme::text_primary())
+                                    .truncate()
+                                    .child(file.name.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .child(file.size_formatted.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .child(file.modified.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(ElementId::Name(format!("del_{}", file_name).into()))
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(Theme::bg_card_hover())
+                                    .text_xs()
+                                    .text_color(Theme::accent_red())
+                                    .child("🗑")
+                                    .on_click(move |_ev, _window, cx| {
+                                        view_del.update(cx, |this, cx| {
+                                            this.delete_file(&f_del, cx);
+                                        }).ok();
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// Renders the Unified Dual-Pane Split View:
