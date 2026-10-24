@@ -6,8 +6,8 @@ use gpui::*;
 use super::theme::Theme;
 use super::state::{
     detect_kindle_device, load_device_files, BatchProgressState, ConversionSettings, ConversionTask,
-    ConverterMode, DeviceStatus, KindleFile, LocalEpubItem, LocalEpubStatus, LocalFolderState,
-    StudioTab, TaskStatus,
+    ConverterMode, DeviceStatus, EpubSortField, KindleFile, LocalEpubItem, LocalEpubStatus,
+    LocalFolderState, SortDirection, StudioTab, TaskStatus,
 };
 
 pub struct KindleStudio {
@@ -1198,34 +1198,7 @@ impl KindleStudio {
         let selected_count = self.folder_state.items.iter().filter(|i| i.is_selected).count();
         let total_count = self.folder_state.items.len();
 
-        let search_query = self.folder_state.search_query.to_lowercase();
-        let filter_status = self.folder_state.filter_status.as_deref();
-
-        let filtered_indices: Vec<usize> = self.folder_state.items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| {
-                if !search_query.is_empty()
-                    && !item.title.to_lowercase().contains(&search_query)
-                    && !item.author.to_lowercase().contains(&search_query)
-                    && !item.filename.to_lowercase().contains(&search_query)
-                {
-                    return false;
-                }
-                if let Some(st) = filter_status {
-                    match st {
-                        "unconverted" => item.status == LocalEpubStatus::Unconverted,
-                        "in_queue" => item.status == LocalEpubStatus::InQueue,
-                        "converted" => item.status == LocalEpubStatus::ConvertedLocal,
-                        "on_device" => item.status == LocalEpubStatus::OnDevice,
-                        _ => true,
-                    }
-                } else {
-                    true
-                }
-            })
-            .map(|(idx, _)| idx)
-            .collect();
+        let filtered_indices = self.folder_state.sorted_and_filtered_indices();
 
         div()
             .flex()
@@ -1434,10 +1407,11 @@ impl KindleStudio {
                         }
                     ),
             )
-            // 3. Scrollable EPUB List Table with Visible Scrollbar
+            // 3. Scrollable EPUB List Table with Column Headers (Option B)
             .child(
                 div()
                     .flex()
+                    .flex_col()
                     .flex_1()
                     .w_full()
                     .min_h_0()
@@ -1446,65 +1420,74 @@ impl KindleStudio {
                     .bg(Theme::bg_card())
                     .border_1()
                     .border_color(Theme::border())
-                    .p_2()
-                    .gap_1p5()
+                    .child(self.render_table_column_headers(cx))
                     .child(
                         div()
-                            .id("folder_epub_list_scroll")
+                            .flex()
                             .flex_1()
-                            .min_w_0()
-                            .h_full()
+                            .w_full()
+                            .min_h_0()
                             .overflow_hidden()
+                            .p_2()
+                            .gap_1p5()
                             .child(
-                                if filtered_indices.is_empty() {
-                                    div()
-                                        .size_full()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .justify_center()
-                                        .p_8()
-                                        .rounded_xl()
-                                        .child(
-                                            div()
-                                                .text_base()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(Theme::text_muted())
-                                                .child(
-                                                    if self.folder_state.current_folder.is_none() {
-                                                        "Click 'Choose Folder' above to select your EPUB directory."
-                                                    } else {
-                                                        "No EPUB books found in this folder."
-                                                    }
-                                                ),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    let view = cx.entity().downgrade();
-                                    let indices = filtered_indices.clone();
-                                    uniform_list(
-                                        "folder_epub_uniform_list",
-                                        indices.len(),
-                                        cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
-                                            range
-                                                .map(|r_idx| {
-                                                    let item_idx = indices[r_idx];
-                                                    let item = &this.folder_state.items[item_idx];
-                                                    Self::render_epub_card(item, &view)
-                                                })
-                                                .collect()
-                                        }),
-                                    )
-                                    .track_scroll(self.folder_scroll_handle.clone())
+                                div()
+                                    .id("folder_epub_list_scroll")
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
-                                    .into_any_element()
-                                }
+                                    .overflow_hidden()
+                                    .child(
+                                        if filtered_indices.is_empty() {
+                                            div()
+                                                .size_full()
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .justify_center()
+                                                .p_8()
+                                                .rounded_xl()
+                                                .child(
+                                                    div()
+                                                        .text_base()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(Theme::text_muted())
+                                                        .child(
+                                                            if self.folder_state.current_folder.is_none() {
+                                                                "Click 'Choose Folder' above to select your EPUB directory."
+                                                            } else {
+                                                                "No EPUB books found in this folder."
+                                                            }
+                                                        ),
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            let view = cx.entity().downgrade();
+                                            let indices = filtered_indices.clone();
+                                            uniform_list(
+                                                "folder_epub_uniform_list",
+                                                indices.len(),
+                                                cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+                                                    range
+                                                        .map(|r_idx| {
+                                                            let item_idx = indices[r_idx];
+                                                            let item = &this.folder_state.items[item_idx];
+                                                            Self::render_epub_card(item, &view)
+                                                        })
+                                                        .collect()
+                                                }),
+                                            )
+                                            .track_scroll(self.folder_scroll_handle.clone())
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full()
+                                            .into_any_element()
+                                        }
+                                    )
                             )
-                    )
-                    .child(
-                        self.render_custom_scrollbar(&self.folder_scroll_handle, filtered_indices.len(), px(68.0), "folder", cx)
+                            .child(
+                                self.render_custom_scrollbar(&self.folder_scroll_handle, filtered_indices.len(), px(68.0), "folder", cx)
+                            )
                     )
             )
             // 4. Bottom Batch Actions Bar
@@ -1773,16 +1756,16 @@ impl KindleStudio {
                     .relative()
                     .overflow_hidden()
                     .flex()
-                    .justify_between()
                     .items_center()
                     .w_full()
                     .h(px(62.0))
-                    .p_3()
+                    .px_3()
                     .rounded_xl()
                     .bg(if is_sel { Theme::bg_card_hover() } else { Theme::bg_card() })
                     .border_1()
                     .border_color(if is_sel { Theme::accent_amber() } else { Theme::border() })
                     .cursor_pointer()
+                    .gap_2()
                     .on_click(move |_ev, _window, cx| {
                         view_select.update(cx, |this, cx| {
                             this.toggle_item_selection(item_id, cx);
@@ -1802,17 +1785,16 @@ impl KindleStudio {
                             div().into_any_element()
                         }
                     )
+                    // Checkbox
                     .child(
                         div()
+                            .w(px(28.0))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .gap_3()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
+                            .justify_center()
                             .child(
                                 div()
-                                    .flex_shrink_0()
                                     .w_5()
                                     .h_5()
                                     .rounded_md()
@@ -1826,43 +1808,81 @@ impl KindleStudio {
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(Theme::bg_root())
                                     .child(if is_sel { "✓" } else { "" }),
+                            ),
+                    )
+                    // 1. Title Column
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::text_primary())
+                                    .truncate()
+                                    .child(item.title.clone()),
                             )
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(Theme::text_primary())
-                                            .truncate()
-                                            .child(item.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap_2()
-                                            .text_xs()
-                                            .text_color(Theme::text_muted())
-                                            .truncate()
-                                            .child(format!("Author: {}", item.author))
-                                            .child("•")
-                                            .child(item.file_size_str.clone())
-                                            .child("•")
-                                            .child(item.modified_str.clone()),
-                                    ),
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .truncate()
+                                    .child(item.filename.clone()),
                             ),
                     )
+                    // 2. Author Column
                     .child(
                         div()
+                            .w(px(140.0))
+                            .flex_shrink_0()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(Theme::text_primary())
+                                    .truncate()
+                                    .child(item.author.clone()),
+                            ),
+                    )
+                    // 3. Size Column
+                    .child(
+                        div()
+                            .w(px(70.0))
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .child(item.file_size_str.clone()),
+                            ),
+                    )
+                    // 4. Date Column
+                    .child(
+                        div()
+                            .w(px(85.0))
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .child(item.modified_str.clone()),
+                            ),
+                    )
+                    // 5. Status & Actions Column
+                    .child(
+                        div()
+                            .w(px(160.0))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
+                            .justify_end()
                             .gap_2()
                             .child(status_badge)
                             .children(quick_btn),
@@ -1871,7 +1891,144 @@ impl KindleStudio {
             .into_any_element()
     }
 
-    /// Renders a visible custom scrollbar track & thumb bound to a GPUI UniformListScrollHandle.
+    /// Renders sortable column headers for the EPUB library table view (Option B).
+    fn render_table_column_headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sort_field = self.folder_state.sort_field;
+        let sort_dir = self.folder_state.sort_direction;
+
+        div()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(34.0))
+            .px_3()
+            .bg(Theme::bg_card_hover())
+            .border_b_1()
+            .border_color(Theme::border())
+            .gap_2()
+            .text_xs()
+            .font_weight(FontWeight::BOLD)
+            // Checkbox spacing placeholder
+            .child(
+                div()
+                    .w(px(28.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(Theme::text_muted())
+                    .child("☐"),
+            )
+            // 1. Title Column Header
+            .child(
+                self.render_sort_column_cell(
+                    "Title",
+                    EpubSortField::Title,
+                    sort_field,
+                    sort_dir,
+                    div().flex_1().min_w_0(),
+                    cx,
+                )
+            )
+            // 2. Author Column Header
+            .child(
+                self.render_sort_column_cell(
+                    "Author",
+                    EpubSortField::Author,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(140.0)).flex_shrink_0().min_w_0(),
+                    cx,
+                )
+            )
+            // 3. Size Column Header
+            .child(
+                self.render_sort_column_cell(
+                    "Size",
+                    EpubSortField::FileSize,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(70.0)).flex_shrink_0(),
+                    cx,
+                )
+            )
+            // 4. Date Column Header
+            .child(
+                self.render_sort_column_cell(
+                    "Date",
+                    EpubSortField::DateModified,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(85.0)).flex_shrink_0(),
+                    cx,
+                )
+            )
+            // 5. Status Column Header
+            .child(
+                self.render_sort_column_cell(
+                    "Status",
+                    EpubSortField::Status,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(160.0)).flex_shrink_0(),
+                    cx,
+                )
+            )
+            // Scrollbar spacer (14px)
+            .child(div().w(px(14.0)).flex_shrink_0())
+    }
+
+    fn render_sort_column_cell(
+        &self,
+        label: &'static str,
+        target_field: EpubSortField,
+        active_field: EpubSortField,
+        active_dir: SortDirection,
+        container: Div,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_active = active_field == target_field;
+        let arrow_symbol = if is_active {
+            active_dir.symbol()
+        } else {
+            "↕"
+        };
+
+        container
+            .id(ElementId::Name(format!("col_sort_{}", label.to_lowercase()).into()))
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .text_color(if is_active { Theme::accent_amber() } else { Theme::text_muted() })
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(if is_active { Theme::accent_amber() } else { Theme::text_muted() })
+                    .child(arrow_symbol),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.handle_sort_column_click(target_field, cx);
+            }))
+            .into_any_element()
+    }
+
+    fn handle_sort_column_click(&mut self, field: EpubSortField, cx: &mut Context<Self>) {
+        if self.folder_state.sort_field == field {
+            self.folder_state.sort_direction = self.folder_state.sort_direction.toggle();
+        } else {
+            self.folder_state.sort_field = field;
+            self.folder_state.sort_direction = match field {
+                EpubSortField::DateModified | EpubSortField::FileSize => SortDirection::Descending,
+                _ => SortDirection::Ascending,
+            };
+        }
+        cx.notify();
+    }
     fn render_custom_scrollbar(
         &self,
         scroll_handle: &UniformListScrollHandle,

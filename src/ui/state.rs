@@ -27,6 +27,52 @@ pub enum LocalEpubStatus {
     Error(String),
 }
 
+impl LocalEpubStatus {
+    pub fn priority(&self) -> u8 {
+        match self {
+            LocalEpubStatus::Unconverted => 0,
+            LocalEpubStatus::InQueue => 1,
+            LocalEpubStatus::Processing { .. } => 2,
+            LocalEpubStatus::ConvertedLocal => 3,
+            LocalEpubStatus::OnDevice => 4,
+            LocalEpubStatus::Error(_) => 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EpubSortField {
+    #[default]
+    Title,
+    Author,
+    DateModified,
+    FileSize,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    pub fn toggle(&self) -> Self {
+        match self {
+            Self::Ascending => Self::Descending,
+            Self::Descending => Self::Ascending,
+        }
+    }
+
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Ascending => "▲",
+            Self::Descending => "▼",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BatchProgressState {
     pub total_tasks: usize,
@@ -60,7 +106,9 @@ pub struct LocalEpubItem {
     pub filename: String,
     pub title: String,
     pub author: String,
+    pub file_size_bytes: u64,
     pub file_size_str: String,
+    pub modified_timestamp: u64,
     pub modified_str: String,
     pub is_selected: bool,
     pub status: LocalEpubStatus,
@@ -75,6 +123,8 @@ pub struct LocalFolderState {
     pub filter_status: Option<String>,
     pub is_scanning: bool,
     pub batch_progress: Option<BatchProgressState>,
+    pub sort_field: EpubSortField,
+    pub sort_direction: SortDirection,
 }
 
 impl Default for LocalFolderState {
@@ -87,7 +137,74 @@ impl Default for LocalFolderState {
             filter_status: None,
             is_scanning: false,
             batch_progress: None,
+            sort_field: EpubSortField::Title,
+            sort_direction: SortDirection::Ascending,
         }
+    }
+}
+
+impl LocalFolderState {
+    pub fn sorted_and_filtered_indices(&self) -> Vec<usize> {
+        let search_query = self.search_query.to_lowercase();
+        let filter_status = self.filter_status.as_deref();
+
+        let mut indices: Vec<usize> = self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                if !search_query.is_empty()
+                    && !item.title.to_lowercase().contains(&search_query)
+                    && !item.author.to_lowercase().contains(&search_query)
+                    && !item.filename.to_lowercase().contains(&search_query)
+                {
+                    return false;
+                }
+                if let Some(st) = filter_status {
+                    match st {
+                        "unconverted" => item.status == LocalEpubStatus::Unconverted,
+                        "in_queue" => item.status == LocalEpubStatus::InQueue,
+                        "converted" => item.status == LocalEpubStatus::ConvertedLocal,
+                        "on_device" => item.status == LocalEpubStatus::OnDevice,
+                        _ => true,
+                    }
+                } else {
+                    true
+                }
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        indices.sort_by(|&a_idx, &b_idx| {
+            let a = &self.items[a_idx];
+            let b = &self.items[b_idx];
+
+            let cmp = match self.sort_field {
+                EpubSortField::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                EpubSortField::Author => {
+                    let a_unknown = a.author.eq_ignore_ascii_case("unknown");
+                    let b_unknown = b.author.eq_ignore_ascii_case("unknown");
+                    match (a_unknown, b_unknown) {
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => a.author.to_lowercase().cmp(&b.author.to_lowercase()),
+                    }
+                }
+                EpubSortField::DateModified => a.modified_timestamp.cmp(&b.modified_timestamp),
+                EpubSortField::FileSize => a.file_size_bytes.cmp(&b.file_size_bytes),
+                EpubSortField::Status => a.status.priority().cmp(&b.status.priority()),
+            };
+
+            let ordered_cmp = match self.sort_direction {
+                SortDirection::Ascending => cmp,
+                SortDirection::Descending => cmp.reverse(),
+            };
+
+            ordered_cmp
+                .then_with(|| a.title.cmp(&b.title))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        indices
     }
 }
 
@@ -272,22 +389,27 @@ pub fn scan_local_epub_directory(
 
     for (id_counter, path) in (1u64..).zip(files) {
         let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let file_size_str = match std::fs::metadata(&path) {
+        let (file_size_bytes, file_size_str) = match std::fs::metadata(&path) {
             Ok(meta) => {
                 let bytes = meta.len();
-                if bytes >= 1024 * 1024 {
+                let s = if bytes >= 1024 * 1024 {
                     format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
                 } else {
                     format!("{} KB", bytes / 1024)
-                }
+                };
+                (bytes, s)
             }
-            Err(_) => "0 KB".into(),
+            Err(_) => (0, "0 KB".into()),
         };
 
-        let modified_str = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+        let (modified_timestamp, modified_str) = match std::fs::metadata(&path).and_then(|m| m.modified()) {
             Ok(time) => {
+                let ts = time
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
                 let duration = time.elapsed().unwrap_or_default();
-                if duration.as_secs() < 60 {
+                let s = if duration.as_secs() < 60 {
                     "Just now".into()
                 } else if duration.as_secs() < 3600 {
                     format!("{}m ago", duration.as_secs() / 60)
@@ -295,9 +417,10 @@ pub fn scan_local_epub_directory(
                     format!("{}h ago", duration.as_secs() / 3600)
                 } else {
                     format!("{}d ago", duration.as_secs() / 86400)
-                }
+                };
+                (ts, s)
             }
-            Err(_) => "Unknown".into(),
+            Err(_) => (0, "Unknown".into()),
         };
 
         let (title, author) = match kfx_converter::EpubReader::read_metadata_from_file(&path) {
@@ -346,7 +469,9 @@ pub fn scan_local_epub_directory(
             filename,
             title,
             author,
+            file_size_bytes,
             file_size_str,
+            modified_timestamp,
             modified_str,
             is_selected: false,
             status,
@@ -521,6 +646,94 @@ mod tests {
             progress: 15,
         };
         assert!(matches!(proc_status, LocalEpubStatus::Processing { progress: 15, .. }));
+    }
+
+    #[test]
+    fn test_sorted_and_filtered_indices() {
+        let mut state = LocalFolderState {
+            items: vec![
+                LocalEpubItem {
+                    id: 1,
+                    path: PathBuf::from("/books/Zeta.epub"),
+                    filename: "Zeta.epub".into(),
+                    title: "Zeta Book".into(),
+                    author: "Brandon Sanderson".into(),
+                    file_size_bytes: 5_000_000,
+                    file_size_str: "5.0 MB".into(),
+                    modified_timestamp: 100,
+                    modified_str: "100s ago".into(),
+                    is_selected: false,
+                    status: LocalEpubStatus::ConvertedLocal,
+                },
+                LocalEpubItem {
+                    id: 2,
+                    path: PathBuf::from("/books/Alpha.epub"),
+                    filename: "Alpha.epub".into(),
+                    title: "Alpha Book".into(),
+                    author: "Arthur Conan Doyle".into(),
+                    file_size_bytes: 1_000_000,
+                    file_size_str: "1.0 MB".into(),
+                    modified_timestamp: 300,
+                    modified_str: "300s ago".into(),
+                    is_selected: false,
+                    status: LocalEpubStatus::Unconverted,
+                },
+                LocalEpubItem {
+                    id: 3,
+                    path: PathBuf::from("/books/Beta.epub"),
+                    filename: "Beta.epub".into(),
+                    title: "Beta Book".into(),
+                    author: "Unknown".into(),
+                    file_size_bytes: 10_000_000,
+                    file_size_str: "10.0 MB".into(),
+                    modified_timestamp: 200,
+                    modified_str: "200s ago".into(),
+                    is_selected: false,
+                    status: LocalEpubStatus::OnDevice,
+                },
+            ],
+            ..Default::default()
+        };
+
+        // 1. Sort by Title Ascending (Alpha -> Beta -> Zeta)
+        state.sort_field = EpubSortField::Title;
+        state.sort_direction = SortDirection::Ascending;
+        let sorted = state.sorted_and_filtered_indices();
+        assert_eq!(sorted, vec![1, 2, 0]); // Alpha (idx 1), Beta (idx 2), Zeta (idx 0)
+
+        // 2. Sort by Title Descending (Zeta -> Beta -> Alpha)
+        state.sort_direction = SortDirection::Descending;
+        let sorted_desc = state.sorted_and_filtered_indices();
+        assert_eq!(sorted_desc, vec![0, 2, 1]);
+
+        // 3. Sort by Author Ascending (Arthur -> Brandon -> Unknown at end)
+        state.sort_field = EpubSortField::Author;
+        state.sort_direction = SortDirection::Ascending;
+        let sorted_author = state.sorted_and_filtered_indices();
+        assert_eq!(sorted_author, vec![1, 0, 2]);
+
+        // 4. Sort by FileSize Descending (Beta 10MB -> Zeta 5MB -> Alpha 1MB)
+        state.sort_field = EpubSortField::FileSize;
+        state.sort_direction = SortDirection::Descending;
+        let sorted_size = state.sorted_and_filtered_indices();
+        assert_eq!(sorted_size, vec![2, 0, 1]);
+
+        // 5. Sort by DateModified Descending (Alpha 300 -> Beta 200 -> Zeta 100)
+        state.sort_field = EpubSortField::DateModified;
+        state.sort_direction = SortDirection::Descending;
+        let sorted_date = state.sorted_and_filtered_indices();
+        assert_eq!(sorted_date, vec![1, 2, 0]);
+
+        // 6. Sort by Status Ascending (Unconverted [1] -> ConvertedLocal [0] -> OnDevice [2])
+        state.sort_field = EpubSortField::Status;
+        state.sort_direction = SortDirection::Ascending;
+        let sorted_status = state.sorted_and_filtered_indices();
+        assert_eq!(sorted_status, vec![1, 0, 2]);
+
+        // 7. Filter status + sort
+        state.filter_status = Some("unconverted".into());
+        let filtered = state.sorted_and_filtered_indices();
+        assert_eq!(filtered, vec![1]);
     }
 }
 
