@@ -726,10 +726,9 @@ impl<'a> IonReader<'a> {
             0xE => {
                 self.offset = payload_start;
                 let annot_length = decode_varuint(self.buf, &mut self.offset)? as usize;
-                let annot_end = self.offset + annot_length;
-                if annot_end > payload_end {
-                    return Err(IonError::UnexpectedEof(annot_end));
-                }
+                let annot_end = self.offset.checked_add(annot_length)
+                    .filter(|&end| end <= payload_end)
+                    .ok_or(IonError::UnexpectedEof(payload_end))?;
                 let mut annotations = Vec::new();
                 while self.offset < annot_end {
                     let annot_id = decode_varuint(self.buf, &mut self.offset)? as u32;
@@ -1040,5 +1039,16 @@ mod tests {
         let mut offset_s = 0;
         let err_s = decode_varint_slice(&overflow_bytes, &mut offset_s).unwrap_err();
         assert!(matches!(err_s, IonError::MalformedIon(_)));
+    }
+
+    #[test]
+    fn test_ion_annotation_length_overflow_rejected() {
+        // Type 0xEE (Annotated with VarUInt length).
+        // declared payload_len = 5 (via VarUInt 0x85).
+        // annot_length = 10 (via VarUInt 0x8A > 5).
+        let malformed_annot = [0xEE, 0x85, 0x8A, 0x01, 0x02, 0x03, 0x04];
+        let mut reader = IonReader::new(&malformed_annot);
+        let err = reader.decode_value().unwrap_err();
+        assert!(matches!(err, IonError::UnexpectedEof(_)));
     }
 }

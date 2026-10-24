@@ -709,7 +709,7 @@ impl KindleSync {
             .arg("--")
             .arg(src)
             .arg(dst)
-            .stdout(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
 

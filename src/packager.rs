@@ -1424,7 +1424,7 @@ impl<'a> KfxPackager<'a> {
                     let span_len = span.text.chars().count();
                     let effective_style: Option<String> = match (&span.style, inherited.is_empty()) {
                         (Some(s), true) => Some(s.clone()),
-                        (Some(s), false) => Some(format!("{} {}", inherited, s)),
+                        (Some(s), false) => Some(format!("{} {}", s, inherited)),
                         (None, false) => Some(inherited.to_string()),
                         (None, true) => None,
                     };
@@ -3824,6 +3824,50 @@ mod tests {
         dc_l2_val.iter().for_each(|v| collect_symbols(v, &mut syms));
         let sym_bold = symbol_id("bold").unwrap_or(361);
         assert!(!syms.contains(&sym_bold), "style_dropcap_l2 must not be bold");
+    }
+
+    #[test]
+    fn test_packager_font_size_cascade_child_precedence() {
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "sec1".to_string(),
+            title: "Sec 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Explicit small text in heading".to_string(),
+                    style: Some("font_size_sm".to_string()),
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: Some("font_size_xl".to_string()),
+            }],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        packager.package(&mut buffer).expect("Packaging should succeed");
+
+        let sym_storyline = symbol_id("storyline").unwrap_or(259);
+        let story_entity = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == sym_storyline)
+            .expect("Storyline entity should exist");
+
+        let vals = crate::ion::IonReader::new(&story_entity.data)
+            .decode_all()
+            .expect("Storyline ion should decode");
+
+        let mut symbols_in_story = Vec::new();
+        vals.iter().for_each(|v| collect_symbols(v, &mut symbols_in_story));
+
+        let sm_sym = 852 + 27;
+        let xl_sym = 852 + 29;
+
+        assert!(symbols_in_story.contains(&sm_sym), "Storyline must contain child font_size_sm symbol (879)");
+        assert!(!symbols_in_story.contains(&xl_sym), "Storyline must NOT contain parent font_size_xl symbol (881)");
     }
 }
 

@@ -131,6 +131,19 @@ impl EpubReader {
         }
 
         // 2. Locate OPF file via META-INF/container.xml
+        let mut cumulative_decompressed: u64 = 0;
+        let mut add_decompressed = |bytes: usize| -> Result<(), EpubError> {
+            cumulative_decompressed = cumulative_decompressed
+                .checked_add(bytes as u64)
+                .filter(|&total| total <= MAX_EPUB_UNCOMPRESSED_TOTAL)
+                .ok_or_else(|| {
+                    EpubError::Security(
+                        "Total cumulative decompressed payload exceeds 1 GB limit".to_string(),
+                    )
+                })?;
+            Ok(())
+        };
+
         let opf_path = Self::find_opf_path(&mut archive)?;
         let opf_dir = Path::new(&opf_path)
             .parent()
@@ -144,6 +157,7 @@ impl EpubReader {
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
             let mut s = String::new();
             (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s)?;
+            add_decompressed(s.len())?;
             s
         };
 
@@ -157,6 +171,7 @@ impl EpubReader {
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut s = String::new();
                     if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
+                        add_decompressed(s.len())?;
                         book_css.add_css(&s);
                     }
                 }
@@ -190,6 +205,7 @@ impl EpubReader {
                     let mut data = Vec::with_capacity(entry.size().min(64 * 1024) as usize);
                     let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
                     if limited.read_to_end(&mut data).is_ok() && (data.len() as u64) <= MAX_EPUB_FILE_SIZE {
+                        add_decompressed(data.len())?;
                         resources.insert(
                             item.id.clone(),
                             ResourceAsset {
@@ -225,6 +241,7 @@ impl EpubReader {
                     let mut xhtml = String::new();
                     let mut limited = (&mut entry).take(MAX_CHAPTER_XHTML_BYTES + 1);
                     if limited.read_to_string(&mut xhtml).is_ok() && (xhtml.len() as u64) <= MAX_CHAPTER_XHTML_BYTES {
+                        add_decompressed(xhtml.len())?;
                         let (blocks, sec_footnotes) = Self::parse_xhtml_with_css(&xhtml, &href_to_id, &book_css);
                         for (fn_id, fn_text) in sec_footnotes {
                             all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
@@ -1114,44 +1131,46 @@ impl EpubReader {
             if p_dropcap && !spans.is_empty() {
                 let already_has_dropcap = spans.iter().any(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
                 if !already_has_dropcap {
-                    let first = &mut spans[0];
-                    let trimmed = first.text.trim_start();
-                    let leading_spaces = first.text.len() - trimmed.len();
-                    let mut chars = trimmed.chars();
-                    if let Some(first_ch) = chars.next() {
-                        let is_quote = is_opening_quote(first_ch);
-                        let (take_len, is_two_char) = if is_quote {
-                            if let Some(second_ch) = chars.next() {
-                                (first_ch.len_utf8() + second_ch.len_utf8(), true)
+                    if let Some(first_idx) = spans.iter().position(|s| !s.text.trim().is_empty()) {
+                        let first = &mut spans[first_idx];
+                        let trimmed = first.text.trim_start();
+                        let leading_spaces = first.text.len() - trimmed.len();
+                        let mut chars = trimmed.chars();
+                        if let Some(first_ch) = chars.next() {
+                            let is_quote = is_opening_quote(first_ch);
+                            let (take_len, is_two_char) = if is_quote {
+                                if let Some(second_ch) = chars.next() {
+                                    (first_ch.len_utf8() + second_ch.len_utf8(), true)
+                                } else {
+                                    (first_ch.len_utf8(), false)
+                                }
                             } else {
                                 (first_ch.len_utf8(), false)
+                            };
+                            let drop_text = format!("{}{}", &first.text[..leading_spaces], &trimmed[..take_len]);
+                            let rest_text = trimmed[take_len..].to_string();
+                            let orig_style = first.style.take();
+                            let drop_tag = match (is_two_char, p_l2) {
+                                (true, true) => "dropcap_l2 dropcap_2",
+                                (false, true) => "dropcap_l2 dropcap",
+                                (true, false) => "dropcap_2",
+                                (false, false) => "dropcap",
+                            };
+                            let drop_style = match &orig_style {
+                                Some(s) => format!("{} {}", s, drop_tag),
+                                None => drop_tag.to_string(),
+                            };
+                            first.text = drop_text;
+                            first.style = Some(drop_style);
+                            if !rest_text.is_empty() {
+                                spans.insert(first_idx + 1, TextSpan {
+                                    text: rest_text,
+                                    style: orig_style,
+                                    anchor_id: None,
+                                    href: None,
+                                    ruby: None,
+                                });
                             }
-                        } else {
-                            (first_ch.len_utf8(), false)
-                        };
-                        let drop_text = format!("{}{}", &first.text[..leading_spaces], &trimmed[..take_len]);
-                        let rest_text = trimmed[take_len..].to_string();
-                        let orig_style = first.style.take();
-                        let drop_tag = match (is_two_char, p_l2) {
-                            (true, true) => "dropcap_l2 dropcap_2",
-                            (false, true) => "dropcap_l2 dropcap",
-                            (true, false) => "dropcap_2",
-                            (false, false) => "dropcap",
-                        };
-                        let drop_style = match &orig_style {
-                            Some(s) => format!("{} {}", s, drop_tag),
-                            None => drop_tag.to_string(),
-                        };
-                        first.text = drop_text;
-                        first.style = Some(drop_style);
-                        if !rest_text.is_empty() {
-                            spans.insert(1, TextSpan {
-                                text: rest_text,
-                                style: orig_style,
-                                anchor_id: None,
-                                href: None,
-                                ruby: None,
-                            });
                         }
                     }
                 }
@@ -1165,7 +1184,7 @@ impl EpubReader {
         let mut in_cell = false;
 
         // List state
-        let mut list_stack: Vec<(bool, Vec<Vec<Block>>)> = Vec::new(); // (is_ordered, items)
+        let mut list_stack: Vec<(bool, Vec<Vec<Block>>, Vec<Block>)> = Vec::new(); // (is_ordered, items, saved_parent_blocks)
         let mut current_list_item_blocks: Vec<Block> = Vec::new();
         let mut in_li = false;
 
@@ -1582,11 +1601,20 @@ impl EpubReader {
                                 in_cell = true;
                                 current_cell.clear();
                             }
-                            b"ul" => {
-                                list_stack.push((false, Vec::new()));
-                            }
-                            b"ol" => {
-                                list_stack.push((true, Vec::new()));
+                            b"ul" | b"ol" => {
+                                if in_li {
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                    if current_spans.iter().any(|s| !s.text.trim().is_empty()) {
+                                        current_list_item_blocks.push(Block::Paragraph {
+                                            id: format!("li_{}", blocks.len() + 1),
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: None,
+                                        });
+                                    } else {
+                                        current_spans.clear();
+                                    }
+                                }
+                                list_stack.push((local_bytes == b"ol", Vec::new(), std::mem::take(&mut current_list_item_blocks)));
                             }
                             b"li" => {
                                 in_li = true;
@@ -1655,6 +1683,27 @@ impl EpubReader {
                             }
                             b"br" => {
                                 current_span_text.push('\n');
+                            }
+                            b"a" => {
+                                let mut anchor = None;
+                                let mut href = None;
+                                for attr in e.attributes().flatten() {
+                                    if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name" {
+                                        anchor = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                    } else if attr.key.as_ref() == b"href" {
+                                        href = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                    }
+                                }
+                                if anchor.is_some() || href.is_some() {
+                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                    current_spans.push(TextSpan {
+                                        text: String::new(),
+                                        style: None,
+                                        anchor_id: anchor,
+                                        href,
+                                        ruby: None,
+                                    });
+                                }
                             }
                             b"img" | b"image" => {
                                 if let Some(img_block) = parse_image_block(e, blocks.len()) {
@@ -1938,25 +1987,36 @@ impl EpubReader {
                                 in_li = false;
                                 flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                 if !current_spans.is_empty() {
-                                    current_list_item_blocks.push(Block::Paragraph {
-                                        id: format!("li_{}", blocks.len() + 1),
-                                        spans: std::mem::take(&mut current_spans),
-                                        style: None,
-                                    });
+                                    if current_spans.iter().any(|s| !s.text.trim().is_empty()) {
+                                        current_list_item_blocks.push(Block::Paragraph {
+                                            id: format!("li_{}", blocks.len() + 1),
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: None,
+                                        });
+                                    } else {
+                                        current_spans.clear();
+                                    }
                                 }
-                                if let Some((_, items)) = list_stack.last_mut() {
+                                if let Some((_, items, _)) = list_stack.last_mut() {
                                     items.push(std::mem::take(&mut current_list_item_blocks));
                                 }
                             }
                             b"ul" | b"ol" => {
-                                if let Some((ordered, items)) = list_stack.pop()
+                                if let Some((ordered, items, saved_parent_blocks)) = list_stack.pop()
                                     && !items.is_empty() {
-                                        blocks.push(Block::List {
+                                        let list_block = Block::List {
                                             id: format!("list_{}", blocks.len() + 1),
                                             ordered,
                                             items,
-                                        });
+                                        };
+                                        if !list_stack.is_empty() {
+                                            current_list_item_blocks = saved_parent_blocks;
+                                            current_list_item_blocks.push(list_block);
+                                        } else {
+                                            blocks.push(list_block);
+                                        }
                                     }
+                                in_li = !list_stack.is_empty();
                             }
                             _ => {}
                         }
@@ -3020,6 +3080,103 @@ mod tests {
         assert_eq!(metadata.title, "War & Peace — Complete Edition");
         assert_eq!(metadata.description.as_deref(), Some("A classic tale of love & war."));
         assert!(metadata.creators.contains(&"Leo & Sofia Tolstoy".to_string()));
+    }
+
+    #[test]
+    fn test_epub_dropcap_with_leading_anchor() {
+        let xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+            <p class="dropcap"><a id="chap_start"/>Once upon a time in a distant land.</p>
+        </body></html>"#;
+        let href_map = HashMap::new();
+        let css = CssStylesheet::new();
+        let (blocks, _) = EpubReader::parse_xhtml_with_css(xhtml, &href_map, &css);
+        assert_eq!(blocks.len(), 1);
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            // First span should be anchor with empty text
+            assert_eq!(spans[0].anchor_id.as_deref(), Some("chap_start"));
+            assert_eq!(spans[0].text, "");
+            // Second span should have the dropcap 'O'
+            assert_eq!(spans[1].text, "O");
+            assert!(spans[1].style.as_deref().unwrap_or("").contains("dropcap"));
+            // Third span should have rest of text
+            assert_eq!(spans[2].text, "nce upon a time in a distant land.");
+        } else {
+            panic!("Expected Paragraph block");
+        }
+    }
+
+    #[test]
+    fn test_epub_nested_list_preserved() {
+        let xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+            <ul>
+                <li>Parent Item
+                    <ul>
+                        <li>Child Item</li>
+                    </ul>
+                </li>
+            </ul>
+        </body></html>"#;
+        let href_map = HashMap::new();
+        let css = CssStylesheet::new();
+        let (blocks, _) = EpubReader::parse_xhtml_with_css(xhtml, &href_map, &css);
+        // blocks should contain 1 top-level list
+        assert_eq!(blocks.len(), 1, "Expected exactly 1 top-level list block");
+        if let Block::List { items, ordered, .. } = &blocks[0] {
+            assert!(!ordered);
+            assert_eq!(items.len(), 1);
+            let parent_blocks = &items[0];
+            // Parent blocks should have the paragraph and the nested Block::List
+            assert_eq!(parent_blocks.len(), 2, "Expected 2 blocks inside parent list item (paragraph + nested list)");
+            assert!(matches!(&parent_blocks[0], Block::Paragraph { .. }));
+            assert!(matches!(&parent_blocks[1], Block::List { .. }));
+        } else {
+            panic!("Expected List block");
+        }
+    }
+
+    #[test]
+    fn test_epub_cumulative_decompression_bomb_rejected() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+
+            zip.start_file("mimetype", opts).unwrap();
+            std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
+
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#).unwrap();
+
+            zip.start_file("content.opf", opts).unwrap();
+            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Normal Book</dc:title>
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#).unwrap();
+
+            zip.start_file("c1.xhtml", opts).unwrap();
+            std::io::Write::write_all(&mut zip, br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Safe content</p></body></html>"#).unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), buf.into_inner()).unwrap();
+        let res = EpubReader::read_from_file(temp.path());
+        assert!(res.is_ok(), "Normal archive must pass cumulative decompression checks");
     }
 }
 
