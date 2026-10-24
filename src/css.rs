@@ -9,6 +9,7 @@
 //! combinators, attribute selectors, pseudo-classes/elements, `@`-rules wrappers are
 //! unwrapped and their inner simple rules kept.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -72,6 +73,49 @@ impl ElementStyleCache {
     }
 }
 
+/// Interns common CSS property names as static string slices to avoid heap churn.
+#[inline]
+pub fn intern_css_property(prop: &str) -> Cow<'static, str> {
+    match prop {
+        "font-style" => Cow::Borrowed("font-style"),
+        "font-weight" => Cow::Borrowed("font-weight"),
+        "font-size" => Cow::Borrowed("font-size"),
+        "font-family" => Cow::Borrowed("font-family"),
+        "font-variant" => Cow::Borrowed("font-variant"),
+        "font-variant-caps" => Cow::Borrowed("font-variant-caps"),
+        "float" => Cow::Borrowed("float"),
+        "text-align" => Cow::Borrowed("text-align"),
+        "text-indent" => Cow::Borrowed("text-indent"),
+        "text-decoration" => Cow::Borrowed("text-decoration"),
+        "text-decoration-line" => Cow::Borrowed("text-decoration-line"),
+        "text-transform" => Cow::Borrowed("text-transform"),
+        "vertical-align" => Cow::Borrowed("vertical-align"),
+        "line-height" => Cow::Borrowed("line-height"),
+        "letter-spacing" => Cow::Borrowed("letter-spacing"),
+        "color" => Cow::Borrowed("color"),
+        "background-color" => Cow::Borrowed("background-color"),
+        "margin" => Cow::Borrowed("margin"),
+        "margin-left" => Cow::Borrowed("margin-left"),
+        "margin-right" => Cow::Borrowed("margin-right"),
+        "margin-top" => Cow::Borrowed("margin-top"),
+        "margin-bottom" => Cow::Borrowed("margin-bottom"),
+        "padding" => Cow::Borrowed("padding"),
+        "padding-left" => Cow::Borrowed("padding-left"),
+        "padding-right" => Cow::Borrowed("padding-right"),
+        "padding-top" => Cow::Borrowed("padding-top"),
+        "padding-bottom" => Cow::Borrowed("padding-bottom"),
+        "page-break-before" => Cow::Borrowed("page-break-before"),
+        "break-before" => Cow::Borrowed("break-before"),
+        "page-break-after" => Cow::Borrowed("page-break-after"),
+        "break-after" => Cow::Borrowed("break-after"),
+        "display" => Cow::Borrowed("display"),
+        "width" => Cow::Borrowed("width"),
+        "height" => Cow::Borrowed("height"),
+        "initial-letter" => Cow::Borrowed("initial-letter"),
+        _ => Cow::Owned(prop.to_string()),
+    }
+}
+
 /// A single simple-selector rule.
 #[derive(Debug, Clone)]
 struct CssRule {
@@ -80,7 +124,7 @@ struct CssRule {
     /// Lowercased class names that must ALL be present on the element.
     classes: Vec<String>,
     /// Ordered `(property, value)` declarations (lowercased property).
-    decls: Vec<(String, String)>,
+    decls: Vec<(Cow<'static, str>, String)>,
     /// Source order, used as tiebreaker after specificity.
     order: usize,
     /// Whether this rule matches a `::first-letter` or `:first-letter` pseudo-element.
@@ -230,13 +274,21 @@ fn strip_comments(css: &str) -> String {
     out
 }
 
-fn parse_declarations(body: &str) -> Vec<(String, String)> {
+fn parse_declarations(body: &str) -> Vec<(Cow<'static, str>, String)> {
     body.split(';')
         .filter_map(|d| {
             let (p, v) = d.split_once(':')?;
-            let p = p.trim().to_ascii_lowercase();
+            let p_trim = p.trim();
+            if p_trim.is_empty() {
+                return None;
+            }
+            let p_lc = p_trim.to_ascii_lowercase();
             let v = v.trim().trim_end_matches("!important").trim().to_string();
-            if p.is_empty() || v.is_empty() { None } else { Some((p, v)) }
+            if v.is_empty() {
+                None
+            } else {
+                Some((intern_css_property(&p_lc), v))
+            }
         })
         .collect()
 }
@@ -435,5 +487,32 @@ mod tests {
         });
         assert_eq!(fl2, vec!["dropcap".to_string()]);
         assert_eq!(fl_calls, 1);
+    }
+
+    #[test]
+    fn test_intern_css_property() {
+        use std::borrow::Cow;
+
+        // Standard properties should be Borrowed static slices
+        let p1 = intern_css_property("font-size");
+        assert!(matches!(p1, Cow::Borrowed("font-size")));
+
+        let p2 = intern_css_property("text-align");
+        assert!(matches!(p2, Cow::Borrowed("text-align")));
+
+        let p3 = intern_css_property("margin-left");
+        assert!(matches!(p3, Cow::Borrowed("margin-left")));
+
+        // Unknown / vendor-specific property should be Owned
+        let p4 = intern_css_property("-epub-hyphens");
+        assert!(matches!(p4, Cow::Owned(_)));
+        assert_eq!(p4.as_ref(), "-epub-hyphens");
+
+        // Verify parse_declarations produces borrowed keys for standard CSS
+        let decls = parse_declarations("font-size: 1.2em; -custom-prop: test; color: #111;");
+        assert_eq!(decls.len(), 3);
+        assert!(matches!(decls[0].0, Cow::Borrowed("font-size")));
+        assert!(matches!(decls[1].0, Cow::Owned(_)));
+        assert!(matches!(decls[2].0, Cow::Borrowed("color")));
     }
 }
