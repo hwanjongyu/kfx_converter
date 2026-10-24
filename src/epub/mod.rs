@@ -15,12 +15,13 @@ use zip::ZipArchive;
 use crate::css::CssStylesheet;
 use crate::ir::{Block, BookIR, BookMetadata, PageEntry, ResourceAsset, Section, TextSpan, TocItem};
 
-pub const MAX_EPUB_FILES: usize = 10_000;
-pub const MAX_EPUB_UNCOMPRESSED_TOTAL: u64 = 1024 * 1024 * 1024; // 1 GB
-pub const MAX_EPUB_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
-pub const MAX_CHAPTER_XHTML_BYTES: u64 = 20 * 1024 * 1024; // 20 MB limit for single chapter XHTML
-pub const MAX_METADATA_BYTES: u64 = 10 * 1024 * 1024; // 10 MB limit for XML/NCX/NAV metadata
-pub const MAX_COMPRESSION_RATIO: f64 = 100.0;
+pub mod archive;
+pub mod nav;
+pub mod opf;
+
+pub use archive::*;
+pub use nav::*;
+pub use opf::*;
 
 #[derive(Error, Debug)]
 pub enum EpubError {
@@ -36,18 +37,8 @@ pub enum EpubError {
     Xml(String),
 }
 
-#[derive(Debug, Clone)]
-pub struct ManifestItem {
-    pub id: String,
-    pub href: String,
-    pub media_type: String,
-    pub properties: Option<String>,
-}
-
 /// Reads an EPUB archive and constructs a `BookIR`.
 pub struct EpubReader;
-
-pub type ParsedOpf = (BookMetadata, HashMap<String, ManifestItem>, Vec<String>);
 
 #[inline]
 pub(crate) fn is_opening_quote(c: char) -> bool {
@@ -289,734 +280,47 @@ impl EpubReader {
         })
     }
 
-    fn find_opf_path<R: Read + std::io::Seek>(
+    pub fn find_opf_path<R: Read + std::io::Seek>(
         archive: &mut ZipArchive<R>,
     ) -> Result<String, EpubError> {
-        let mut entry = archive
-            .by_name("META-INF/container.xml")
-            .map_err(|_| EpubError::Invalid("META-INF/container.xml not found".to_string()))?;
-
-        let mut content = String::new();
-        (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut content)?;
-
-        let mut xml_reader = XmlReader::from_str(&content);
-        let mut buf = Vec::new();
-
-        loop {
-            match xml_reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                    let name = e.local_name();
-                    if name.as_ref() == b"rootfile" {
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"full-path" {
-                                let path = String::from_utf8_lossy(&attr.value).to_string();
-                                return Ok(path);
-                            }
-                        }
-                    }
-                }
-                Ok(Event::Eof) => break,
-                Err(e) => return Err(EpubError::Xml(e.to_string())),
-                _ => {}
-            }
-            buf.clear();
-        }
-
-        Err(EpubError::Invalid("No rootfile element found in container.xml".to_string()))
+        archive::find_opf_path(archive)
     }
 
-    fn parse_opf(
+    pub fn parse_opf(
         opf_xml: &str,
     ) -> Result<ParsedOpf, EpubError> {
-        let mut metadata = BookMetadata::default();
-        let mut manifest = HashMap::new();
-        let mut spine = Vec::new();
-
-        let mut titles: Vec<(Option<String>, Option<String>, String)> = Vec::new();
-        let mut title_types: HashMap<String, String> = HashMap::new();
-        let mut identifiers: Vec<(Option<String>, String)> = Vec::new();
-        let mut unique_identifier_id: Option<String> = None;
-
-        let mut xml_reader = XmlReader::from_str(opf_xml);
-        let mut buf = Vec::new();
-        let mut current_tag = String::new();
-        let mut current_text = String::new();
-        let mut current_title_id: Option<String> = None;
-        let mut current_title_type: Option<String> = None;
-        let mut current_identifier_id: Option<String> = None;
-        let mut current_meta_refines: Option<String> = None;
-
-        loop {
-            match xml_reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                    current_text.clear();
-                    let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-
-                    if local == "package" {
-                        for attr in e.attributes().flatten() {
-                            let key = attr.key.as_ref();
-                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                                &key[pos + 1..]
-                            } else {
-                                key
-                            };
-                            if local_key == b"unique-identifier" {
-                                unique_identifier_id =
-                                    Some(String::from_utf8_lossy(&attr.value).to_string());
-                            }
-                        }
-                    } else if local == "item" {
-                        let mut id = String::new();
-                        let mut href = String::new();
-                        let mut media_type = String::new();
-                        let mut properties = None;
-
-                        for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"id" => id = String::from_utf8_lossy(&attr.value).to_string(),
-                                b"href" => href = String::from_utf8_lossy(&attr.value).to_string(),
-                                b"media-type" => {
-                                    media_type = String::from_utf8_lossy(&attr.value).to_string()
-                                }
-                                b"properties" => {
-                                    properties = Some(String::from_utf8_lossy(&attr.value).to_string())
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if !id.is_empty() && !href.is_empty() {
-                            if let Some(ref props) = properties
-                                && props.contains("cover-image") && metadata.cover_image_id.is_none() {
-                                    metadata.cover_image_id = Some(id.clone());
-                                }
-                            manifest.insert(
-                                id.clone(),
-                                ManifestItem {
-                                    id,
-                                    href,
-                                    media_type,
-                                    properties,
-                                },
-                            );
-                        }
-                    } else if local == "itemref" {
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"idref" {
-                                spine.push(String::from_utf8_lossy(&attr.value).to_string());
-                            }
-                        }
-                    } else if local == "title" {
-                        current_tag = "title".to_string();
-                        current_title_id = None;
-                        current_title_type = None;
-                        for attr in e.attributes().flatten() {
-                            let key = attr.key.as_ref();
-                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                                &key[pos + 1..]
-                            } else {
-                                key
-                            };
-                            if local_key == b"id" {
-                                current_title_id =
-                                    Some(String::from_utf8_lossy(&attr.value).to_string());
-                            } else if local_key == b"title-type" {
-                                current_title_type =
-                                    Some(String::from_utf8_lossy(&attr.value).to_string());
-                            }
-                        }
-                    } else if local == "identifier" {
-                        current_tag = "identifier".to_string();
-                        current_identifier_id = None;
-                        for attr in e.attributes().flatten() {
-                            let key = attr.key.as_ref();
-                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                                &key[pos + 1..]
-                            } else {
-                                key
-                            };
-                            if local_key == b"id" {
-                                current_identifier_id =
-                                    Some(String::from_utf8_lossy(&attr.value).to_string());
-                            }
-                        }
-                    } else if local == "meta" {
-                        let mut is_cover_meta = false;
-                        let mut is_title_type_meta = false;
-                        let mut refines_val = String::new();
-                        let mut content_val = String::new();
-
-                        for attr in e.attributes().flatten() {
-                            let key = attr.key.as_ref();
-                            let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                                &key[pos + 1..]
-                            } else {
-                                key
-                            };
-                            if local_key == b"name" && attr.value.as_ref() == b"cover" {
-                                is_cover_meta = true;
-                            } else if local_key == b"content" {
-                                content_val = String::from_utf8_lossy(&attr.value).to_string();
-                            } else if local_key == b"property" && attr.value.as_ref() == b"title-type" {
-                                is_title_type_meta = true;
-                            } else if local_key == b"refines" {
-                                let r = String::from_utf8_lossy(&attr.value).to_string();
-                                refines_val = r.trim_start_matches('#').to_string();
-                            }
-                        }
-
-                        if is_cover_meta && !content_val.is_empty() {
-                            metadata.cover_image_id = Some(content_val);
-                        } else if is_title_type_meta && !refines_val.is_empty() {
-                            if !content_val.is_empty() {
-                                title_types.insert(refines_val, content_val);
-                            } else {
-                                current_tag = "meta_title_type".to_string();
-                                current_meta_refines = Some(refines_val);
-                            }
-                        }
-                    } else {
-                        current_tag = local;
-                    }
-                }
-                Ok(Event::Text(ref e)) => {
-                    let decoded = match e.unescape() {
-                        Ok(s) => s.to_string(),
-                        Err(_) => {
-                            let raw = String::from_utf8_lossy(e.as_ref()).to_string();
-                            raw.replace("&amp;", "&")
-                                .replace("&lt;", "<")
-                                .replace("&gt;", ">")
-                                .replace("&quot;", "\"")
-                                .replace("&apos;", "'")
-                                .replace("&mdash;", "—")
-                                .replace("&ndash;", "–")
-                                .replace("&hellip;", "…")
-                                .replace("&lsquo;", "‘")
-                                .replace("&rsquo;", "’")
-                                .replace("&ldquo;", "“")
-                                .replace("&rdquo;", "”")
-                                .replace("&nbsp;", " ")
-                        }
-                    };
-                    current_text.push_str(&decoded);
-                }
-                Ok(Event::End(_)) => {
-                    let text = current_text.trim().to_string();
-                    if !text.is_empty() {
-                        match current_tag.as_str() {
-                            "title" => {
-                                titles.push((current_title_id.take(), current_title_type.take(), text));
-                            }
-                            "identifier" => {
-                                identifiers.push((current_identifier_id.take(), text));
-                            }
-                            "meta_title_type" => {
-                                if let Some(target) = current_meta_refines.take() {
-                                    title_types.insert(target, text);
-                                }
-                            }
-                            "creator" => metadata.creators.push(text),
-                            "language" => {
-                                if metadata.language.is_empty() {
-                                    metadata.language = text;
-                                }
-                            }
-                            "publisher" => {
-                                if metadata.publisher.is_none() {
-                                    metadata.publisher = Some(text);
-                                }
-                            }
-                            "description" => {
-                                if metadata.description.is_none() {
-                                    metadata.description = Some(text);
-                                }
-                            }
-                            "date"
-                                if metadata.date.is_none() => {
-                                    metadata.date = Some(text);
-                                }
-                            _ => {}
-                        }
-                    }
-                    current_tag.clear();
-                    current_text.clear();
-                    current_title_id = None;
-                    current_title_type = None;
-                    current_identifier_id = None;
-                    current_meta_refines = None;
-                }
-                Ok(Event::Eof) => break,
-                Err(e) => return Err(EpubError::Xml(e.to_string())),
-                _ => {}
-            }
-            buf.clear();
-        }
-
-        // Title selection hierarchy:
-        // 1. Refined title-type="main" or direct title-type="main"
-        // 2. id explicitly containing "main" and not "sub"
-        // 3. First title in document order not marked as "subtitle"
-        // 4. Fallback to first title found
-        let mut selected_title = None;
-        for (id, direct_type, text) in &titles {
-            let is_main = direct_type
-                .as_deref()
-                .map(|t| t.eq_ignore_ascii_case("main"))
-                .unwrap_or(false)
-                || id
-                    .as_ref()
-                    .and_then(|i| title_types.get(i))
-                    .map(|t| t.eq_ignore_ascii_case("main"))
-                    .unwrap_or(false);
-            if is_main {
-                selected_title = Some(text.clone());
-                break;
-            }
-        }
-
-        if selected_title.is_none() {
-            for (id, _, text) in &titles {
-                if let Some(i) = id {
-                    let lower = i.to_ascii_lowercase();
-                    if lower.contains("main") && !lower.contains("sub") {
-                        selected_title = Some(text.clone());
-                        break;
-                    }
-                }
-            }
-        }
-
-        if selected_title.is_none() {
-            for (id, direct_type, text) in &titles {
-                let is_sub = direct_type
-                    .as_deref()
-                    .map(|t| t.eq_ignore_ascii_case("subtitle"))
-                    .unwrap_or(false)
-                    || id
-                        .as_ref()
-                        .and_then(|i| title_types.get(i))
-                        .map(|t| t.eq_ignore_ascii_case("subtitle"))
-                        .unwrap_or(false)
-                    || id
-                        .as_ref()
-                        .map(|i| i.to_ascii_lowercase().contains("sub"))
-                        .unwrap_or(false);
-                if !is_sub {
-                    selected_title = Some(text.clone());
-                    break;
-                }
-            }
-        }
-
-        if selected_title.is_none() && !titles.is_empty() {
-            selected_title = Some(titles[0].2.clone());
-        }
-
-        if let Some(t) = selected_title {
-            metadata.title = t;
-        }
-
-        // Identifier selection:
-        if let Some(uid_name) = unique_identifier_id
-            && let Some((_, text)) = identifiers
-                .iter()
-                .find(|(id, _)| id.as_deref() == Some(&uid_name))
-            {
-                metadata.identifier = text.clone();
-            }
-        if metadata.identifier.is_empty() && !identifiers.is_empty() {
-            metadata.identifier = identifiers[0].1.clone();
-        }
-
-        if metadata.title.is_empty() {
-            metadata.title = "Untitled Book".to_string();
-        }
-        if metadata.language.is_empty() {
-            metadata.language = "en".to_string();
-        }
-
-        // Validate and resolve cover_image_id to an actual image asset:
-        // If cover_image_id is missing or points to a non-image item (e.g. cover.xhtml),
-        // resolve to a manifest image with properties="cover-image" or "cover" in ID/href.
-        let cover_needs_resolution = match metadata.cover_image_id.as_ref() {
-            Some(cid) => manifest
-                .get(cid)
-                .map(|item| !item.media_type.starts_with("image/"))
-                .unwrap_or(true),
-            None => true,
-        };
-
-        if cover_needs_resolution {
-            let cover_prop_item = manifest.values().find(|item| {
-                item.media_type.starts_with("image/")
-                    && item
-                        .properties
-                        .as_deref()
-                        .map(|p| p.contains("cover-image"))
-                        .unwrap_or(false)
-            });
-            if let Some(item) = cover_prop_item {
-                metadata.cover_image_id = Some(item.id.clone());
-            } else {
-                let cover_name_item = manifest.values().find(|item| {
-                    item.media_type.starts_with("image/")
-                        && (item.id.to_lowercase().contains("cover")
-                            || item.href.to_lowercase().contains("cover"))
-                });
-                if let Some(item) = cover_name_item {
-                    metadata.cover_image_id = Some(item.id.clone());
-                }
-            }
-        }
-
-        Ok((metadata, manifest, spine))
+        opf::parse_opf(opf_xml)
     }
 
-    fn extract_navigation<R: Read + std::io::Seek>(
+    pub fn extract_navigation<R: Read + std::io::Seek>(
         archive: &mut ZipArchive<R>,
         opf_dir: &str,
         manifest: &HashMap<String, ManifestItem>,
         href_to_section: &HashMap<String, String>,
         sections: &[Section],
     ) -> (Vec<TocItem>, Vec<PageEntry>) {
-        // 1. Try EPUB 3 Navigation Document (nav.xhtml or properties="nav")
-        for item in manifest.values() {
-            let is_nav = item.properties.as_deref().map(|p| p.contains("nav")).unwrap_or(false)
-                || item.id == "nav"
-                || item.href.ends_with("nav.xhtml");
-            if is_nav && item.media_type.contains("xml") {
-                let full_path = Self::resolve_zip_path(opf_dir, &item.href);
-                if let Ok(mut entry) = archive.by_name(&full_path) {
-                    let mut s = String::new();
-                    if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
-                        let (toc, page_list) = Self::parse_nav_xhtml(&s, href_to_section);
-                        if !toc.is_empty() {
-                            return (toc, page_list);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Try EPUB 2 NCX Document (toc.ncx or media-type application/x-dtbncx+xml)
-        for item in manifest.values() {
-            let is_ncx = item.media_type == "application/x-dtbncx+xml"
-                || item.id == "ncx"
-                || item.href.ends_with(".ncx");
-            if is_ncx {
-                let full_path = Self::resolve_zip_path(opf_dir, &item.href);
-                if let Ok(mut entry) = archive.by_name(&full_path) {
-                    let mut s = String::new();
-                    if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
-                        let (toc, page_list) = Self::parse_ncx(&s, href_to_section);
-                        if !toc.is_empty() {
-                            return (toc, page_list);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Fallback: Build TOC from Sections
-        let mut fallback_toc = Vec::new();
-        for sec in sections {
-            if sec.blocks.is_empty() {
-                continue;
-            }
-            let title = if !sec.title.is_empty() {
-                sec.title.clone()
-            } else {
-                "Chapter".to_string()
-            };
-            fallback_toc.push(TocItem {
-                title,
-                target_section: sec.id.clone(),
-                target_anchor: None,
-                children: Vec::new(),
-            });
-        }
-        (fallback_toc, Vec::new())
+        nav::extract_navigation(archive, opf_dir, manifest, href_to_section, sections)
     }
 
-    fn parse_ncx(
+    pub fn parse_ncx(
         ncx_xml: &str,
         href_to_section: &HashMap<String, String>,
     ) -> (Vec<TocItem>, Vec<PageEntry>) {
-        let mut items = Vec::new();
-        let mut page_items = Vec::new();
-        let mut xml_reader = XmlReader::from_str(ncx_xml);
-        let mut buf = Vec::new();
-
-        let mut current_title = String::new();
-        let mut current_src = String::new();
-        let mut current_page_val = String::new();
-        let mut in_text = false;
-        let mut in_nav_label = false;
-
-        loop {
-            match xml_reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) => {
-                    let local = e.local_name();
-                    match local.as_ref() {
-                        b"navPoint" => {
-                            current_title.clear();
-                            current_src.clear();
-                        }
-                        b"pageTarget" => {
-                            current_title.clear();
-                            current_src.clear();
-                            current_page_val.clear();
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"value" {
-                                    current_page_val = String::from_utf8_lossy(&attr.value).to_string();
-                                }
-                            }
-                        }
-                        b"navLabel" => {
-                            in_nav_label = true;
-                        }
-                        b"text" if in_nav_label => {
-                            in_text = true;
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(Event::Empty(ref e)) => {
-                    let local = e.local_name();
-                    if local.as_ref() == b"content" {
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"src" {
-                                current_src = String::from_utf8_lossy(&attr.value).to_string();
-                            }
-                        }
-                    }
-                }
-                Ok(Event::Text(ref e)) if in_text => {
-                    let txt = e.unescape().unwrap_or_default().trim().to_string();
-                    if !txt.is_empty() {
-                        current_title = txt;
-                    }
-                }
-                Ok(Event::End(ref e)) => {
-                    let local = e.local_name();
-                    match local.as_ref() {
-                        b"text" => {
-                            in_text = false;
-                        }
-                        b"navLabel" => {
-                            in_nav_label = false;
-                        }
-                        b"navPoint" => {
-                            if !current_title.is_empty() || !current_src.is_empty() {
-                                let (target_sec, target_anchor) =
-                                    Self::resolve_href_target(&current_src, href_to_section);
-                                items.push(TocItem {
-                                    title: if current_title.is_empty() {
-                                        "Chapter".into()
-                                    } else {
-                                        current_title.clone()
-                                    },
-                                    target_section: target_sec,
-                                    target_anchor,
-                                    children: Vec::new(),
-                                });
-                            }
-                        }
-                        b"pageTarget"
-                            if !current_src.is_empty() => {
-                                let (target_sec, target_anchor) =
-                                    Self::resolve_href_target(&current_src, href_to_section);
-                                let pnum = if !current_page_val.is_empty() {
-                                    current_page_val.clone()
-                                } else if !current_title.is_empty() {
-                                    current_title.clone()
-                                } else {
-                                    (page_items.len() + 1).to_string()
-                                };
-                                page_items.push(PageEntry {
-                                    page_number: pnum,
-                                    target_section: target_sec,
-                                    target_anchor,
-                                });
-                            }
-                        _ => {}
-                    }
-                }
-                Ok(Event::Eof) => break,
-                _ => {}
-            }
-            buf.clear();
-        }
-
-        (items, page_items)
+        nav::parse_ncx(ncx_xml, href_to_section)
     }
 
-    fn parse_nav_xhtml(
+    pub fn parse_nav_xhtml(
         nav_xml: &str,
         href_to_section: &HashMap<String, String>,
     ) -> (Vec<TocItem>, Vec<PageEntry>) {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum NavContext {
-            Toc,
-            PageList,
-            Landmarks,
-            Other,
-        }
-
-        let mut toc_items = Vec::new();
-        let mut page_items = Vec::new();
-        let mut xml_reader = XmlReader::from_str(nav_xml);
-        let mut buf = Vec::new();
-
-        let mut nav_stack: Vec<NavContext> = Vec::new();
-        let mut has_seen_toc = false;
-        let mut in_a = false;
-        let mut current_href = String::new();
-        let mut current_text = String::new();
-
-        loop {
-            match xml_reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e)) => {
-                    let local = e.local_name();
-                    if local.as_ref() == b"nav" {
-                        let mut detected_ctx = None;
-                        for attr in e.attributes().flatten() {
-                            let key = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
-                            let val = String::from_utf8_lossy(&attr.value).to_lowercase();
-                            if key.contains("type") {
-                                if val.contains("page-list") {
-                                    detected_ctx = Some(NavContext::PageList);
-                                    break;
-                                } else if val.contains("toc") {
-                                    detected_ctx = Some(NavContext::Toc);
-                                    break;
-                                } else if val.contains("landmarks") {
-                                    detected_ctx = Some(NavContext::Landmarks);
-                                    break;
-                                }
-                            } else if key == "role" {
-                                if val.contains("doc-pagelist") {
-                                    detected_ctx = Some(NavContext::PageList);
-                                    break;
-                                } else if val.contains("doc-toc") {
-                                    detected_ctx = Some(NavContext::Toc);
-                                    break;
-                                }
-                            } else if key == "id" {
-                                if val == "page-list" || val == "pagelist" {
-                                    detected_ctx = Some(NavContext::PageList);
-                                } else if val == "toc" {
-                                    detected_ctx = Some(NavContext::Toc);
-                                }
-                            }
-                        }
-
-                        let ctx = detected_ctx.unwrap_or({
-                            if !has_seen_toc {
-                                NavContext::Toc
-                            } else {
-                                NavContext::Other
-                            }
-                        });
-
-                        if ctx == NavContext::Toc {
-                            has_seen_toc = true;
-                        }
-                        nav_stack.push(ctx);
-                    } else if local.as_ref() == b"a" {
-                        let current_ctx = nav_stack.last().copied().unwrap_or(NavContext::Toc);
-                        if current_ctx == NavContext::Toc || current_ctx == NavContext::PageList {
-                            in_a = true;
-                            current_href.clear();
-                            current_text.clear();
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"href" {
-                                    current_href = String::from_utf8_lossy(&attr.value).to_string();
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(Event::Text(ref e)) if in_a => {
-                    let txt = e.unescape().unwrap_or_default().trim().to_string();
-                    if !txt.is_empty() {
-                        if !current_text.is_empty() {
-                            current_text.push(' ');
-                        }
-                        current_text.push_str(&txt);
-                    }
-                }
-                Ok(Event::End(ref e)) => {
-                    let local = e.local_name();
-                    if local.as_ref() == b"nav" {
-                        nav_stack.pop();
-                    } else if local.as_ref() == b"a" && in_a {
-                        in_a = false;
-                        if !current_href.is_empty() {
-                            let (target_sec, target_anchor) =
-                                Self::resolve_href_target(&current_href, href_to_section);
-                            let current_ctx = nav_stack.last().copied().unwrap_or(NavContext::Toc);
-                            match current_ctx {
-                                NavContext::Toc => {
-                                    let title = if current_text.is_empty() {
-                                        "Chapter".to_string()
-                                    } else {
-                                        current_text.clone()
-                                    };
-                                    toc_items.push(TocItem {
-                                        title,
-                                        target_section: target_sec,
-                                        target_anchor,
-                                        children: Vec::new(),
-                                    });
-                                }
-                                NavContext::PageList => {
-                                    let pnum = if current_text.is_empty() {
-                                        (page_items.len() + 1).to_string()
-                                    } else {
-                                        current_text.clone()
-                                    };
-                                    page_items.push(PageEntry {
-                                        page_number: pnum,
-                                        target_section: target_sec,
-                                        target_anchor,
-                                    });
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Ok(Event::Eof) => break,
-                _ => {}
-            }
-            buf.clear();
-        }
-
-        (toc_items, page_items)
+        nav::parse_nav_xhtml(nav_xml, href_to_section)
     }
 
-    fn resolve_href_target(
+    pub fn resolve_href_target(
         raw_href: &str,
         href_to_section: &HashMap<String, String>,
     ) -> (String, Option<String>) {
-        let mut parts = raw_href.split('#');
-        let file_part = parts.next().unwrap_or("").trim();
-        let anchor_part = parts.next().map(|a| a.trim().to_string());
-
-        let file_name = Path::new(file_part)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let target_sec = href_to_section
-            .get(file_part)
-            .or_else(|| href_to_section.get(&file_name))
-            .cloned()
-            .unwrap_or_else(|| "section_1".to_string());
-
-        (target_sec, anchor_part)
+        nav::resolve_href_target(raw_href, href_to_section)
     }
 
     pub fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
@@ -2140,41 +1444,12 @@ impl EpubReader {
         (blocks, footnotes)
     }
 
-    fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
-        let normalized_rel = relative_path.replace('\\', "/");
-        let combined = if base_dir.is_empty() {
-            normalized_rel
-        } else {
-            format!("{}/{}", base_dir.trim_matches('/'), normalized_rel)
-        };
-        let mut parts = Vec::new();
-        for seg in combined.split('/') {
-            if seg.is_empty() || seg == "." {
-                continue;
-            } else if seg == ".." {
-                parts.pop();
-            } else {
-                parts.push(seg);
-            }
-        }
-        parts.join("/")
+    pub fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
+        archive::resolve_zip_path(base_dir, relative_path)
     }
 
     pub fn decode_percent(s: &str) -> String {
-        let mut result = Vec::new();
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'%' && i + 2 < bytes.len()
-                && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    result.push(byte);
-                    i += 3;
-                    continue;
-                }
-            result.push(bytes[i]);
-            i += 1;
-        }
-        String::from_utf8_lossy(&result).to_string()
+        archive::decode_percent(s)
     }
 
     /// Parses and sanitizes CSS style strings:
