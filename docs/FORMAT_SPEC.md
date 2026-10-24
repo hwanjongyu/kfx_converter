@@ -233,6 +233,11 @@ Publishing industry typographic convention requires that the opening paragraph o
 | `style_small_caps` | `$157` | `$14`: `$369` (small_caps) | Inline small caps / `<abbr>` / `<acronym>` |
 | `style_dropcap` | `$157` | `$16`: 3.0em, `$13`: `$361` (bold), `$42`: 0.9em, `$50`: 0.15em, `$125`: 3, `$126`: 1 | Initial capital drop cap |
 | `style_uppercase` | `$157` | `$41`: `$372` (uppercase) | Text transform uppercase |
+| `style_h1_center` / `style_h2_center` / `style_h3_center` | `$157` | Same as `style_hN` + `$34`: `$320` (center), `$36`: 0.0em | Headings centered via EPUB CSS |
+| `style_font_size_xs` / `_sm` / `_lg` / `_xl` / `_xxl` | `$157` | `$16`: 0.67em / 0.75em / 1.15em / 1.50em / 2.00em | Relative font-size buckets resolved from EPUB CSS (`style_events`) |
+
+### 7.5 EPUB Stylesheet Resolution
+`src/css.rs` parses manifest `.css` files and inline `<style>` blocks (simple selectors only: `tag`, `.cls`, `tag.cls`). For each `<p>`, `<hN>`, `<span>`, cascaded declarations + inline `style` (last-wins) are converted by `EpubReader::sanitize_css_style` into tokens. Block-level text tokens (`italic`, `bold`, `small_caps`, `uppercase`, `underline`, and `font_size_*` for paragraphs) are cascaded to every child span's `$142 style_events`.
 
 ---
 

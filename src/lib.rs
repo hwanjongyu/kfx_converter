@@ -5,6 +5,7 @@ pub mod symbols;
 pub mod container;
 pub mod ir;
 pub mod ion;
+pub mod css;
 pub mod epub;
 pub mod packager;
 pub mod enhancements;

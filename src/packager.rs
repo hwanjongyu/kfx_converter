@@ -126,8 +126,29 @@ pub struct StyleSymMap {
     pub ruby: u32,
     pub img: u32,
     pub cover_img: u32,
+    pub h1_center: u32,
+    pub h2_center: u32,
+    pub h3_center: u32,
+    pub font_size_xs: u32,
+    pub font_size_sm: u32,
+    pub font_size_lg: u32,
+    pub font_size_xl: u32,
+    pub font_size_xxl: u32,
 }
 
+
+/// Extracts block-level text styling tokens that must cascade down to child spans
+/// (CSS inheritance emulation). Headings exclude font-size (their own style sets size).
+fn inherited_text_tokens(block_style: Option<&str>, include_size: bool) -> String {
+    let Some(st) = block_style else { return String::new() };
+    st.split_whitespace()
+        .filter(|t| {
+            matches!(*t, "italic" | "bold" | "small_caps" | "uppercase" | "underline")
+                || (include_size && t.starts_with("font_size_"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Generates deterministic Amazon Content Repository container ID.
 /// Format: 'CR!' + 28 uppercase alphanumeric characters (31 chars total).
@@ -671,6 +692,14 @@ impl<'a> KfxPackager<'a> {
         let ruby_sym = symbols.intern("style_ruby");
         let img_sym = symbols.intern("style_img");
         let cover_img_sym = symbols.intern("style_cover_img");
+        let h1_center_sym = symbols.intern("style_h1_center");
+        let h2_center_sym = symbols.intern("style_h2_center");
+        let h3_center_sym = symbols.intern("style_h3_center");
+        let font_size_xs_sym = symbols.intern("style_font_size_xs");
+        let font_size_sm_sym = symbols.intern("style_font_size_sm");
+        let font_size_lg_sym = symbols.intern("style_font_size_lg");
+        let font_size_xl_sym = symbols.intern("style_font_size_xl");
+        let font_size_xxl_sym = symbols.intern("style_font_size_xxl");
 
         let sym_font_variant = symbol_id("font_variant").unwrap_or(14);
         let sym_small_caps = symbol_id("small_caps").unwrap_or(369);
@@ -886,6 +915,72 @@ impl<'a> KfxPackager<'a> {
             (sym_style_name, IonValue::Symbol(cover_img_sym)),
         ]);
 
+        // 23. centered h1
+        let h1_center_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(h1_center_sym)),
+            (sym_font_size, make_em("1.6")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("1.3")),
+            (sym_margin_top, make_em("1.2")),
+            (sym_margin_bottom, make_em("0.6")),
+            (sym_text_alignment, IonValue::Symbol(sym_center)),
+            (sym_text_indent, make_em("0.0")),
+        ]);
+
+        // 24. centered h2
+        let h2_center_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(h2_center_sym)),
+            (sym_font_size, make_em("1.35")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("1.3")),
+            (sym_margin_top, make_em("1.0")),
+            (sym_margin_bottom, make_em("0.5")),
+            (sym_text_alignment, IonValue::Symbol(sym_center)),
+            (sym_text_indent, make_em("0.0")),
+        ]);
+
+        // 25. centered h3
+        let h3_center_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(h3_center_sym)),
+            (sym_font_size, make_em("1.2")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("1.3")),
+            (sym_margin_top, make_em("0.8")),
+            (sym_margin_bottom, make_em("0.4")),
+            (sym_text_alignment, IonValue::Symbol(sym_center)),
+            (sym_text_indent, make_em("0.0")),
+        ]);
+
+        // 26. font size xs (fine print, ~0.67em)
+        let font_size_xs_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(font_size_xs_sym)),
+            (sym_font_size, make_em("0.67")),
+        ]);
+
+        // 27. font size sm (epigraphs, sub-captions, ~0.75em)
+        let font_size_sm_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(font_size_sm_sym)),
+            (sym_font_size, make_em("0.75")),
+        ]);
+
+        // 28. font size lg (subtitles, ~1.15em)
+        let font_size_lg_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(font_size_lg_sym)),
+            (sym_font_size, make_em("1.15")),
+        ]);
+
+        // 29. font size xl (chapter titles, ~1.50em)
+        let font_size_xl_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(font_size_xl_sym)),
+            (sym_font_size, make_em("1.50")),
+        ]);
+
+        // 30. font size xxl (large display, ~2.00em)
+        let font_size_xxl_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(font_size_xxl_sym)),
+            (sym_font_size, make_em("2.00")),
+        ]);
+
         let style_list = [
             (h1_sym, h1_val),
             (h2_sym, h2_val),
@@ -910,6 +1005,14 @@ impl<'a> KfxPackager<'a> {
             (ruby_sym, ruby_val),
             (img_sym, img_val),
             (cover_img_sym, cover_img_val),
+            (h1_center_sym, h1_center_val),
+            (h2_center_sym, h2_center_val),
+            (h3_center_sym, h3_center_val),
+            (font_size_xs_sym, font_size_xs_val),
+            (font_size_sm_sym, font_size_sm_val),
+            (font_size_lg_sym, font_size_lg_val),
+            (font_size_xl_sym, font_size_xl_val),
+            (font_size_xxl_sym, font_size_xxl_val),
         ];
 
         for (sym_id_val, val) in style_list {
@@ -947,6 +1050,14 @@ impl<'a> KfxPackager<'a> {
             ruby: ruby_sym,
             img: img_sym,
             cover_img: cover_img_sym,
+            h1_center: h1_center_sym,
+            h2_center: h2_center_sym,
+            h3_center: h3_center_sym,
+            font_size_xs: font_size_xs_sym,
+            font_size_sm: font_size_sm_sym,
+            font_size_lg: font_size_lg_sym,
+            font_size_xl: font_size_xl_sym,
+            font_size_xxl: font_size_xxl_sym,
         }
     }
 
@@ -1018,14 +1129,22 @@ impl<'a> KfxPackager<'a> {
             let mut para_strings = Vec::new();
             let mut story_elements = Vec::new();
 
-            let extract_style_events = |spans: &[TextSpan]| -> (String, Vec<IonValue>) {
+            // `inherited`: block-level text tokens (italic, bold, font_size_*, ...) resolved from
+            // EPUB CSS on the parent <p>/<hN>, cascaded down to every child span.
+            let extract_style_events = |spans: &[TextSpan], inherited: &str| -> (String, Vec<IonValue>) {
                 let mut full_text = String::new();
                 let mut style_events = Vec::new();
                 let mut offset = 0;
 
                 for span in spans {
                     let span_len = span.text.chars().count();
-                    if let Some(st) = &span.style {
+                    let effective_style: Option<String> = match (&span.style, inherited.is_empty()) {
+                        (Some(s), true) => Some(s.clone()),
+                        (Some(s), false) => Some(format!("{} {}", inherited, s)),
+                        (None, false) => Some(inherited.to_string()),
+                        (None, true) => None,
+                    };
+                    if let Some(st) = &effective_style {
                         if st.contains("bold") {
                             style_events.push(IonValue::Struct(vec![
                                 (sym_offset, IonValue::Int(offset as i64)),
@@ -1104,6 +1223,25 @@ impl<'a> KfxPackager<'a> {
                                 (sym_style, IonValue::Symbol(styles.uppercase)),
                             ]));
                         }
+                        // Relative font size tokens (exact token match, resolved from EPUB CSS).
+                        // Dropcap spans keep their own sizing and are excluded.
+                        if !st.contains("dropcap") {
+                            let size_style = st.split_whitespace().find_map(|tok| match tok {
+                                "font_size_xs" => Some(styles.font_size_xs),
+                                "font_size_sm" => Some(styles.font_size_sm),
+                                "font_size_lg" => Some(styles.font_size_lg),
+                                "font_size_xl" => Some(styles.font_size_xl),
+                                "font_size_xxl" => Some(styles.font_size_xxl),
+                                _ => None,
+                            });
+                            if let Some(sz) = size_style {
+                                style_events.push(IonValue::Struct(vec![
+                                    (sym_offset, IonValue::Int(offset as i64)),
+                                    (sym_length, IonValue::Int(span_len as i64)),
+                                    (sym_style, IonValue::Symbol(sz)),
+                                ]));
+                            }
+                        }
                     }
                     if let Some(ref rt) = span.ruby {
                         let sym_ruby_content = symbol_id("ruby_content").unwrap_or(756);
@@ -1124,13 +1262,18 @@ impl<'a> KfxPackager<'a> {
                 let block_eid = self.alloc_eid();
 
                 match block {
-                    Block::Heading { level, spans, .. } => {
-                        let style_sym = match level {
-                            1 => styles.h1,
-                            2 => styles.h2,
-                            _ => styles.h3,
+                    Block::Heading { level, spans, style, .. } => {
+                        let centered = style.as_deref().is_some_and(|s| s.split_whitespace().any(|t| t == "align_center"));
+                        let style_sym = match (level, centered) {
+                            (1, false) => styles.h1,
+                            (2, false) => styles.h2,
+                            (_, false) => styles.h3,
+                            (1, true) => styles.h1_center,
+                            (2, true) => styles.h2_center,
+                            (_, true) => styles.h3_center,
                         };
-                        let (full_text, style_events) = extract_style_events(spans);
+                        let inherited = inherited_text_tokens(style.as_deref(), false);
+                        let (full_text, style_events) = extract_style_events(spans, &inherited);
 
                         let content_idx = para_strings.len();
                         block_info.push((block_eid, full_text.chars().count().max(1)));
@@ -1171,7 +1314,8 @@ impl<'a> KfxPackager<'a> {
                         } else {
                             styles.p
                         };
-                        let (full_text, style_events) = extract_style_events(spans);
+                        let inherited = inherited_text_tokens(style.as_deref(), true);
+                        let (full_text, style_events) = extract_style_events(spans, &inherited);
 
                         let content_idx = para_strings.len();
                         block_info.push((block_eid, full_text.chars().count().max(1)));
@@ -2487,9 +2631,72 @@ mod tests {
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
         // We register 23 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps, dropcap, dropcap_2, uppercase, ruby, img, cover_img
-        assert_eq!(style_entities.len(), 23, "Expected 23 style ($157) entities in KFX container");
+        assert_eq!(style_entities.len(), 31, "Expected 31 style ($157) entities in KFX container");
     }
 
+
+    #[test]
+    fn test_packager_emits_css_font_size_alignment_and_inherited_italic() {
+        fn collect_symbols(v: &IonValue, out: &mut Vec<u32>) {
+            match v {
+                IonValue::Symbol(s) => out.push(*s),
+                IonValue::List(items) => items.iter().for_each(|i| collect_symbols(i, out)),
+                IonValue::Struct(fields) => fields.iter().for_each(|(_, f)| collect_symbols(f, out)),
+                IonValue::Annotated(_, inner) => collect_symbols(inner, out),
+                _ => {}
+            }
+        }
+        let span = |text: &str, style: Option<&str>| TextSpan {
+            text: text.to_string(),
+            style: style.map(|s| s.to_string()),
+            anchor_id: None,
+            href: None,
+            ruby: None,
+        };
+        let mut book = BookIR::default();
+        book.metadata.title = "CSS Fidelity".to_string();
+        book.sections.push(Section {
+            id: "ch1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![
+                Block::Heading { id: "h".to_string(), level: 1, spans: vec![span("1", None)], style: Some("align_center bold".to_string()) },
+                Block::Paragraph { id: "sub".to_string(), spans: vec![span("The Risky Business", None)], style: Some("align_center italic font_size_lg".to_string()) },
+                Block::Paragraph { id: "src".to_string(), spans: vec![span("George Bernard Shaw", None)], style: Some("align_center italic font_size_xs".to_string()) },
+                Block::Paragraph { id: "dc".to_string(), spans: vec![span("O", Some("dropcap")), span("n a cool fall evening", None)], style: None },
+            ],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        packager.package(&mut buffer).expect("packaging failed");
+
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let style_ids: Vec<u32> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).map(|e| e.entity_id).collect();
+        assert_eq!(style_ids.len(), 31);
+        // Registration order: ..., cover_img(22), h1_center(23), h2_center(24), h3_center(25),
+        // font_size_xs(26), sm(27), lg(28), xl(29), xxl(30); align_center(5), italic(10), dropcap(17)
+        let (align_center, italic, dropcap, h1_center, fs_xs, fs_lg) =
+            (style_ids[5], style_ids[10], style_ids[17], style_ids[23], style_ids[26], style_ids[28]);
+
+        let storyline = packager.entities.iter().find(|e| e.chunk_type == SYM_STORYLINE).expect("storyline");
+        let values = crate::ion::IonReader::new(&storyline.data).decode_all().expect("decode storyline");
+        let mut syms = Vec::new();
+        values.iter().for_each(|v| collect_symbols(v, &mut syms));
+
+        assert!(syms.contains(&h1_center), "centered heading style must be referenced");
+        assert!(syms.contains(&align_center), "centered paragraph style must be referenced");
+        assert!(syms.contains(&italic), "paragraph-level italic must cascade to span style_events");
+        assert!(syms.contains(&fs_lg), "font_size_lg style event missing");
+        assert!(syms.contains(&fs_xs), "font_size_xs style event missing");
+        assert!(syms.contains(&dropcap), "dropcap style event missing");
+    }
+
+    #[test]
+    fn test_inherited_text_tokens_filtering() {
+        assert_eq!(inherited_text_tokens(Some("p_first align_center italic font_size_sm"), true), "italic font_size_sm");
+        assert_eq!(inherited_text_tokens(Some("align_center bold font_size_lg"), false), "bold");
+        assert_eq!(inherited_text_tokens(None, true), "");
+    }
 
     #[test]
     fn test_packager_emits_comprehensive_formatting_styles() {
@@ -2582,7 +2789,7 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
-        assert_eq!(style_count, 23);
+        assert_eq!(style_count, 31);
     }
 
 
@@ -3120,7 +3327,7 @@ mod tests {
             .iter()
             .filter(|e| e.chunk_type == sym_style)
             .collect();
-        assert_eq!(style_entities.len(), 23, "Expected 23 style ($157) entities including style_ruby");
+        assert_eq!(style_entities.len(), 31, "Expected 31 style ($157) entities including style_ruby");
         let ruby_style_entity = &style_entities[20];
         assert!(!ruby_style_entity.data.is_empty());
 

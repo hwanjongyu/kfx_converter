@@ -12,6 +12,7 @@ use quick_xml::Reader as XmlReader;
 use thiserror::Error;
 use zip::ZipArchive;
 
+use crate::css::CssStylesheet;
 use crate::ir::{Block, BookIR, BookMetadata, PageEntry, ResourceAsset, Section, TextSpan, TocItem};
 
 pub const MAX_EPUB_FILES: usize = 10_000;
@@ -143,6 +144,20 @@ impl EpubReader {
 
         let (metadata, manifest, spine) = Self::parse_opf(&opf_content)?;
 
+        // 3b. Build the book-level stylesheet from all manifest CSS files
+        let mut book_css = CssStylesheet::new();
+        for item in manifest.values() {
+            if item.media_type == "text/css" || item.href.to_ascii_lowercase().ends_with(".css") {
+                let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
+                if let Ok(mut entry) = archive.by_name(&full_path) {
+                    let mut s = String::new();
+                    if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
+                        book_css.add_css(&s);
+                    }
+                }
+            }
+        }
+
         // 4. Extract resources (images, fonts) and build href -> item_id lookup map
         let mut resources = HashMap::new();
         let mut href_to_id = HashMap::new();
@@ -205,7 +220,7 @@ impl EpubReader {
                     let mut xhtml = String::new();
                     let mut limited = (&mut entry).take(MAX_CHAPTER_XHTML_BYTES + 1);
                     if limited.read_to_string(&mut xhtml).is_ok() && (xhtml.len() as u64) <= MAX_CHAPTER_XHTML_BYTES {
-                        let (blocks, sec_footnotes) = Self::parse_xhtml_with_manifest(&xhtml, &href_to_id);
+                        let (blocks, sec_footnotes) = Self::parse_xhtml_with_css(&xhtml, &href_to_id, &book_css);
                         for (fn_id, fn_text) in sec_footnotes {
                             all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
                             if !file_name.is_empty() {
@@ -937,6 +952,44 @@ impl EpubReader {
         xhtml: &str,
         href_to_id: &HashMap<String, String>,
     ) -> (Vec<Block>, HashMap<String, String>) {
+        Self::parse_xhtml_with_css(xhtml, href_to_id, &CssStylesheet::new())
+    }
+
+    /// Parses XHTML resolving element typography from the book-level stylesheet
+    /// (`book_css`, built from manifest `.css` files) plus the chapter's inline `<style>` blocks.
+    pub fn parse_xhtml_with_css(
+        xhtml: &str,
+        href_to_id: &HashMap<String, String>,
+        book_css: &CssStylesheet,
+    ) -> (Vec<Block>, HashMap<String, String>) {
+        let inline_css = crate::css::extract_inline_style_blocks(xhtml);
+        let chapter_css_owned;
+        let css: &CssStylesheet = if inline_css.trim().is_empty() {
+            book_css
+        } else {
+            let mut c = book_css.clone();
+            c.add_css(&inline_css);
+            chapter_css_owned = c;
+            &chapter_css_owned
+        };
+        // Resolves cascaded stylesheet declarations + inline `style` attribute into IR tokens.
+        let element_style_tokens = |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
+            let mut class_attr: Option<String> = None;
+            let mut inline_style: Option<String> = None;
+            for attr in e.attributes().flatten() {
+                match attr.key.as_ref() {
+                    b"class" => class_attr = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                    b"style" => inline_style = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                    _ => {}
+                }
+            }
+            let mut decls = css.declarations_for(&String::from_utf8_lossy(tag), class_attr.as_deref());
+            if let Some(s) = inline_style {
+                decls.push(';');
+                decls.push_str(&s);
+            }
+            if decls.is_empty() { Vec::new() } else { Self::sanitize_css_style(&decls) }
+        };
         let mut blocks = Vec::new();
         let mut footnotes = HashMap::new();
         let mut xml_reader = XmlReader::from_str(xhtml);
@@ -1250,16 +1303,15 @@ impl EpubReader {
                                     first_paragraph_seen = true;
                                     p_tokens.push("p_first".to_string());
                                 }
+                                // Stylesheet (class/tag rules) + inline style attribute
+                                let resolved = element_style_tokens(local_bytes, e);
+                                if resolved.iter().any(|t| t == "dropcap") {
+                                    p_has_dropcap = true;
+                                }
+                                p_tokens.extend(resolved);
                                 for attr in e.attributes().flatten() {
                                     let key = attr.key.as_ref();
-                                    if key == b"style" {
-                                        let val = String::from_utf8_lossy(&attr.value);
-                                        let tokens = Self::sanitize_css_style(&val);
-                                        if tokens.contains(&"dropcap".to_string()) {
-                                            p_has_dropcap = true;
-                                        }
-                                        p_tokens.extend(tokens);
-                                    } else if key == b"class" {
+                                    if key == b"class" {
                                         let val = String::from_utf8_lossy(&attr.value).to_lowercase();
                                         if val.contains("pagebreak") || val.contains("page-break") {
                                             p_tokens.push("page_break_before".to_string());
@@ -1321,13 +1373,10 @@ impl EpubReader {
                                 }
                                 in_heading = true;
                                 heading_level = local_bytes[1].saturating_sub(b'0');
-                                let mut h_tokens = Vec::new();
+                                let mut h_tokens = element_style_tokens(local_bytes, e);
                                 for attr in e.attributes().flatten() {
                                     let key = attr.key.as_ref();
-                                    if key == b"style" {
-                                        let val = String::from_utf8_lossy(&attr.value);
-                                        h_tokens.extend(Self::sanitize_css_style(&val));
-                                    } else if key == b"class" {
+                                    if key == b"class" {
                                         let val = String::from_utf8_lossy(&attr.value).to_lowercase();
                                         if val.contains("pagebreak") || val.contains("page-break") {
                                             h_tokens.push("page_break_before".to_string());
@@ -1405,18 +1454,17 @@ impl EpubReader {
                                 if local_bytes == b"abbr" || local_bytes == b"acronym" {
                                     span_tokens.push("small_caps".to_string());
                                 }
+                                span_tokens.extend(element_style_tokens(local_bytes, e));
                                 for attr in e.attributes().flatten() {
-                                    if attr.key.as_ref() == b"style" {
-                                        let val = String::from_utf8_lossy(&attr.value);
-                                        span_tokens.extend(Self::sanitize_css_style(&val));
-                                    } else if attr.key.as_ref() == b"class" {
+                                    if attr.key.as_ref() == b"class" {
                                         let val = String::from_utf8_lossy(&attr.value).to_lowercase();
                                         let mut has_known = false;
                                         for cls in val.split_whitespace() {
                                             if cls == "small-caps" || cls == "smallcaps" {
                                                 span_tokens.push("small_caps".to_string());
                                                 has_known = true;
-                                            } else if cls == "dropcap" || cls == "drop-cap" || cls == "drop_cap" || cls == "initial" || cls == "first-letter" || cls == "initial-letter" || cls == "dc" {
+                                            } else if cls == "dropcap" || cls == "drop-cap" || cls == "drop_cap" || cls == "initial" || cls == "first-letter" || cls == "initial-letter" || cls == "dc" || cls.contains("dropcap") || cls.contains("drop-cap") {
+                                                // `contains` covers InDesign-generated classes such as `_idGenDropcap-1`
                                                 span_tokens.push("dropcap".to_string());
                                                 has_known = true;
                                             } else if cls == "uppercase" || cls == "all-caps" || cls == "allcaps" || cls == "caps" {
@@ -1901,9 +1949,14 @@ impl EpubReader {
     /// - Extracts text-align: left, center, right, justify
     /// - Extracts text-decoration: line-through, underline
     /// - Strips hardcoded pure black colors (#000000, #000, black, rgb(0,0,0)) for dark mode safety
+    /// - Extracts font-style (italic/oblique), font-weight (bold/600+), font-size (bucketed
+    ///   `font_size_*` tokens), and float+large-size drop caps
+    /// - Applies CSS last-wins semantics: a later declaration of the same property overrides
+    ///   earlier ones (so cascaded stylesheet rules followed by inline styles resolve correctly)
     /// - Returns a list of standardized style tokens (e.g. ["align_center", "strike"])
     pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
-        let mut tokens = Vec::new();
+        // 1. Last-wins merge of declarations, preserving first-seen order of properties
+        let mut merged: Vec<(String, String)> = Vec::new();
         for declaration in style_str.split(';') {
             let decl = declaration.trim();
             if decl.is_empty() {
@@ -1911,9 +1964,41 @@ impl EpubReader {
             }
             if let Some((prop, val)) = decl.split_once(':') {
                 let p = prop.trim().to_lowercase();
-                let v = val.trim().to_lowercase();
+                let v = val.trim().trim_end_matches("!important").trim().to_lowercase();
+                if let Some(existing) = merged.iter_mut().find(|(k, _)| *k == p) {
+                    existing.1 = v;
+                } else {
+                    merged.push((p, v));
+                }
+            }
+        }
 
-                match p.as_str() {
+        let mut tokens = Vec::new();
+        let mut floated = false;
+        let mut size_ratio: Option<f64> = None;
+        for (p, v) in &merged {
+            {
+                let p = p.as_str();
+                let v = v.as_str();
+
+                match p {
+                    "font-style" => {
+                        if v.contains("italic") || v.contains("oblique") {
+                            tokens.push("italic".to_string());
+                        }
+                    }
+                    "font-weight" => {
+                        let numeric_bold = v.parse::<u32>().is_ok_and(|w| w >= 600);
+                        if v.contains("bold") || numeric_bold {
+                            tokens.push("bold".to_string());
+                        }
+                    }
+                    "font-size" => {
+                        size_ratio = crate::css::font_size_ratio(v);
+                    }
+                    "float" => {
+                        floated = v == "left" || v == "right";
+                    }
                     "text-align" => {
                         if v.contains("center") {
                             tokens.push("align_center".to_string());
@@ -1980,6 +2065,24 @@ impl EpubReader {
                 }
             }
         }
+
+        // 2. Post-processing: drop caps & font-size buckets
+        let is_sup_sub = tokens.iter().any(|t| t == "sup" || t == "sub");
+        match size_ratio {
+            // InDesign/Calibre drop caps: floated span with a large initial letter
+            Some(r) if floated && r >= 1.5 => {
+                if !tokens.iter().any(|t| t == "dropcap") {
+                    tokens.push("dropcap".to_string());
+                }
+            }
+            // sup/sub already shrink the glyphs; avoid double-scaling
+            Some(r) if !is_sup_sub && !tokens.iter().any(|t| t == "dropcap") => {
+                if let Some(tok) = crate::css::font_size_token(r) {
+                    tokens.push(tok.to_string());
+                }
+            }
+            _ => {}
+        }
         tokens
     }
 }
@@ -1987,6 +2090,115 @@ impl EpubReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ORIGINALS_CH1_CSS: &str = r#"
+        h1.x03-Chapter-Number { font-size:1.083em; text-align:center; font-weight:bold; }
+        p.x03-Chapter-Title { font-size:1.5em; text-align:center; text-indent:0; }
+        p.x03-Chapter-Subtitle { font-size:1.083em; font-style:italic; text-align:center; }
+        p.x03-Chapter-Epigraph-FL { font-size:0.75em; margin: 0 10%; text-align:center; }
+        p.x03-Chapter-Epigraph-Source { font-size:0.667em; font-style:italic; text-align:center; }
+        p.x04-Body-Text { font-size:0.938em; text-indent:1.33em; }
+        ._idGenDropcap-1 { float:left; font-size:3.058em; line-height: 1.5em; }
+    "#;
+
+    const ORIGINALS_CH1_XHTML: &str = r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><div class="Basic-Text-Frame">
+        <h1 class="x03-Chapter-Number"><span epub:type="pagebreak" id="pageMap_1" title="1"/>1</h1>
+        <p class="x03-Chapter-Title"><span class="underline">Creative Destruction</span></p>
+        <p class="x03-Chapter-Subtitle">The Risky Business of Going Against the Grain</p>
+        <p class="x03-Chapter-Epigraph-FL">“<a id="EndnotePhraseInText0"/>The reasonable man adapts himself to the world.”</p>
+        <p class="x03-Chapter-Epigraph-Source">George Bernard Shaw</p>
+        <p class="x03-CO-Body-Text"><span class="_idGenDropcap-1">O</span>n a cool fall evening in 2008, four students set out.</p>
+        <p class="x04-Body-Text">Luxottica, the 800-pound gorilla of the industry.</p>
+    </div></body></html>"#;
+
+    fn block_style(b: &Block) -> String {
+        match b {
+            Block::Paragraph { style, .. } | Block::Heading { style, .. } => style.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    fn has_tok(s: &str, tok: &str) -> bool {
+        s.split_whitespace().any(|t| t == tok)
+    }
+
+    #[test]
+    fn test_css_resolution_originals_chapter1_typography() {
+        let mut css = CssStylesheet::new();
+        css.add_css(ORIGINALS_CH1_CSS);
+        let (blocks, _) = EpubReader::parse_xhtml_with_css(ORIGINALS_CH1_XHTML, &HashMap::new(), &css);
+        assert_eq!(blocks.len(), 7, "blocks: {:#?}", blocks);
+
+        // Chapter number: centered heading
+        assert!(matches!(blocks[0], Block::Heading { .. }));
+        assert!(has_tok(&block_style(&blocks[0]), "align_center"));
+
+        // Title: centered, xl size, underlined span
+        let s = block_style(&blocks[1]);
+        assert!(has_tok(&s, "align_center") && has_tok(&s, "font_size_xl"), "title style: {}", s);
+
+        // Subtitle: centered, italic, lg
+        let s = block_style(&blocks[2]);
+        assert!(has_tok(&s, "align_center") && has_tok(&s, "italic") && has_tok(&s, "font_size_lg"), "subtitle: {}", s);
+
+        // Epigraph: centered, sm
+        let s = block_style(&blocks[3]);
+        assert!(has_tok(&s, "align_center") && has_tok(&s, "font_size_sm"), "epigraph: {}", s);
+        assert!(!has_tok(&s, "italic"));
+
+        // Attribution: centered, italic, xs
+        let s = block_style(&blocks[4]);
+        assert!(has_tok(&s, "align_center") && has_tok(&s, "italic") && has_tok(&s, "font_size_xs"), "source: {}", s);
+
+        // Drop cap span "O"
+        if let Block::Paragraph { spans, .. } = &blocks[5] {
+            assert_eq!(spans[0].text, "O");
+            let st = spans[0].style.clone().unwrap_or_default();
+            assert!(has_tok(&st, "dropcap"), "dropcap span style: {}", st);
+            assert!(!st.contains("font_size_"), "dropcap must not get a font size bucket: {}", st);
+        } else {
+            panic!("expected paragraph");
+        }
+
+        // Body text (0.938em) stays body size, no alignment override
+        let s = block_style(&blocks[6]);
+        assert!(!s.contains("font_size_") && !s.contains("align_center"), "body: {}", s);
+    }
+
+    #[test]
+    fn test_sanitize_css_style_last_wins_and_font_properties() {
+        let t = EpubReader::sanitize_css_style("text-align:center; font-style:italic; text-align:left; font-style:normal");
+        assert!(t.contains(&"align_left".to_string()));
+        assert!(!t.contains(&"align_center".to_string()));
+        assert!(!t.contains(&"italic".to_string()));
+        let t = EpubReader::sanitize_css_style("font-weight:700; font-size: 0.7em");
+        assert!(t.contains(&"bold".to_string()) && t.contains(&"font_size_xs".to_string()));
+        let t = EpubReader::sanitize_css_style("vertical-align: super; font-size: 0.7em");
+        assert!(t.contains(&"sup".to_string()) && !t.iter().any(|x| x.starts_with("font_size_")));
+    }
+
+    #[test]
+    fn test_epub_reader_real_originals_chapter1_styles() {
+        let path = "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let book = EpubReader::read_from_file(path).expect("Failed to read Originals epub");
+        let sec = book
+            .sections
+            .iter()
+            .find(|s| s.blocks.iter().any(|b| b.plain_text().contains("The reasonable man adapts himself")))
+            .expect("chapter 1 section");
+        let find = |needle: &str| {
+            sec.blocks.iter().find(|b| b.plain_text().contains(needle)).map(block_style).unwrap_or_default()
+        };
+        let sub = find("The Risky Business of Going Against the Grain");
+        assert!(has_tok(&sub, "italic") && has_tok(&sub, "align_center"), "subtitle: {}", sub);
+        let epi = find("The reasonable man adapts himself");
+        assert!(has_tok(&epi, "align_center") && has_tok(&epi, "font_size_sm"), "epigraph: {}", epi);
+        let src = find("George Bernard Shaw");
+        assert!(has_tok(&src, "italic") && has_tok(&src, "font_size_xs"), "source: {}", src);
+    }
 
     #[test]
     fn test_resolve_zip_path() {
