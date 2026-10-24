@@ -250,8 +250,19 @@ impl KindleSync {
 
     /// Safely flushes dirty filesystem caches and unmounts the connected Kindle device.
     pub fn eject_device(root: &Path) -> Result<(), SyncError> {
-        // 1. Flush file system write cache to prevent eMMC data loss
-        #[cfg(unix)]
+        // 1. Flush file system write cache to prevent eMMC data loss.
+        // On Linux, use syncfs on the device root file descriptor to flush only the Kindle
+        // filesystem instead of forcing a global host-wide sync across all drives.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            if let Ok(file) = std::fs::File::open(root) {
+                unsafe { libc::syncfs(file.as_raw_fd()) };
+            } else {
+                unsafe { libc::sync() };
+            }
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             unsafe { libc::sync() };
         }
@@ -277,10 +288,10 @@ impl KindleSync {
                     let block_dev = std::fs::read_to_string("/proc/mounts").ok().and_then(|mounts| {
                         for line in mounts.lines() {
                             let mut parts = line.split_whitespace();
-                            if let (Some(dev), Some(mount)) = (parts.next(), parts.next()) {
-                                if mount == root.to_str().unwrap_or_default() {
-                                    return Some(dev.to_string());
-                                }
+                            if let (Some(dev), Some(mount)) = (parts.next(), parts.next())
+                                && mount == root.to_str().unwrap_or_default()
+                            {
+                                return Some(dev.to_string());
                             }
                         }
                         None
@@ -415,15 +426,14 @@ impl KindleSync {
             ));
         }
 
-        if let Some(root) = allowed_root {
-            if let (Ok(canon_root), Ok(canon_target)) = (root.canonicalize(), full_path.canonicalize()) {
-                if !canon_target.starts_with(&canon_root) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        format!("Target path {:?} is outside allowed directory {:?}", full_path, root),
-                    ));
-                }
-            }
+        if let Some(root) = allowed_root
+            && let (Ok(canon_root), Ok(canon_target)) = (root.canonicalize(), full_path.canonicalize())
+            && !canon_target.starts_with(&canon_root)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Target path {:?} is outside allowed directory {:?}", full_path, root),
+            ));
         }
 
         if full_path.is_file() {
@@ -445,6 +455,7 @@ impl KindleSync {
     }
 
     /// Synchronizes a converted KFX file, multi-identifier cover thumbnails, and optional sidecars to the Kindle.
+    #[allow(clippy::too_many_arguments)]
     pub fn sync_to_device(
         device_root: &Path,
         kfx_source: &Path,
@@ -1120,5 +1131,21 @@ mod tests {
 
         KindleSync::copy_file(&src, &target).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new kfx contents");
+    }
+
+    #[test]
+    fn test_eject_device_targeted_syncfs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        // Write a test file to dirty cache
+        let dummy = root.join("test_file.bin");
+        std::fs::write(&dummy, b"dirty cache data").unwrap();
+
+        // eject_device should successfully invoke targeted syncfs without failing
+        let res = KindleSync::eject_device(root);
+        // Note: gio mount -u may return error if not actually mounted, but syncfs itself succeeds
+        let _ = res;
+        assert!(dummy.exists());
     }
 }

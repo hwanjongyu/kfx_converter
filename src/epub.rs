@@ -1150,9 +1150,10 @@ impl EpubReader {
         let finish_paragraph_spans = |spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l2: bool| {
             if p_dropcap && !spans.is_empty() {
                 let already_has_dropcap = spans.iter().any(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
-                if !already_has_dropcap {
-                    if let Some(first_idx) = spans.iter().position(|s| !s.text.trim().is_empty()) {
-                        let first = &mut spans[first_idx];
+                if !already_has_dropcap
+                    && let Some(first_idx) = spans.iter().position(|s| !s.text.trim().is_empty())
+                {
+                    let first = &mut spans[first_idx];
                         let trimmed = first.text.trim_start();
                         let leading_spaces = first.text.len() - trimmed.len();
                         let mut chars = trimmed.chars();
@@ -1194,7 +1195,6 @@ impl EpubReader {
                         }
                     }
                 }
-            }
         };
 
         // Table state
@@ -2315,7 +2315,7 @@ impl EpubReader {
         match size_ratio {
             // InDesign/Calibre drop caps: floated span with a large initial letter
             Some(r) if floated && r >= 1.5 => {
-                let is_2_lines = has_negative_margin || (r >= 1.5 && r <= 3.2);
+                let is_2_lines = has_negative_margin || (1.5..=3.2).contains(&r);
                 if is_2_lines {
                     tokens.push("dropcap_l2".to_string());
                 }

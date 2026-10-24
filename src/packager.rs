@@ -716,29 +716,29 @@ impl<'a> KfxPackager<'a> {
             ]),
         ];
 
-        if let Some(ref desc) = self.book.metadata.description {
-            if !desc.is_empty() {
-                title_metadata.push(IonValue::Struct(vec![
-                    (sym_key, IonValue::String("description".to_string())),
-                    (sym_val, IonValue::String(desc.clone())),
-                ]));
-            }
+        if let Some(ref desc) = self.book.metadata.description
+            && !desc.is_empty()
+        {
+            title_metadata.push(IonValue::Struct(vec![
+                (sym_key, IonValue::String("description".to_string())),
+                (sym_val, IonValue::String(desc.clone())),
+            ]));
         }
-        if let Some(ref publ) = self.book.metadata.publisher {
-            if !publ.is_empty() {
-                title_metadata.push(IonValue::Struct(vec![
-                    (sym_key, IonValue::String("publisher".to_string())),
-                    (sym_val, IonValue::String(publ.clone())),
-                ]));
-            }
+        if let Some(ref publ) = self.book.metadata.publisher
+            && !publ.is_empty()
+        {
+            title_metadata.push(IonValue::Struct(vec![
+                (sym_key, IonValue::String("publisher".to_string())),
+                (sym_val, IonValue::String(publ.clone())),
+            ]));
         }
-        if let Some(ref date) = self.book.metadata.date {
-            if !date.is_empty() {
-                title_metadata.push(IonValue::Struct(vec![
-                    (sym_key, IonValue::String("issue_date".to_string())),
-                    (sym_val, IonValue::String(date.clone())),
-                ]));
-            }
+        if let Some(ref date) = self.book.metadata.date
+            && !date.is_empty()
+        {
+            title_metadata.push(IonValue::Struct(vec![
+                (sym_key, IonValue::String("issue_date".to_string())),
+                (sym_val, IonValue::String(date.clone())),
+            ]));
         }
 
         if let Some(cover_id) = self.resolve_cover_resource_id() {
@@ -1588,10 +1588,10 @@ impl<'a> KfxPackager<'a> {
                             for ev in &style_events {
                                 if let IonValue::Struct(fields) = ev {
                                     for (k, v) in fields {
-                                        if *k == sym_style {
-                                            if let IonValue::Symbol(s) = v {
-                                                used_styles.insert(*s);
-                                            }
+                                        if *k == sym_style
+                                            && let IonValue::Symbol(s) = v
+                                        {
+                                            used_styles.insert(*s);
                                         }
                                     }
                                 }
@@ -1645,10 +1645,10 @@ impl<'a> KfxPackager<'a> {
                             for ev in &style_events {
                                 if let IonValue::Struct(fields) = ev {
                                     for (k, v) in fields {
-                                        if *k == sym_style {
-                                            if let IonValue::Symbol(s) = v {
-                                                used_styles.insert(*s);
-                                            }
+                                        if *k == sym_style
+                                            && let IonValue::Symbol(s) = v
+                                        {
+                                            used_styles.insert(*s);
                                         }
                                     }
                                 }

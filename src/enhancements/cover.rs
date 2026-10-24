@@ -41,13 +41,12 @@ impl CoverOptimizer {
         let is_progressive_jpeg = is_jpeg && data.windows(2).any(|w| w == [0xff, 0xc2]);
 
         // Pre-flight dimension check to prevent pixel flood decompression bombs (CWE-400)
-        if let Some((w, h)) = Self::get_image_dimensions(data) {
-            if w > MAX_SAFE_IMAGE_DIMENSION
+        if let Some((w, h)) = Self::get_image_dimensions(data)
+            && (w > MAX_SAFE_IMAGE_DIMENSION
                 || h > MAX_SAFE_IMAGE_DIMENSION
-                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
-            {
-                return Err(CoverError::ImageTooLarge(w, h));
-            }
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS)
+        {
+            return Err(CoverError::ImageTooLarge(w, h));
         }
 
         let img = image::load_from_memory(data)?;
@@ -85,13 +84,12 @@ impl CoverOptimizer {
             return Err(CoverError::EmptyData);
         }
 
-        if let Some((w, h)) = Self::get_image_dimensions(data) {
-            if w > MAX_SAFE_IMAGE_DIMENSION
+        if let Some((w, h)) = Self::get_image_dimensions(data)
+            && (w > MAX_SAFE_IMAGE_DIMENSION
                 || h > MAX_SAFE_IMAGE_DIMENSION
-                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
-            {
-                return Err(CoverError::ImageTooLarge(w, h));
-            }
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS)
+        {
+            return Err(CoverError::ImageTooLarge(w, h));
         }
 
         let img = image::load_from_memory(data)?;
@@ -130,13 +128,12 @@ impl CoverOptimizer {
         }
 
         // Pre-flight dimension check to prevent pixel flood decompression bombs (CWE-400)
-        if let Some((w, h)) = Self::get_image_dimensions(data) {
-            if w > MAX_SAFE_IMAGE_DIMENSION
+        if let Some((w, h)) = Self::get_image_dimensions(data)
+            && (w > MAX_SAFE_IMAGE_DIMENSION
                 || h > MAX_SAFE_IMAGE_DIMENSION
-                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
-            {
-                return Err(CoverError::ImageTooLarge(w, h));
-            }
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS)
+        {
+            return Err(CoverError::ImageTooLarge(w, h));
         }
 
         let img = image::load_from_memory(data)?;

@@ -303,6 +303,7 @@ impl BookIR {
     /// 3. Any image resource with a key containing "cover" (case-insensitive)
     /// 4. Any image resource with a key containing "thumb" (case-insensitive)
     /// 5. First available image resource in the book
+    ///
     /// Guarantees that any returned ID points to an existing image resource in `self.resources`.
     pub fn resolve_cover_resource_id(&self) -> Option<String> {
         // 1. Explicit metadata cover_image_id
@@ -310,10 +311,10 @@ impl BookIR {
             .cover_image_id
             .as_ref()
             .and_then(|id| {
-                if let Some(res) = self.resources.get(id) {
-                    if res.mime_type.starts_with("image/") {
-                        return Some(id.clone());
-                    }
+                if let Some(res) = self.resources.get(id)
+                    && res.mime_type.starts_with("image/")
+                {
+                    return Some(id.clone());
                 }
                 // Try case-insensitive or stripped filename matching against image resources
                 self.resources.iter().find_map(|(k, v)| {
@@ -333,10 +334,10 @@ impl BookIR {
                 self.sections.first().and_then(|s| {
                     s.blocks.iter().find_map(|b| match b {
                         Block::Image { resource_id, .. } => {
-                            if let Some(res) = self.resources.get(resource_id) {
-                                if res.mime_type.starts_with("image/") {
-                                    return Some(resource_id.clone());
-                                }
+                            if let Some(res) = self.resources.get(resource_id)
+                                && res.mime_type.starts_with("image/")
+                            {
+                                return Some(resource_id.clone());
                             }
                             None
                         }
