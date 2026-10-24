@@ -38,6 +38,7 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 | :--- | :--- | :--- | :---: |
 | **Advanced Typesetting (Drop Caps, Small Caps, Ruby)** | [spec-advanced-typesetting.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-advanced-typesetting.md) | [qa-advanced-typesetting-phase1.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase1.md)<br/>[qa-advanced-typesetting-phase2.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase2.md)<br/>[qa-advanced-typesetting-phase3.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase3.md)<br/>[qa-advanced-typesetting-phase4.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase4.md) | **PASS** |
 | **EPUB CSS Styling Fidelity & Cascading Inheritance** | [spec-epub-css-styling-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-epub-css-styling-fidelity.md) | [qa-epub-css-styling-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-epub-css-styling-fidelity.md) | **PASS** |
+| **Drop Cap Line Detection & Advanced Styling Fidelity** | [spec-advanced-styling-and-dropcap-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-advanced-styling-and-dropcap-fidelity.md) | [qa-advanced-styling-and-dropcap-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-styling-and-dropcap-fidelity.md) | **PASS** |
 | **TOC & Formatting Stability** | [spec-kfx-toc-and-formatting-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-kfx-toc-and-formatting-fix.md) | [qa-kfx-toc-and-formatting-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-kfx-toc-and-formatting-fix.md) | **PASS** |
 
 ### 3. Yellowjacket Structural Integrity & Navigation
@@ -101,6 +102,7 @@ docs/
 ├── multi_model_review_report.md                  # Tri-model independent architecture and security audit
 │
 ├── specs/                                        # Engineering Specifications (Phase 1)
+│   ├── spec-advanced-styling-and-dropcap-fidelity.md
 │   ├── spec-advanced-typesetting.md
 │   ├── spec-amazon-ground-truth-word-wise-dictionary.md
 │   ├── spec-batch-folder-epub-ui.md
@@ -130,6 +132,7 @@ docs/
 │   └── spec-preserve-epub-file-boundaries.md
 │
 └── qa/                                           # QA Test Logs & Verification Reports (Phase 2)
+    ├── qa-advanced-styling-and-dropcap-fidelity.md
     ├── qa-advanced-typesetting-phase1.md
     ├── qa-advanced-typesetting-phase2.md
     ├── qa-advanced-typesetting-phase3.md

@@ -134,6 +134,13 @@ pub struct StyleSymMap {
     pub font_size_lg: u32,
     pub font_size_xl: u32,
     pub font_size_xxl: u32,
+    pub dropcap_l2: u32,
+    pub dropcap_l2_bold: u32,
+    pub dropcap_l2_c2: u32,
+    pub dropcap_l2_c2_bold: u32,
+    pub dropcap_l3_bold: u32,
+    pub dropcap_l3_c2_bold: u32,
+    pub hanging_indent: u32,
 }
 
 
@@ -898,6 +905,13 @@ impl<'a> KfxPackager<'a> {
         let font_size_lg_sym = symbols.intern("style_font_size_lg");
         let font_size_xl_sym = symbols.intern("style_font_size_xl");
         let font_size_xxl_sym = symbols.intern("style_font_size_xxl");
+        let dropcap_l2_sym = symbols.intern("style_dropcap_l2");
+        let dropcap_l2_bold_sym = symbols.intern("style_dropcap_l2_bold");
+        let dropcap_l2_c2_sym = symbols.intern("style_dropcap_l2_c2");
+        let dropcap_l2_c2_bold_sym = symbols.intern("style_dropcap_l2_c2_bold");
+        let dropcap_l3_bold_sym = symbols.intern("style_dropcap_l3_bold");
+        let dropcap_l3_c2_bold_sym = symbols.intern("style_dropcap_l3_c2_bold");
+        let hanging_indent_sym = symbols.intern("style_hanging_indent");
 
         let sym_font_variant = symbol_id("font_variant").unwrap_or(14);
         let sym_small_caps = symbol_id("small_caps").unwrap_or(369);
@@ -1062,22 +1076,20 @@ impl<'a> KfxPackager<'a> {
             (sym_font_variant, IonValue::Symbol(sym_small_caps)),
         ]);
 
-        // 18. inline dropcap style (1 character)
+        // 18. inline dropcap style (1 character, 3 lines, regular)
         let dropcap_val = IonValue::Struct(vec![
             (sym_style_name, IonValue::Symbol(dropcap_sym)),
             (sym_font_size, make_em("3.0")),
-            (sym_font_weight, IonValue::Symbol(sym_bold)),
             (sym_line_height, make_em("0.9")),
             (sym_margin_right, make_em("0.15")),
             (sym_dropcap_lines, IonValue::Int(3)),
             (sym_dropcap_chars, IonValue::Int(1)),
         ]);
 
-        // 18b. inline 2-character dropcap style (for opening quote + first letter)
+        // 18b. inline 2-character dropcap style (for opening quote + first letter, 3 lines, regular)
         let dropcap_2_val = IonValue::Struct(vec![
             (sym_style_name, IonValue::Symbol(dropcap_2_sym)),
             (sym_font_size, make_em("3.0")),
-            (sym_font_weight, IonValue::Symbol(sym_bold)),
             (sym_line_height, make_em("0.9")),
             (sym_margin_right, make_em("0.15")),
             (sym_dropcap_lines, IonValue::Int(3)),
@@ -1179,6 +1191,80 @@ impl<'a> KfxPackager<'a> {
             (sym_font_size, make_em("2.00")),
         ]);
 
+        // 31. dropcap 2 lines, 1 char, regular
+        let dropcap_l2_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(dropcap_l2_sym)),
+            (sym_font_size, make_em("2.2")),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(2)),
+            (sym_dropcap_chars, IonValue::Int(1)),
+        ]);
+
+        // 32. dropcap 2 lines, 1 char, bold
+        let dropcap_l2_bold_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(dropcap_l2_bold_sym)),
+            (sym_font_size, make_em("2.2")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(2)),
+            (sym_dropcap_chars, IonValue::Int(1)),
+        ]);
+
+        // 33. dropcap 2 lines, 2 chars (quote + letter), regular
+        let dropcap_l2_c2_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(dropcap_l2_c2_sym)),
+            (sym_font_size, make_em("2.2")),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(2)),
+            (sym_dropcap_chars, IonValue::Int(2)),
+        ]);
+
+        // 34. dropcap 2 lines, 2 chars (quote + letter), bold
+        let dropcap_l2_c2_bold_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(dropcap_l2_c2_bold_sym)),
+            (sym_font_size, make_em("2.2")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(2)),
+            (sym_dropcap_chars, IonValue::Int(2)),
+        ]);
+
+        // 35. dropcap 3 lines, 1 char, bold
+        let dropcap_l3_bold_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(dropcap_l3_bold_sym)),
+            (sym_font_size, make_em("3.0")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(3)),
+            (sym_dropcap_chars, IonValue::Int(1)),
+        ]);
+
+        // 36. dropcap 3 lines, 2 chars, bold
+        let dropcap_l3_c2_bold_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(dropcap_l3_c2_bold_sym)),
+            (sym_font_size, make_em("3.0")),
+            (sym_font_weight, IonValue::Symbol(sym_bold)),
+            (sym_line_height, make_em("0.9")),
+            (sym_margin_right, make_em("0.15")),
+            (sym_dropcap_lines, IonValue::Int(3)),
+            (sym_dropcap_chars, IonValue::Int(2)),
+        ]);
+
+        // 37. hanging indent paragraph
+        let hanging_indent_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(hanging_indent_sym)),
+            (sym_line_height, make_em("1.4")),
+            (sym_margin_bottom, make_em("0.4")),
+            (sym_margin_left, make_em("1.5")),
+            (sym_text_indent, make_em("-1.5")),
+            (sym_text_alignment, IonValue::Symbol(sym_justify)),
+        ]);
+
         let style_list = [
             (h1_sym, h1_val),
             (h2_sym, h2_val),
@@ -1211,6 +1297,13 @@ impl<'a> KfxPackager<'a> {
             (font_size_lg_sym, font_size_lg_val),
             (font_size_xl_sym, font_size_xl_val),
             (font_size_xxl_sym, font_size_xxl_val),
+            (dropcap_l2_sym, dropcap_l2_val),
+            (dropcap_l2_bold_sym, dropcap_l2_bold_val),
+            (dropcap_l2_c2_sym, dropcap_l2_c2_val),
+            (dropcap_l2_c2_bold_sym, dropcap_l2_c2_bold_val),
+            (dropcap_l3_bold_sym, dropcap_l3_bold_val),
+            (dropcap_l3_c2_bold_sym, dropcap_l3_c2_bold_val),
+            (hanging_indent_sym, hanging_indent_val),
         ];
 
         let map = StyleSymMap {
@@ -1245,6 +1338,13 @@ impl<'a> KfxPackager<'a> {
             font_size_lg: font_size_lg_sym,
             font_size_xl: font_size_xl_sym,
             font_size_xxl: font_size_xxl_sym,
+            dropcap_l2: dropcap_l2_sym,
+            dropcap_l2_bold: dropcap_l2_bold_sym,
+            dropcap_l2_c2: dropcap_l2_c2_sym,
+            dropcap_l2_c2_bold: dropcap_l2_c2_bold_sym,
+            dropcap_l3_bold: dropcap_l3_bold_sym,
+            dropcap_l3_c2_bold: dropcap_l3_c2_bold_sym,
+            hanging_indent: hanging_indent_sym,
         };
 
         (map, style_list.to_vec())
@@ -1407,15 +1507,23 @@ impl<'a> KfxPackager<'a> {
                                 (sym_style, IonValue::Symbol(styles.small_caps)),
                             ]));
                         }
-                        if st.contains("dropcap_2") {
-                            style_events.push(IonValue::Struct(vec![
-                                (sym_offset, IonValue::Int(offset as i64)),
-                                (sym_length, IonValue::Int(span_len as i64)),
-                                (sym_style, IonValue::Symbol(styles.dropcap_2)),
-                            ]));
-                        } else if st.contains("dropcap") {
-                            let is_quote_dropcap = span.text.chars().count() == 2 && span.text.chars().next().is_some_and(|c| c == '“' || c == '"' || c == '‘' || c == '\'');
-                            let target_style = if is_quote_dropcap { styles.dropcap_2 } else { styles.dropcap };
+                        if st.contains("dropcap") {
+                            let char_count = span.text.chars().count();
+                            let has_quote = char_count == 2 && span.text.chars().next().is_some_and(crate::epub::is_opening_quote);
+                            let is_two_char = st.contains("dropcap_2") || has_quote;
+                            let is_l2 = st.contains("dropcap_l2");
+                            let is_bold = st.contains("bold");
+
+                            let target_style = match (is_l2, is_two_char, is_bold) {
+                                (true, false, false) => styles.dropcap_l2,
+                                (true, false, true) => styles.dropcap_l2_bold,
+                                (true, true, false) => styles.dropcap_l2_c2,
+                                (true, true, true) => styles.dropcap_l2_c2_bold,
+                                (false, false, false) => styles.dropcap,
+                                (false, false, true) => styles.dropcap_l3_bold,
+                                (false, true, false) => styles.dropcap_2,
+                                (false, true, true) => styles.dropcap_l3_c2_bold,
+                            };
                             style_events.push(IonValue::Struct(vec![
                                 (sym_offset, IonValue::Int(offset as i64)),
                                 (sym_length, IonValue::Int(span_len as i64)),
@@ -1523,9 +1631,11 @@ impl<'a> KfxPackager<'a> {
                                 styles.align_right
                             } else if st.contains("align_justify") {
                                 styles.align_justify
-                            } else if st.contains("blockquote") {
+                            } else if st.contains("hanging_indent") {
+                                styles.hanging_indent
+                            } else if st.contains("blockquote") || st.contains("indented_block") {
                                 styles.blockquote
-                            } else if st.contains("p_first") {
+                            } else if st.contains("p_first") || st.contains("indent_none") {
                                 styles.p_first
                             } else {
                                 styles.p
@@ -2889,17 +2999,18 @@ mod tests {
     }
 
 
+    fn collect_symbols(v: &IonValue, out: &mut Vec<u32>) {
+        match v {
+            IonValue::Symbol(s) => out.push(*s),
+            IonValue::List(items) => items.iter().for_each(|i| collect_symbols(i, out)),
+            IonValue::Struct(fields) => fields.iter().for_each(|(_, f)| collect_symbols(f, out)),
+            IonValue::Annotated(_, inner) => collect_symbols(inner, out),
+            _ => {}
+        }
+    }
+
     #[test]
     fn test_packager_emits_css_font_size_alignment_and_inherited_italic() {
-        fn collect_symbols(v: &IonValue, out: &mut Vec<u32>) {
-            match v {
-                IonValue::Symbol(s) => out.push(*s),
-                IonValue::List(items) => items.iter().for_each(|i| collect_symbols(i, out)),
-                IonValue::Struct(fields) => fields.iter().for_each(|(_, f)| collect_symbols(f, out)),
-                IonValue::Annotated(_, inner) => collect_symbols(inner, out),
-                _ => {}
-            }
-        }
         let span = |text: &str, style: Option<&str>| TextSpan {
             text: text.to_string(),
             style: style.map(|s| s.to_string()),
@@ -3638,6 +3749,103 @@ mod tests {
             storyline_entity.data.windows(furigana_bytes.len()).any(|w| w == furigana_bytes),
             "Storyline entity ($259) must contain ruby_content furigana payload in style_events"
         );
+    }
+
+    #[test]
+    fn test_packager_advanced_dropcap_and_indentation_fidelity() {
+        let mut book = BookIR::default();
+        book.metadata.title = "Typography Test Book".to_string();
+        book.sections.push(Section {
+            id: "sec_typo".to_string(),
+            title: "Typography".to_string(),
+            blocks: vec![
+                // 1. Hanging indent block
+                Block::Paragraph {
+                    id: "p_biblio".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Grant, Adam. Originals: How Non-Conformists Move the World. Viking, 2016.".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: Some("hanging_indent".to_string()),
+                },
+                // 2. 2-line regular drop cap (like Foreword "A")
+                Block::Paragraph {
+                    id: "p_dc_l2".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "A".to_string(),
+                            style: Some("dropcap_l2 dropcap".to_string()),
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        },
+                        TextSpan {
+                            text: "dam Grant is the perfect person to write this book.".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        },
+                    ],
+                    style: None,
+                },
+                // 3. 2-line quote drop cap
+                Block::Paragraph {
+                    id: "p_dc_l2_q".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "“I".to_string(),
+                            style: Some("dropcap_l2 dropcap_2".to_string()),
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        },
+                        TextSpan {
+                            text: "t was the best of times.”".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        },
+                    ],
+                    style: None,
+                },
+            ],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging typography failed");
+        assert!(size > 0);
+
+        // Check style entities emitted
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let style_entities: Vec<_> = packager
+            .entities
+            .iter()
+            .filter(|e| e.chunk_type == sym_style)
+            .collect();
+
+        // 31: dropcap_l2 (852 + 31 = 883)
+        // 33: dropcap_l2_c2 (852 + 33 = 885)
+        // 37: hanging_indent (852 + 37 = 889)
+        let dc_l2 = style_entities.iter().find(|e| e.entity_id == 852 + 31).expect("style_dropcap_l2");
+        let dc_l2_c2 = style_entities.iter().find(|e| e.entity_id == 852 + 33).expect("style_dropcap_l2_c2");
+        let hanging = style_entities.iter().find(|e| e.entity_id == 852 + 37).expect("style_hanging_indent");
+
+        assert!(!dc_l2.data.is_empty());
+        assert!(!dc_l2_c2.data.is_empty());
+        assert!(!hanging.data.is_empty());
+
+        // Decode dc_l2 and check dropcap_lines == 2 and no bold font_weight
+        let dc_l2_val = crate::ion::IonReader::new(&dc_l2.data).decode_all().expect("decode dc_l2");
+        let mut syms = Vec::new();
+        dc_l2_val.iter().for_each(|v| collect_symbols(v, &mut syms));
+        let sym_bold = symbol_id("bold").unwrap_or(361);
+        assert!(!syms.contains(&sym_bold), "style_dropcap_l2 must not be bold");
     }
 }
 

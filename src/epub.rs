@@ -49,6 +49,11 @@ pub struct EpubReader;
 
 pub type ParsedOpf = (BookMetadata, HashMap<String, ManifestItem>, Vec<String>);
 
+#[inline]
+pub(crate) fn is_opening_quote(c: char) -> bool {
+    matches!(c, '“' | '‘' | '"' | '\'' | '«' | '‹' | '「' | '『')
+}
+
 impl EpubReader {
     /// Fast-path to extract only metadata (title, author, identifier, language) without parsing chapters or assets.
     pub fn read_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<BookMetadata, EpubError> {
@@ -1047,6 +1052,18 @@ impl EpubReader {
             }
             if decls.is_empty() { Vec::new() } else { Self::sanitize_css_style(&decls) }
         };
+        // Resolves cascaded stylesheet declarations for ::first-letter pseudo-elements.
+        let element_first_letter_tokens = |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
+            let mut class_attr: Option<String> = None;
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"class" {
+                    class_attr = Some(String::from_utf8_lossy(&attr.value).to_string());
+                    break;
+                }
+            }
+            let decls = css.first_letter_declarations_for(&String::from_utf8_lossy(tag), class_attr.as_deref());
+            if decls.is_empty() { Vec::new() } else { Self::sanitize_css_style(&decls) }
+        };
         let mut blocks = Vec::new();
         let mut footnotes = HashMap::new();
         let mut xml_reader = XmlReader::from_str(xhtml);
@@ -1085,6 +1102,7 @@ impl EpubReader {
         let mut in_p = false;
         let mut p_style: Option<String> = None;
         let mut p_has_dropcap = false;
+        let mut p_dropcap_l2 = false;
         let mut in_heading = false;
         let mut heading_level = 1u8;
         let mut heading_style: Option<String> = None;
@@ -1092,7 +1110,7 @@ impl EpubReader {
         let mut ignore_depth = 0usize;
         let mut first_paragraph_seen = false;
 
-        let finish_paragraph_spans = |spans: &mut Vec<TextSpan>, p_dropcap: bool| {
+        let finish_paragraph_spans = |spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l2: bool| {
             if p_dropcap && !spans.is_empty() {
                 let already_has_dropcap = spans.iter().any(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
                 if !already_has_dropcap {
@@ -1101,7 +1119,7 @@ impl EpubReader {
                     let leading_spaces = first.text.len() - trimmed.len();
                     let mut chars = trimmed.chars();
                     if let Some(first_ch) = chars.next() {
-                        let is_quote = first_ch == '“' || first_ch == '"' || first_ch == '‘' || first_ch == '\'';
+                        let is_quote = is_opening_quote(first_ch);
                         let (take_len, is_two_char) = if is_quote {
                             if let Some(second_ch) = chars.next() {
                                 (first_ch.len_utf8() + second_ch.len_utf8(), true)
@@ -1114,7 +1132,12 @@ impl EpubReader {
                         let drop_text = format!("{}{}", &first.text[..leading_spaces], &trimmed[..take_len]);
                         let rest_text = trimmed[take_len..].to_string();
                         let orig_style = first.style.take();
-                        let drop_tag = if is_two_char { "dropcap_2" } else { "dropcap" };
+                        let drop_tag = match (is_two_char, p_l2) {
+                            (true, true) => "dropcap_l2 dropcap_2",
+                            (false, true) => "dropcap_l2 dropcap",
+                            (true, false) => "dropcap_2",
+                            (false, false) => "dropcap",
+                        };
                         let drop_style = match &orig_style {
                             Some(s) => format!("{} {}", s, drop_tag),
                             None => drop_tag.to_string(),
@@ -1303,7 +1326,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
-                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -1317,6 +1340,7 @@ impl EpubReader {
                                     }
                                     in_p = false;
                                     p_has_dropcap = false;
+                                    p_dropcap_l2 = false;
                                 }
                                 for attr in e.attributes().flatten() {
                                     let key = attr.key.as_ref();
@@ -1338,7 +1362,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
-                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -1353,6 +1377,7 @@ impl EpubReader {
                                 }
                                 in_p = true;
                                 p_has_dropcap = false;
+                                p_dropcap_l2 = false;
                                 let mut p_tokens = Vec::new();
                                 if local_bytes == b"blockquote" {
                                     p_tokens.push("blockquote".to_string());
@@ -1364,6 +1389,16 @@ impl EpubReader {
                                 let resolved = element_style_tokens(local_bytes, e);
                                 if resolved.iter().any(|t| t == "dropcap") {
                                     p_has_dropcap = true;
+                                }
+                                if resolved.iter().any(|t| t == "dropcap_l2") {
+                                    p_dropcap_l2 = true;
+                                }
+                                let fl_tokens = element_first_letter_tokens(local_bytes, e);
+                                if fl_tokens.iter().any(|t| t == "dropcap") {
+                                    p_has_dropcap = true;
+                                }
+                                if fl_tokens.iter().any(|t| t == "dropcap_l2") {
+                                    p_dropcap_l2 = true;
                                 }
                                 p_tokens.extend(resolved);
                                 for attr in e.attributes().flatten() {
@@ -1413,7 +1448,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
-                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -1427,6 +1462,7 @@ impl EpubReader {
                                     }
                                     in_p = false;
                                     p_has_dropcap = false;
+                                    p_dropcap_l2 = false;
                                 }
                                 in_heading = true;
                                 heading_level = local_bytes[1].saturating_sub(b'0');
@@ -1563,7 +1599,7 @@ impl EpubReader {
                                     if in_p || in_heading || in_li {
                                         flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                         if !current_spans.is_empty() {
-                                            finish_paragraph_spans(&mut current_spans, p_has_dropcap);
+                                            finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                                             let p_id = format!("p_{}", blocks.len() + 1);
                                             let p_block = Block::Paragraph {
                                                 id: p_id,
@@ -1577,6 +1613,7 @@ impl EpubReader {
                                             }
                                         }
                                         p_has_dropcap = false;
+                                        p_dropcap_l2 = false;
                                     }
                                     if in_li {
                                         current_list_item_blocks.push(img_block);
@@ -1624,7 +1661,7 @@ impl EpubReader {
                                     if in_p || in_heading || in_li {
                                         flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                         if !current_spans.is_empty() {
-                                            finish_paragraph_spans(&mut current_spans, p_has_dropcap);
+                                            finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                                             let p_id = format!("p_{}", blocks.len() + 1);
                                             let p_block = Block::Paragraph {
                                                 id: p_id,
@@ -1638,6 +1675,7 @@ impl EpubReader {
                                             }
                                         }
                                         p_has_dropcap = false;
+                                        p_dropcap_l2 = false;
                                     }
                                     if in_li {
                                         current_list_item_blocks.push(img_block);
@@ -1801,7 +1839,7 @@ impl EpubReader {
                                 if in_p {
                                     flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                                     if !current_spans.is_empty() {
-                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap);
+                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                                         let p_block = Block::Paragraph {
                                             id: format!("p_{}", blocks.len() + 1),
                                             spans: std::mem::take(&mut current_spans),
@@ -1815,6 +1853,7 @@ impl EpubReader {
                                     }
                                     in_p = false;
                                     p_has_dropcap = false;
+                                    p_dropcap_l2 = false;
                                 }
                             }
                             b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
@@ -1927,7 +1966,7 @@ impl EpubReader {
                     if in_p {
                         flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
                         if !current_spans.is_empty() {
-                            finish_paragraph_spans(&mut current_spans, p_has_dropcap);
+                            finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                             let p_block = Block::Paragraph {
                                 id: format!("p_{}", blocks.len() + 1),
                                 spans: std::mem::take(&mut current_spans),
@@ -2033,6 +2072,7 @@ impl EpubReader {
         let mut tokens = Vec::new();
         let mut floated = false;
         let mut size_ratio: Option<f64> = None;
+        let mut has_negative_margin = false;
         for (p, v) in &merged {
             {
                 let p = p.as_str();
@@ -2065,6 +2105,70 @@ impl EpubReader {
                             tokens.push("align_justify".to_string());
                         } else if v.contains("left") {
                             tokens.push("align_left".to_string());
+                        }
+                    }
+                    "text-indent" => {
+                        let trimmed = v.trim();
+                        if trimmed == "0" || trimmed == "0em" || trimmed == "0px" || trimmed == "0%" || trimmed == "0pt" {
+                            tokens.push("indent_none".to_string());
+                        } else if trimmed.starts_with('-') {
+                            tokens.push("hanging_indent".to_string());
+                        }
+                    }
+                    "margin-left" => {
+                        if v.contains('%') {
+                            let num: f64 = v.trim_end_matches('%').trim().parse().unwrap_or(0.0);
+                            if num >= 5.0 {
+                                tokens.push("indented_block".to_string());
+                            }
+                        } else if v.ends_with("em") {
+                            let num: f64 = v.trim_end_matches("em").trim().parse().unwrap_or(0.0);
+                            if num >= 1.0 {
+                                tokens.push("indented_block".to_string());
+                            }
+                        }
+                    }
+                    "margin" => {
+                        let parts: Vec<&str> = v.split_whitespace().collect();
+                        let lr_val = if parts.len() == 2 || parts.len() == 3 {
+                            parts.get(1).copied()
+                        } else if parts.len() == 4 {
+                            parts.get(3).copied()
+                        } else {
+                            None
+                        };
+                        if let Some(lr) = lr_val {
+                            if lr.ends_with('%') {
+                                let num: f64 = lr.trim_end_matches('%').trim().parse().unwrap_or(0.0);
+                                if num >= 5.0 {
+                                    tokens.push("indented_block".to_string());
+                                }
+                            } else if lr.ends_with("em") {
+                                let num: f64 = lr.trim_end_matches("em").trim().parse().unwrap_or(0.0);
+                                if num >= 1.0 {
+                                    tokens.push("indented_block".to_string());
+                                }
+                            }
+                        }
+                        if v.contains('-') {
+                            let bytes = v.as_bytes();
+                            for i in 0..bytes.len() {
+                                if bytes[i] == b'-' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.') {
+                                    has_negative_margin = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    "margin-top" | "margin-bottom" => {
+                        if v.contains('-') {
+                            let bytes = v.as_bytes();
+                            for i in 0..bytes.len() {
+                                if bytes[i] == b'-' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.') {
+                                    has_negative_margin = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                     "text-decoration" | "text-decoration-line" => {
@@ -2116,6 +2220,9 @@ impl EpubReader {
                         }
                     }
                     "initial-letter" => {
+                        if v.starts_with('2') {
+                            tokens.push("dropcap_l2".to_string());
+                        }
                         tokens.push("dropcap".to_string());
                     }
                     _ => {}
@@ -2128,12 +2235,16 @@ impl EpubReader {
         match size_ratio {
             // InDesign/Calibre drop caps: floated span with a large initial letter
             Some(r) if floated && r >= 1.5 => {
+                let is_2_lines = has_negative_margin || (r >= 1.5 && r <= 3.2);
+                if is_2_lines {
+                    tokens.push("dropcap_l2".to_string());
+                }
                 if !tokens.iter().any(|t| t == "dropcap") {
                     tokens.push("dropcap".to_string());
                 }
             }
             // sup/sub already shrink the glyphs; avoid double-scaling
-            Some(r) if !is_sup_sub && !tokens.iter().any(|t| t == "dropcap") => {
+            Some(r) if !is_sup_sub && !tokens.iter().any(|t| t.starts_with("dropcap")) => {
                 if let Some(tok) = crate::css::font_size_token(r) {
                     tokens.push(tok.to_string());
                 }
@@ -2232,6 +2343,23 @@ mod tests {
         assert!(t.contains(&"bold".to_string()) && t.contains(&"font_size_xs".to_string()));
         let t = EpubReader::sanitize_css_style("vertical-align: super; font-size: 0.7em");
         assert!(t.contains(&"sup".to_string()) && !t.iter().any(|x| x.starts_with("font_size_")));
+
+        // Drop caps: 2-line vs 3-line detection
+        let t_l2 = EpubReader::sanitize_css_style("float: left; font-size: 3.058em; margin-top: -0.45em; margin-bottom: -0.45em;");
+        assert!(t_l2.contains(&"dropcap_l2".to_string()) && t_l2.contains(&"dropcap".to_string()));
+
+        let t_l3 = EpubReader::sanitize_css_style("float: left; font-size: 3.8em;");
+        assert!(!t_l3.contains(&"dropcap_l2".to_string()) && t_l3.contains(&"dropcap".to_string()));
+
+        // Indentation and margin tests
+        let t_none = EpubReader::sanitize_css_style("text-indent: 0;");
+        assert!(t_none.contains(&"indent_none".to_string()));
+
+        let t_hang = EpubReader::sanitize_css_style("text-indent: -1.5em;");
+        assert!(t_hang.contains(&"hanging_indent".to_string()));
+
+        let t_block = EpubReader::sanitize_css_style("margin: 0 10%;");
+        assert!(t_block.contains(&"indented_block".to_string()));
     }
 
     #[test]
@@ -2255,6 +2383,21 @@ mod tests {
         assert!(has_tok(&epi, "align_center") && has_tok(&epi, "font_size_sm"), "epigraph: {}", epi);
         let src = find("George Bernard Shaw");
         assert!(has_tok(&src, "italic") && has_tok(&src, "font_size_xs"), "source: {}", src);
+
+        // Verify Foreword drop cap "A" has 2-line dropcap style
+        let fw_sec = book
+            .sections
+            .iter()
+            .find(|s| s.blocks.iter().any(|b| b.plain_text().contains("Adam Grant is the perfect person")))
+            .expect("foreword section");
+        let fw_p4 = &fw_sec.blocks[3]; // Foreword first body paragraph
+        if let Block::Paragraph { spans, .. } = fw_p4 {
+            assert_eq!(spans[0].text, "A");
+            let st = spans[0].style.as_deref().unwrap_or_default();
+            assert!(st.contains("dropcap_l2"), "Foreword drop cap 'A' must have dropcap_l2: {}", st);
+        } else {
+            panic!("Expected paragraph for foreword block 3");
+        }
     }
 
     #[test]

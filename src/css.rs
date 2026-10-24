@@ -20,6 +20,8 @@ struct CssRule {
     decls: Vec<(String, String)>,
     /// Source order, used as tiebreaker after specificity.
     order: usize,
+    /// Whether this rule matches a `::first-letter` or `:first-letter` pseudo-element.
+    is_first_letter: bool,
 }
 
 impl CssRule {
@@ -64,9 +66,17 @@ impl CssStylesheet {
                 continue;
             }
             for raw_sel in sel_part.split(',') {
-                if let Some((tag, classes)) = parse_simple_selector(raw_sel.trim()) {
+                let s = raw_sel.trim();
+                let (target_sel, is_first_letter) = if let Some(stripped) = s.strip_suffix("::first-letter") {
+                    (stripped.trim(), true)
+                } else if let Some(stripped) = s.strip_suffix(":first-letter") {
+                    (stripped.trim(), true)
+                } else {
+                    (s, false)
+                };
+                if let Some((tag, classes)) = parse_simple_selector(target_sel) {
                     let order = self.rules.len();
-                    self.rules.push(CssRule { tag, classes, decls: decls.clone(), order });
+                    self.rules.push(CssRule { tag, classes, decls: decls.clone(), order, is_first_letter });
                 }
             }
         }
@@ -87,7 +97,41 @@ impl CssStylesheet {
             .rules
             .iter()
             .filter(|r| {
-                r.tag.as_deref().is_none_or(|t| t == tag_lc)
+                !r.is_first_letter
+                    && r.tag.as_deref().is_none_or(|t| t == tag_lc)
+                    && r.classes.iter().all(|c| classes.contains(c))
+            })
+            .collect();
+        matched.sort_by_key(|r| (r.specificity(), r.order));
+
+        let mut out = String::new();
+        for r in matched {
+            for (p, v) in &r.decls {
+                out.push_str(p);
+                out.push(':');
+                out.push_str(v);
+                out.push(';');
+            }
+        }
+        out
+    }
+
+    /// Returns the cascaded declarations for an element's `::first-letter` pseudo-element.
+    pub fn first_letter_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        if self.rules.is_empty() {
+            return String::new();
+        }
+        let tag_lc = tag.to_ascii_lowercase();
+        let classes: Vec<String> = class_attr
+            .map(|c| c.split_whitespace().map(|s| s.to_ascii_lowercase()).collect())
+            .unwrap_or_default();
+
+        let mut matched: Vec<&CssRule> = self
+            .rules
+            .iter()
+            .filter(|r| {
+                r.is_first_letter
+                    && r.tag.as_deref().is_none_or(|t| t == tag_lc)
                     && r.classes.iter().all(|c| classes.contains(c))
             })
             .collect();
@@ -246,6 +290,9 @@ mod tests {
         let plain = sheet.declarations_for("p", None);
         assert!(!plain.contains("italic"));
         assert!(!plain.contains("3em"));
+        // First-letter pseudo-element is resolved via first_letter_declarations_for
+        let fl = sheet.first_letter_declarations_for("p", None);
+        assert!(fl.contains("font-size:3em"));
         // @media inner rule is kept
         assert!(sheet.declarations_for("p", Some("x04-Body-Text")).contains("justify"));
         // Class-only selector matches any tag, case-insensitive
