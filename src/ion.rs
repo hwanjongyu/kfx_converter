@@ -229,11 +229,18 @@ impl IonWriter {
             parsed
         } else {
             let val: f64 = s.parse().unwrap_or(0.0);
-            if val == 0.0 {
+            if val == 0.0 || !val.is_finite() {
                 self.write_typed_bytes(0x50, &[0x80]);
                 return;
             }
-            let mut c = ((val * 1_000_000.0).round() as i64).max(i64::MIN + 1);
+            let scaled = val * 1_000_000.0;
+            let mut c = if scaled >= i64::MAX as f64 {
+                i64::MAX
+            } else if scaled <= (i64::MIN + 1) as f64 {
+                i64::MIN + 1
+            } else {
+                scaled.round() as i64
+            };
             let mut e: i8 = -6;
             while c != 0 && c % 10 == 0 && e < 0 {
                 c /= 10;
@@ -1048,6 +1055,19 @@ mod tests {
         let mut reader = IonReader::new(&malformed_annot);
         let err = reader.decode_value().unwrap_err();
         assert!(matches!(err, IonError::UnexpectedEof(_)));
+    }
+
+    #[test]
+    fn test_ion_decimal_checked_scaling() {
+        let mut writer = IonWriter::new();
+        // Huge exponent or float representation must not panic
+        writer.write_decimal("1e100");
+        writer.write_decimal("-1e100");
+        writer.write_decimal("NaN");
+        writer.write_decimal("Infinity");
+        writer.write_decimal("0.0000000000001");
+        let bytes = writer.into_bytes();
+        assert!(!bytes.is_empty());
     }
 
     #[test]

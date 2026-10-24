@@ -24,6 +24,204 @@ pub struct TextSpan {
     pub ruby: Option<String>,
 }
 
+impl TextSpan {
+    pub fn resolved_styles(&self) -> SpanStyles {
+        SpanStyles::from_tokens(self.style.as_deref().unwrap_or_default())
+    }
+
+    pub fn with_resolved_styles(mut self, styles: &SpanStyles) -> Self {
+        let tokens = styles.to_tokens();
+        self.style = if tokens.is_empty() { None } else { Some(tokens) };
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextFormatFlags {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
+    pub code: bool,
+    pub superscript: bool,
+    pub subscript: bool,
+    pub small_caps: bool,
+    pub uppercase: bool,
+    pub noteref: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DropCapStyle {
+    #[default]
+    None,
+    StandardSingleChar,
+    StandardTwoChar,
+    Line2SingleChar,
+    Line2TwoChar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAlignment {
+    #[default]
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontSizeBucket {
+    #[default]
+    Normal,
+    ExtraSmall,
+    Small,
+    Large,
+    ExtraLarge,
+    ExtraExtraLarge,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpanStyles {
+    pub format: TextFormatFlags,
+    pub font_size: FontSizeBucket,
+    pub dropcap: DropCapStyle,
+    pub custom_classes: Vec<String>,
+}
+
+impl SpanStyles {
+    pub fn from_tokens(tokens: &str) -> Self {
+        let mut styles = Self::default();
+        let is_l2 = tokens.contains("dropcap_l2");
+        let is_c2 = tokens.contains("dropcap_2");
+        let is_dc = tokens.contains("dropcap");
+
+        if is_dc || is_c2 {
+            styles.dropcap = match (is_l2, is_c2) {
+                (true, true) => DropCapStyle::Line2TwoChar,
+                (true, false) => DropCapStyle::Line2SingleChar,
+                (false, true) => DropCapStyle::StandardTwoChar,
+                (false, false) => DropCapStyle::StandardSingleChar,
+            };
+        }
+
+        for tok in tokens.split_whitespace() {
+            match tok {
+                "bold" => styles.format.bold = true,
+                "italic" => styles.format.italic = true,
+                "underline" => styles.format.underline = true,
+                "strike" | "strikethrough" => styles.format.strikethrough = true,
+                "code" => styles.format.code = true,
+                "sup" | "superscript" => styles.format.superscript = true,
+                "sub" | "subscript" => styles.format.subscript = true,
+                "small_caps" => styles.format.small_caps = true,
+                "uppercase" => styles.format.uppercase = true,
+                "noteref" => styles.format.noteref = true,
+                "font_size_xs" => styles.font_size = FontSizeBucket::ExtraSmall,
+                "font_size_sm" => styles.font_size = FontSizeBucket::Small,
+                "font_size_lg" => styles.font_size = FontSizeBucket::Large,
+                "font_size_xl" => styles.font_size = FontSizeBucket::ExtraLarge,
+                "font_size_xxl" => styles.font_size = FontSizeBucket::ExtraExtraLarge,
+                t if !t.starts_with("dropcap")
+                    && !styles.custom_classes.iter().any(|c| c == t) =>
+                {
+                    styles.custom_classes.push(t.to_string());
+                }
+                _ => {}
+            }
+        }
+        styles
+    }
+
+    pub fn to_tokens(&self) -> String {
+        let mut tokens = Vec::new();
+        match self.dropcap {
+            DropCapStyle::None => {}
+            DropCapStyle::StandardSingleChar => tokens.push("dropcap"),
+            DropCapStyle::StandardTwoChar => tokens.push("dropcap_2"),
+            DropCapStyle::Line2SingleChar => {
+                tokens.push("dropcap_l2");
+                tokens.push("dropcap");
+            }
+            DropCapStyle::Line2TwoChar => {
+                tokens.push("dropcap_l2");
+                tokens.push("dropcap_2");
+            }
+        }
+        if self.format.bold { tokens.push("bold"); }
+        if self.format.italic { tokens.push("italic"); }
+        if self.format.underline { tokens.push("underline"); }
+        if self.format.strikethrough { tokens.push("strike"); }
+        if self.format.code { tokens.push("code"); }
+        if self.format.superscript { tokens.push("sup"); }
+        if self.format.subscript { tokens.push("sub"); }
+        if self.format.small_caps { tokens.push("small_caps"); }
+        if self.format.uppercase { tokens.push("uppercase"); }
+        if self.format.noteref { tokens.push("noteref"); }
+        match self.font_size {
+            FontSizeBucket::Normal => {}
+            FontSizeBucket::ExtraSmall => tokens.push("font_size_xs"),
+            FontSizeBucket::Small => tokens.push("font_size_sm"),
+            FontSizeBucket::Large => tokens.push("font_size_lg"),
+            FontSizeBucket::ExtraLarge => tokens.push("font_size_xl"),
+            FontSizeBucket::ExtraExtraLarge => tokens.push("font_size_xxl"),
+        }
+        for c in &self.custom_classes {
+            tokens.push(c);
+        }
+        tokens.join(" ")
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockStyle {
+    pub alignment: TextAlignment,
+    pub is_first_paragraph: bool,
+    pub is_hanging_indent: bool,
+    pub is_blockquote: bool,
+    pub page_break_before: bool,
+    pub custom_classes: Vec<String>,
+}
+
+impl BlockStyle {
+    pub fn from_tokens(tokens: &str) -> Self {
+        let mut style = Self::default();
+        for tok in tokens.split_whitespace() {
+            match tok {
+                "align_center" => style.alignment = TextAlignment::Center,
+                "align_right" => style.alignment = TextAlignment::Right,
+                "align_justify" => style.alignment = TextAlignment::Justify,
+                "p_first" | "indent_none" => style.is_first_paragraph = true,
+                "hanging_indent" => style.is_hanging_indent = true,
+                "blockquote" | "indented_block" => style.is_blockquote = true,
+                "page_break_before" => style.page_break_before = true,
+                t if !style.custom_classes.iter().any(|c| c == t) => {
+                    style.custom_classes.push(t.to_string());
+                }
+                _ => {}
+            }
+        }
+        style
+    }
+
+    pub fn to_tokens(&self) -> String {
+        let mut tokens = Vec::new();
+        match self.alignment {
+            TextAlignment::Left => {}
+            TextAlignment::Center => tokens.push("align_center"),
+            TextAlignment::Right => tokens.push("align_right"),
+            TextAlignment::Justify => tokens.push("align_justify"),
+        }
+        if self.is_first_paragraph { tokens.push("p_first"); }
+        if self.is_hanging_indent { tokens.push("hanging_indent"); }
+        if self.is_blockquote { tokens.push("blockquote"); }
+        if self.page_break_before { tokens.push("page_break_before"); }
+        for c in &self.custom_classes {
+            tokens.push(c);
+        }
+        tokens.join(" ")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Block {
     Paragraph {
@@ -96,6 +294,26 @@ pub struct BookIR {
 }
 
 impl Block {
+    /// Returns the resolved strongly-typed style for this block.
+    pub fn resolved_style(&self) -> BlockStyle {
+        let st = match self {
+            Block::Paragraph { style, .. } | Block::Heading { style, .. } => style.as_deref().unwrap_or_default(),
+            _ => "",
+        };
+        BlockStyle::from_tokens(st)
+    }
+
+    /// Sets the strongly-typed style for this block.
+    pub fn with_resolved_style(mut self, style: &BlockStyle) -> Self {
+        let tokens = style.to_tokens();
+        let opt = if tokens.is_empty() { None } else { Some(tokens) };
+        match &mut self {
+            Block::Paragraph { style, .. } | Block::Heading { style, .. } => *style = opt,
+            _ => {}
+        }
+        self
+    }
+
     /// Extracts plain text representation of this block.
     pub fn plain_text(&self) -> String {
         match self {
@@ -649,6 +867,44 @@ mod tests {
         // Calling it again should be idempotent
         book.ensure_cover_section();
         assert_eq!(book.sections.len(), 2);
+    }
+
+    #[test]
+    fn test_typed_ir_style_roundtrip() {
+        let span_tokens = "bold italic underline strike dropcap_2 font_size_lg custom_author";
+        let span_styles = SpanStyles::from_tokens(span_tokens);
+        assert!(span_styles.format.bold);
+        assert!(span_styles.format.italic);
+        assert!(span_styles.format.underline);
+        assert!(span_styles.format.strikethrough);
+        assert_eq!(span_styles.dropcap, DropCapStyle::StandardTwoChar);
+        assert_eq!(span_styles.font_size, FontSizeBucket::Large);
+        assert_eq!(span_styles.custom_classes, vec!["custom_author".to_string()]);
+
+        let block_tokens = "align_center p_first hanging_indent page_break_before custom_scene";
+        let block_style = BlockStyle::from_tokens(block_tokens);
+        assert_eq!(block_style.alignment, TextAlignment::Center);
+        assert!(block_style.is_first_paragraph);
+        assert!(block_style.is_hanging_indent);
+        assert!(block_style.page_break_before);
+        assert_eq!(block_style.custom_classes, vec!["custom_scene".to_string()]);
+
+        // TextSpan and Block integration
+        let span = TextSpan {
+            text: "Opening text".to_string(),
+            style: Some(span_tokens.to_string()),
+            anchor_id: None,
+            href: None,
+            ruby: None,
+        };
+        assert_eq!(span.resolved_styles().dropcap, DropCapStyle::StandardTwoChar);
+
+        let block = Block::Paragraph {
+            id: "p1".to_string(),
+            spans: vec![span],
+            style: Some(block_tokens.to_string()),
+        };
+        assert_eq!(block.resolved_style().alignment, TextAlignment::Center);
     }
 }
 
