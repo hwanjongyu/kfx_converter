@@ -665,6 +665,18 @@ impl KindleSync {
         }
     }
 
+    /// Clears the read-only attribute on an existing destination file so that atomic overwrites or renames succeed.
+    #[allow(clippy::permissions_set_readonly_false)]
+    pub fn prepare_destination_for_overwrite(dst: &Path) {
+        if let Ok(meta) = std::fs::metadata(dst)
+            && meta.permissions().readonly()
+        {
+            let mut perms = meta.permissions();
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(dst, perms);
+        }
+    }
+
     /// Robust copy using `gio copy` for Linux GVFS MTP or streamed copy for standard mounts.
     /// Note: Avoid calling `sync_data()` / `sync_all()` on individual file handles, as SCSI
     /// SYNCHRONIZE CACHE commands cause Kindle's USB gadget driver (fsg) to stall on slow eMMC
@@ -691,6 +703,7 @@ impl KindleSync {
             w.flush()?;
             drop(w);
             drop(r);
+            Self::prepare_destination_for_overwrite(dst);
             std::fs::rename(&part_dst, dst)?;
             // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -759,6 +772,7 @@ impl KindleSync {
             f.write_all(data)?;
             f.flush()?;
             drop(f);
+            Self::prepare_destination_for_overwrite(dst);
             std::fs::rename(&part_dst, dst)?;
             // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
             std::thread::sleep(std::time::Duration::from_millis(150));
@@ -1076,5 +1090,35 @@ mod tests {
         let res = KindleSync::delete_book_file_safe(Some(&docs), &outside_book);
         assert!(res.is_err());
         assert!(outside_book.exists()); // must not be deleted
+    }
+
+    #[test]
+    fn test_sync_overwrites_readonly_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("thumbnail_test.jpg");
+
+        // First write
+        KindleSync::write_bytes(&target, b"original cover").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"original cover");
+
+        // Make readonly
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&target, perms).unwrap();
+        assert!(std::fs::metadata(&target).unwrap().permissions().readonly());
+
+        // Re-sync overwrite must succeed even when target is read-only
+        KindleSync::write_bytes(&target, b"updated cover").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"updated cover");
+
+        // Also test copy_file over a readonly destination
+        let src = temp.path().join("source.kfx");
+        std::fs::write(&src, b"new kfx contents").unwrap();
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&target, perms).unwrap();
+
+        KindleSync::copy_file(&src, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new kfx contents");
     }
 }

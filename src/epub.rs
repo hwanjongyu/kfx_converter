@@ -1051,6 +1051,8 @@ impl EpubReader {
             chapter_css_owned = c;
             &chapter_css_owned
         };
+        let style_cache = crate::css::ElementStyleCache::new();
+
         // Resolves cascaded stylesheet declarations + inline `style` attribute into IR tokens.
         let element_style_tokens = |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
             let mut class_attr: Option<String> = None;
@@ -1062,12 +1064,23 @@ impl EpubReader {
                     _ => {}
                 }
             }
-            let mut decls = css.declarations_for(&String::from_utf8_lossy(tag), class_attr.as_deref());
+            let tag_str = String::from_utf8_lossy(tag);
+            let base_tokens = style_cache.get_or_resolve_style(&tag_str, class_attr.as_deref(), |t, c| {
+                let decls = css.declarations_for(t, c);
+                if decls.is_empty() {
+                    Vec::new()
+                } else {
+                    Self::sanitize_css_style(&decls)
+                }
+            });
+
             if let Some(s) = inline_style {
-                decls.push(';');
-                decls.push_str(&s);
+                let mut tokens = base_tokens;
+                tokens.extend(Self::sanitize_css_style(&s));
+                tokens
+            } else {
+                base_tokens
             }
-            if decls.is_empty() { Vec::new() } else { Self::sanitize_css_style(&decls) }
         };
         // Resolves cascaded stylesheet declarations for ::first-letter pseudo-elements.
         let element_first_letter_tokens = |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
@@ -1078,8 +1091,15 @@ impl EpubReader {
                     break;
                 }
             }
-            let decls = css.first_letter_declarations_for(&String::from_utf8_lossy(tag), class_attr.as_deref());
-            if decls.is_empty() { Vec::new() } else { Self::sanitize_css_style(&decls) }
+            let tag_str = String::from_utf8_lossy(tag);
+            style_cache.get_or_resolve_first_letter(&tag_str, class_attr.as_deref(), |t, c| {
+                let decls = css.first_letter_declarations_for(t, c);
+                if decls.is_empty() {
+                    Vec::new()
+                } else {
+                    Self::sanitize_css_style(&decls)
+                }
+            })
         };
         let mut blocks = Vec::new();
         let mut footnotes = HashMap::new();

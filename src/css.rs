@@ -9,6 +9,69 @@
 //! combinators, attribute selectors, pseudo-classes/elements, `@`-rules wrappers are
 //! unwrapped and their inner simple rules kept.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+type StyleTokenCache = HashMap<(String, Option<String>), Vec<String>>;
+
+/// Element-level CSS style cache to avoid redundant cascade evaluations,
+/// regex matching, and string allocations on recurring HTML elements.
+#[derive(Debug, Clone, Default)]
+pub struct ElementStyleCache {
+    style_cache: RefCell<StyleTokenCache>,
+    first_letter_cache: RefCell<StyleTokenCache>,
+}
+
+impl ElementStyleCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolves or retrieves cached element style tokens for `(tag, class_attr)`.
+    pub fn get_or_resolve_style<F>(
+        &self,
+        tag: &str,
+        class_attr: Option<&str>,
+        resolve: F,
+    ) -> Vec<String>
+    where
+        F: FnOnce(&str, Option<&str>) -> Vec<String>,
+    {
+        let key = (tag.to_string(), class_attr.map(|s| s.to_string()));
+        if let Some(cached) = self.style_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let resolved = resolve(tag, class_attr);
+        self.style_cache.borrow_mut().insert(key, resolved.clone());
+        resolved
+    }
+
+    /// Resolves or retrieves cached `::first-letter` style tokens for `(tag, class_attr)`.
+    pub fn get_or_resolve_first_letter<F>(
+        &self,
+        tag: &str,
+        class_attr: Option<&str>,
+        resolve: F,
+    ) -> Vec<String>
+    where
+        F: FnOnce(&str, Option<&str>) -> Vec<String>,
+    {
+        let key = (tag.to_string(), class_attr.map(|s| s.to_string()));
+        if let Some(cached) = self.first_letter_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let resolved = resolve(tag, class_attr);
+        self.first_letter_cache.borrow_mut().insert(key, resolved.clone());
+        resolved
+    }
+
+    /// Clears the cached entries.
+    pub fn clear(&self) {
+        self.style_cache.borrow_mut().clear();
+        self.first_letter_cache.borrow_mut().clear();
+    }
+}
+
 /// A single simple-selector rule.
 #[derive(Debug, Clone)]
 struct CssRule {
@@ -327,5 +390,50 @@ mod tests {
     fn test_extract_inline_style_blocks() {
         let x = "<html><head><style type=\"text/css\">p.c{text-align:center}</style></head><body/></html>";
         assert_eq!(extract_inline_style_blocks(x).trim(), "p.c{text-align:center}");
+    }
+
+    #[test]
+    fn test_element_style_cache_memoization() {
+        let cache = ElementStyleCache::new();
+        let mut calls = 0;
+
+        let tokens1 = cache.get_or_resolve_style("p", Some("calibre1"), |_t, _c| {
+            calls += 1;
+            vec!["align_center".to_string()]
+        });
+        assert_eq!(tokens1, vec!["align_center".to_string()]);
+        assert_eq!(calls, 1);
+
+        // Second call should hit cache and NOT invoke the resolve closure
+        let tokens2 = cache.get_or_resolve_style("p", Some("calibre1"), |_t, _c| {
+            calls += 1;
+            vec!["different".to_string()]
+        });
+        assert_eq!(tokens2, vec!["align_center".to_string()]);
+        assert_eq!(calls, 1);
+
+        // Different tag/class should resolve
+        let tokens3 = cache.get_or_resolve_style("h1", None, |_t, _c| {
+            calls += 1;
+            vec!["bold".to_string()]
+        });
+        assert_eq!(tokens3, vec!["bold".to_string()]);
+        assert_eq!(calls, 2);
+
+        // First letter cache
+        let mut fl_calls = 0;
+        let fl1 = cache.get_or_resolve_first_letter("p", Some("intro"), |_t, _c| {
+            fl_calls += 1;
+            vec!["dropcap".to_string()]
+        });
+        assert_eq!(fl1, vec!["dropcap".to_string()]);
+        assert_eq!(fl_calls, 1);
+
+        let fl2 = cache.get_or_resolve_first_letter("p", Some("intro"), |_t, _c| {
+            fl_calls += 1;
+            vec!["other".to_string()]
+        });
+        assert_eq!(fl2, vec!["dropcap".to_string()]);
+        assert_eq!(fl_calls, 1);
     }
 }

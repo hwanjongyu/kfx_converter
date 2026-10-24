@@ -344,17 +344,15 @@ impl IonWriter {
     }
 
     fn write_struct(&mut self, fields: &[(u32, IonValue)]) {
-        let mut inner = Vec::new();
+        let mut inner = IonWriter::with_capacity(fields.len() * 24);
         for (sid, val) in fields {
             // Field SID as VarUInt
             let (sid_bytes, sid_len) = encode_varuint_buf(*sid as u64);
-            inner.extend_from_slice(&sid_bytes[..sid_len]);
-            // Field Value
-            let mut val_writer = IonWriter::new();
-            val_writer.write_value(val);
-            inner.extend_from_slice(val_writer.to_bytes());
+            inner.buf.extend_from_slice(&sid_bytes[..sid_len]);
+            // Field Value serialized directly into inner buffer without per-field heap allocations
+            inner.write_value(val);
         }
-        self.write_typed_bytes(0xD0, &inner);
+        self.write_typed_bytes(0xD0, inner.to_bytes());
     }
 
     fn write_typed_bytes(&mut self, type_nibble: u8, payload: &[u8]) {
@@ -1050,5 +1048,49 @@ mod tests {
         let mut reader = IonReader::new(&malformed_annot);
         let err = reader.decode_value().unwrap_err();
         assert!(matches!(err, IonError::UnexpectedEof(_)));
+    }
+
+    #[test]
+    fn test_ion_write_struct_direct_roundtrip() {
+        let mut writer = IonWriter::new();
+        let fields = vec![
+            (10, IonValue::String("hello".to_string())),
+            (20, IonValue::Int(42)),
+            (30, IonValue::Bool(true)),
+            (
+                40,
+                IonValue::List(vec![
+                    IonValue::Int(1),
+                    IonValue::Int(2),
+                    IonValue::String("sub".to_string()),
+                ]),
+            ),
+            (
+                50,
+                IonValue::Struct(vec![
+                    (1, IonValue::Symbol(150)),
+                    (2, IonValue::String("nested".to_string())),
+                ]),
+            ),
+        ];
+
+        writer.write_value(&IonValue::Struct(fields));
+        let bytes = writer.to_bytes();
+
+        let mut reader = IonReader::new(bytes);
+        let decoded = reader.decode_value().unwrap();
+
+        match decoded {
+            IonValue::Struct(decoded_fields) => {
+                assert_eq!(decoded_fields.len(), 5);
+                assert_eq!(decoded_fields[0].0, 10);
+                assert_eq!(decoded_fields[0].1, IonValue::String("hello".to_string()));
+                assert_eq!(decoded_fields[1].0, 20);
+                assert_eq!(decoded_fields[1].1, IonValue::Int(42));
+                assert_eq!(decoded_fields[2].0, 30);
+                assert_eq!(decoded_fields[2].1, IonValue::Bool(true));
+            }
+            _ => panic!("Expected IonValue::Struct"),
+        }
     }
 }

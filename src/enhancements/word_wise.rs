@@ -243,19 +243,44 @@ impl WordWiseBuilder {
         self.glosses.len() - initial_count
     }
 
-    /// Writes the Word Wise `.kll` SQLite database directly to disk.
+    /// Writes the Word Wise `.kll` SQLite database atomically to disk.
+    /// Uses a temporary file in the target directory and renames to prevent partial/corrupted
+    /// writes that trigger Kindle OS `.bad_file` blacklisting.
+    #[allow(clippy::permissions_set_readonly_false)]
     pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> SqlResult<()> {
+        let path = path.as_ref();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+
+        if let Ok(tmp_file) = tempfile::NamedTempFile::new_in(parent) {
+            {
+                let mut conn = Connection::open(tmp_file.path())?;
+                self.populate_connection(&mut conn)?;
+            }
+            if let Ok(meta) = std::fs::metadata(path)
+                && meta.permissions().readonly()
+            {
+                let mut perms = meta.permissions();
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+            if tmp_file.persist(path).is_ok() {
+                return Ok(());
+            }
+        }
+
+        // Fallback: direct connection open if temporary file creation/persisting is unsupported
         let mut conn = Connection::open(path)?;
         self.populate_connection(&mut conn)
     }
 
     /// Populates tables and metadata into a SQLite connection.
     pub fn populate_connection(&self, conn: &mut Connection) -> SqlResult<()> {
-        // Optimize PRAGMAs for Kindle OS eMMC flash memory & write amplification mitigation
+        // Optimize PRAGMAs for Kindle OS eMMC flash memory, write amplification mitigation,
+        // and crash resilience against corrupt .bad_file generation.
         conn.execute_batch(
             "PRAGMA page_size = 4096;
-             PRAGMA journal_mode = OFF;
-             PRAGMA synchronous = OFF;
+             PRAGMA journal_mode = MEMORY;
+             PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
 
              CREATE TABLE metadata (
@@ -567,5 +592,51 @@ mod tests {
         // "The " = 4 chars, so "abstruse" starts at offset 4 within block
         // Expected start: 6 (cover) + 1 (root) + 4 ("The ") = 11
         assert_eq!(gloss.start, 11, "Expected PID 11 with cover offset, got {}", gloss.start);
+    }
+
+    #[test]
+    fn test_word_wise_atomic_durability_and_pragmas() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("LanguageLayer.en.B0TEST.kll");
+
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1");
+        builder.add_gloss(10, Some(15), 3, 101, false);
+
+        // Verify PRAGMA configuration on connection
+        let mut test_conn = Connection::open_in_memory().unwrap();
+        builder.populate_connection(&mut test_conn).unwrap();
+        let journal_mode: String = test_conn
+            .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "memory");
+        let sync_mode: i64 = test_conn
+            .query_row("PRAGMA synchronous;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync_mode, 1); // 1 = NORMAL
+
+        // Test atomic write_to_file
+        builder.write_to_file(&db_path).unwrap();
+        assert!(db_path.exists());
+
+        // Verify database contents
+        let conn = Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Test overwrite of an existing read-only file
+        let mut perms = std::fs::metadata(&db_path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+
+        builder.add_gloss(20, Some(25), 4, 102, false);
+        builder.write_to_file(&db_path).unwrap();
+
+        let conn2 = Connection::open(&db_path).unwrap();
+        let count2: i64 = conn2
+            .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count2, 2);
     }
 }

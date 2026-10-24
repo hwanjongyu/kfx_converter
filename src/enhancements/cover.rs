@@ -166,7 +166,13 @@ impl CoverOptimizer {
     }
 
     /// Converts an image to RGB8, alpha-compositing transparent pixels over a white background.
+    /// Fast path for opaque images (e.g. pure RGB JPEGs) directly converts to RGB8 without
+    /// allocating an intermediate 4x byte RGBA buffer or iterating pixel coordinates.
     fn to_rgb_with_white_bg(img: &DynamicImage) -> image::RgbImage {
+        if !img.color().has_alpha() {
+            return img.to_rgb8();
+        }
+
         let rgba = img.to_rgba8();
         let (width, height) = rgba.dimensions();
         let mut rgb = image::RgbImage::new(width, height);
@@ -282,5 +288,30 @@ mod tests {
         let decoded = image::load_from_memory(&cover_jpeg).unwrap();
         assert_eq!(decoded.width(), 1200);
         assert_eq!(decoded.height(), 1600);
+    }
+
+    #[test]
+    fn test_cover_optimizer_fast_path_opaque_rgb() {
+        use image::RgbImage;
+        let mut rgb = RgbImage::new(400, 600);
+        for pixel in rgb.pixels_mut() {
+            *pixel = image::Rgb([120, 80, 200]);
+        }
+        let dynamic = DynamicImage::ImageRgb8(rgb);
+        assert!(!dynamic.color().has_alpha());
+
+        let converted = CoverOptimizer::to_rgb_with_white_bg(&dynamic);
+        assert_eq!(converted.width(), 400);
+        assert_eq!(converted.height(), 600);
+        assert_eq!(converted.get_pixel(10, 10).0, [120, 80, 200]);
+
+        // Also test thumbnail optimization with opaque image
+        let mut jpeg_bytes = Cursor::new(Vec::new());
+        dynamic.write_to(&mut jpeg_bytes, ImageFormat::Jpeg).unwrap();
+        let thumb_bytes = CoverOptimizer::optimize_thumbnail(&jpeg_bytes.into_inner()).unwrap();
+        assert_eq!(&thumb_bytes[0..2], b"\xff\xd8");
+        let decoded_thumb = image::load_from_memory(&thumb_bytes).unwrap();
+        assert!(decoded_thumb.width() <= KINDLE_THUMB_MAX_WIDTH);
+        assert!(decoded_thumb.height() <= KINDLE_THUMB_MAX_HEIGHT as u32);
     }
 }

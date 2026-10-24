@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::container::{ContainerError, KfxContainer, KfxEntity};
 use crate::ion::{IonValue, IonWriter};
-use crate::ir::{Block, BookIR, Section, TextSpan, DEFAULT_MAX_SECTION_BLOCKS, DEFAULT_MAX_SECTION_CHARS};
+use crate::ir::{Block, BookIR, Section, TextSpan};
 use crate::symbols::{
     symbol_id, SYM_AUXILIARY_DATA, SYM_BOOK_METADATA, SYM_CONTAINER_ENTITY_MAP,
     SYM_CONTENT, SYM_CONTENT_FEATURES, SYM_DOCUMENT_DATA, SYM_FORMAT_CAPABILITIES,
@@ -332,7 +332,6 @@ impl<'a> KfxPackager<'a> {
             page_list: book.page_list.clone(),
             ..Default::default()
         };
-        temp_book.fragment_large_sections(DEFAULT_MAX_SECTION_CHARS, DEFAULT_MAX_SECTION_BLOCKS);
         temp_book.ensure_cover_section();
         let sections = temp_book.sections;
 
@@ -3383,6 +3382,11 @@ mod tests {
             target_anchor: None,
             children: Vec::new(),
         });
+
+        book.fragment_large_sections(
+            crate::ir::DEFAULT_MAX_SECTION_CHARS,
+            crate::ir::DEFAULT_MAX_SECTION_BLOCKS,
+        );
 
         let mut packager = KfxPackager::new(&book, "EBOK");
         assert!(packager.sections.len() > 1, "Section should be fragmented into multiple parts");
