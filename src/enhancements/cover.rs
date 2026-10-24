@@ -77,6 +77,40 @@ impl CoverOptimizer {
         Ok(out.into_inner())
     }
 
+    /// Transcodes a cover image to Kindle-compliant baseline RGB JPEG (JFIF) format (quality 90),
+    /// alpha-compositing transparent pixels over white and downscaling if exceeding max_dim.
+    /// This is strictly required for Kindle lockscreen ("Display Cover") compatibility.
+    pub fn optimize_cover_image(data: &[u8], max_dim: u32) -> Result<Vec<u8>, CoverError> {
+        if data.is_empty() {
+            return Err(CoverError::EmptyData);
+        }
+
+        if let Some((w, h)) = Self::get_image_dimensions(data) {
+            if w > MAX_SAFE_IMAGE_DIMENSION
+                || h > MAX_SAFE_IMAGE_DIMENSION
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
+            {
+                return Err(CoverError::ImageTooLarge(w, h));
+            }
+        }
+
+        let img = image::load_from_memory(data)?;
+        let (w, h) = (img.width(), img.height());
+
+        let resized = if w > max_dim || h > max_dim {
+            img.resize(max_dim, max_dim, FilterType::Lanczos3)
+        } else {
+            img
+        };
+
+        let rgb = Self::to_rgb_with_white_bg(&resized);
+        let mut out = Cursor::new(Vec::new());
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
+        encoder.encode_image(&rgb)?;
+
+        Ok(out.into_inner())
+    }
+
     /// Extracts pixel dimensions (width, height) efficiently without decoding full raster pixels.
     pub fn get_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         if data.is_empty() {
@@ -231,5 +265,22 @@ mod tests {
 
         let res = CoverOptimizer::optimize_content_image(&png_bytes, 2560);
         assert!(matches!(res, Err(CoverError::ImageTooLarge(10000, 10000))));
+    }
+
+    #[test]
+    fn test_optimize_cover_image_transcodes_png_to_baseline_jpeg() {
+        let mut rgba = RgbaImage::new(1200, 1600);
+        for pixel in rgba.pixels_mut() {
+            *pixel = image::Rgba([50, 100, 150, 255]);
+        }
+        let mut png_bytes = Cursor::new(Vec::new());
+        rgba.write_to(&mut png_bytes, ImageFormat::Png).unwrap();
+
+        let cover_jpeg = CoverOptimizer::optimize_cover_image(&png_bytes.into_inner(), 2560).unwrap();
+        println!("Cover JPEG header: {:02x?}", &cover_jpeg[..20]);
+        assert_eq!(&cover_jpeg[0..2], b"\xff\xd8"); // Baseline JPEG SOI
+        let decoded = image::load_from_memory(&cover_jpeg).unwrap();
+        assert_eq!(decoded.width(), 1200);
+        assert_eq!(decoded.height(), 1600);
     }
 }

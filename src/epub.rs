@@ -614,6 +614,40 @@ impl EpubReader {
             metadata.language = "en".to_string();
         }
 
+        // Validate and resolve cover_image_id to an actual image asset:
+        // If cover_image_id is missing or points to a non-image item (e.g. cover.xhtml),
+        // resolve to a manifest image with properties="cover-image" or "cover" in ID/href.
+        let cover_needs_resolution = match metadata.cover_image_id.as_ref() {
+            Some(cid) => manifest
+                .get(cid)
+                .map(|item| !item.media_type.starts_with("image/"))
+                .unwrap_or(true),
+            None => true,
+        };
+
+        if cover_needs_resolution {
+            let cover_prop_item = manifest.values().find(|item| {
+                item.media_type.starts_with("image/")
+                    && item
+                        .properties
+                        .as_deref()
+                        .map(|p| p.contains("cover-image"))
+                        .unwrap_or(false)
+            });
+            if let Some(item) = cover_prop_item {
+                metadata.cover_image_id = Some(item.id.clone());
+            } else {
+                let cover_name_item = manifest.values().find(|item| {
+                    item.media_type.starts_with("image/")
+                        && (item.id.to_lowercase().contains("cover")
+                            || item.href.to_lowercase().contains("cover"))
+                });
+                if let Some(item) = cover_name_item {
+                    metadata.cover_image_id = Some(item.id.clone());
+                }
+            }
+        }
+
         Ok((metadata, manifest, spine))
     }
 

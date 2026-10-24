@@ -177,53 +177,104 @@ impl ConversionPipeline {
                 }
 
             // Always deploy companion .sdr directory and .kll database alongside output_path
-            if let Some(ref kll) = kll_bytes {
-                let sdr_path = output_path.with_extension("sdr");
-                if std::fs::create_dir_all(&sdr_path).is_ok() {
-                    let safe_asin = KindleSync::sanitize_asin(&asin);
+            let sdr_path = output_path.with_extension("sdr");
+            if std::fs::create_dir_all(&sdr_path).is_ok() {
+                let safe_asin = KindleSync::sanitize_asin(&asin);
+                let safe_cid = KindleSync::sanitize_asin(&content_id);
+
+                if let Some(ref kll) = kll_bytes {
                     let kll_path = sdr_path.join(format!("LanguageLayer.en.{}.kll", safe_asin));
                     let _ = std::fs::write(&kll_path, kll);
                     // Also write fallback with content_id for dual-lookup compatibility
-                    let fallback_asin = KindleSync::sanitize_asin(&content_id);
-                    if fallback_asin != safe_asin {
+                    if safe_cid != safe_asin && !safe_cid.is_empty() {
                         let fallback_path =
-                            sdr_path.join(format!("LanguageLayer.en.{}.kll", fallback_asin));
+                            sdr_path.join(format!("LanguageLayer.en.{}.kll", safe_cid));
                         let _ = std::fs::write(fallback_path, kll);
+                    }
+                }
+
+                // Write cover thumbnail aliases directly into the .sdr folder
+                if let Some(ref jpeg) = cover_jpeg {
+                    let _ = std::fs::write(sdr_path.join("cover.jpg"), jpeg);
+                    let _ = std::fs::write(
+                        sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", safe_asin)),
+                        jpeg,
+                    );
+                    let _ = std::fs::write(
+                        sdr_path.join(format!("thumbnail_{}_PDOC_portrait.jpg", safe_asin)),
+                        jpeg,
+                    );
+                    let _ = std::fs::write(
+                        sdr_path.join(format!("thumbnail_{}_portrait.jpg", safe_asin)),
+                        jpeg,
+                    );
+                    if safe_cid != safe_asin && !safe_cid.is_empty() {
+                        let _ = std::fs::write(
+                            sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", safe_cid)),
+                            jpeg,
+                        );
+                        let _ = std::fs::write(
+                            sdr_path.join(format!("thumbnail_{}_PDOC_portrait.jpg", safe_cid)),
+                            jpeg,
+                        );
+                        let _ = std::fs::write(
+                            sdr_path.join(format!("thumbnail_{}_portrait.jpg", safe_cid)),
+                            jpeg,
+                        );
                     }
                 }
             }
         }
 
-        // 5. Automatic Device Sync if enabled
+        // 5. Automatic Device Sync if enabled or if destination is inside a Kindle drive
         let mut synced_to_device = false;
         let mut synced_device_path = None;
         let mut sync_error = None;
 
-        if options.auto_deploy {
+        let target_root = options
+            .device_root
+            .clone()
+            .or_else(|| {
+                // Check if output_path is located inside a Kindle directory structure
+                let mut current = output_path.parent();
+                while let Some(parent) = current {
+                    if parent.join("documents").is_dir()
+                        && (parent.join("system").is_dir() || parent.join(".system").is_dir())
+                    {
+                        return Some(parent.to_path_buf());
+                    }
+                    current = parent.parent();
+                }
+                None
+            })
+            .or_else(|| {
+                if options.auto_deploy {
+                    KindleSync::detect_kindle_root()
+                } else {
+                    None
+                }
+            });
+
+        if let Some(device_root) = target_root {
             if let Some(ref cb) = progress {
                 cb(0.9, "Synchronizing to Kindle storage...");
             }
-            let target_root = options
-                .device_root
-                .clone()
-                .or_else(KindleSync::detect_kindle_root);
-
-            if let Some(device_root) = target_root {
-                match KindleSync::sync_to_device(
-                    &device_root,
-                    &output_path,
-                    &ir.metadata.title,
-                    &asin,
-                    cover_jpeg.as_deref(),
-                    kll_bytes.as_deref(),
-                ) {
-                    Ok(sdr_path) => {
-                        synced_to_device = true;
-                        synced_device_path = Some(sdr_path);
-                    }
-                    Err(e) => {
-                        sync_error = Some(e.to_string());
-                    }
+            match KindleSync::sync_to_device(
+                &device_root,
+                &output_path,
+                &ir.metadata.title,
+                &asin,
+                Some(&content_id),
+                Some(&options.content_type),
+                cover_jpeg.as_deref(),
+                kll_bytes.as_deref(),
+            ) {
+                Ok(sdr_path) => {
+                    synced_to_device = true;
+                    synced_device_path = Some(sdr_path);
+                }
+                Err(e) => {
+                    sync_error = Some(e.to_string());
                 }
             }
         }

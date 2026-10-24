@@ -297,27 +297,82 @@ impl BookIR {
         }
     }
 
-    /// Resolves the cover image resource ID using a 3-tier fallback hierarchy:
-    /// 1. Explicit metadata cover_image_id
-    /// 2. First image block in the first section
-    /// 3. Any resource with a key containing "cover"
+    /// Resolves the cover image resource ID using a robust 5-tier fallback hierarchy:
+    /// 1. Explicit metadata cover_image_id (verified to exist in resources as an image)
+    /// 2. First image block in the first section (cover page)
+    /// 3. Any image resource with a key containing "cover" (case-insensitive)
+    /// 4. Any image resource with a key containing "thumb" (case-insensitive)
+    /// 5. First available image resource in the book
+    /// Guarantees that any returned ID points to an existing image resource in `self.resources`.
     pub fn resolve_cover_resource_id(&self) -> Option<String> {
+        // 1. Explicit metadata cover_image_id
         self.metadata
             .cover_image_id
-            .clone()
+            .as_ref()
+            .and_then(|id| {
+                if let Some(res) = self.resources.get(id) {
+                    if res.mime_type.starts_with("image/") {
+                        return Some(id.clone());
+                    }
+                }
+                // Try case-insensitive or stripped filename matching against image resources
+                self.resources.iter().find_map(|(k, v)| {
+                    if v.mime_type.starts_with("image/")
+                        && (k.eq_ignore_ascii_case(id)
+                            || k.ends_with(id)
+                            || id.ends_with(k.as_str()))
+                    {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            // 2. First image block in the first section
             .or_else(|| {
                 self.sections.first().and_then(|s| {
                     s.blocks.iter().find_map(|b| match b {
-                        Block::Image { resource_id, .. } => Some(resource_id.clone()),
+                        Block::Image { resource_id, .. } => {
+                            if let Some(res) = self.resources.get(resource_id) {
+                                if res.mime_type.starts_with("image/") {
+                                    return Some(resource_id.clone());
+                                }
+                            }
+                            None
+                        }
                         _ => None,
                     })
                 })
             })
+            // 3. Any image resource with a key containing "cover"
             .or_else(|| {
-                self.resources
-                    .keys()
-                    .find(|k| k.to_lowercase().contains("cover"))
-                    .cloned()
+                self.resources.iter().find_map(|(k, v)| {
+                    if v.mime_type.starts_with("image/") && k.to_lowercase().contains("cover") {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            // 4. Any image resource with a key containing "thumb"
+            .or_else(|| {
+                self.resources.iter().find_map(|(k, v)| {
+                    if v.mime_type.starts_with("image/") && k.to_lowercase().contains("thumb") {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            // 5. Fallback: First image resource in the entire book
+            .or_else(|| {
+                self.resources.iter().find_map(|(k, v)| {
+                    if v.mime_type.starts_with("image/") {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
             })
     }
 }
@@ -512,6 +567,20 @@ mod tests {
             },
         );
         assert_eq!(book.resolve_cover_resource_id(), Some("explicit_cover".to_string()));
+
+        // 3. Explicit metadata pointing to a non-image (e.g. cover.xhtml) falls back to image
+        book.resources.remove("explicit_cover");
+        book.metadata.cover_image_id = Some("cover_xhtml_doc".to_string());
+        book.resources.insert(
+            "cover_xhtml_doc".to_string(),
+            crate::ir::ResourceAsset {
+                id: "cover_xhtml_doc".to_string(),
+                mime_type: "application/xhtml+xml".to_string(),
+                data: b"<html>cover</html>".to_vec(),
+            },
+        );
+        // Must reject the non-image cover_xhtml_doc and fall back to cover_img
+        assert_eq!(book.resolve_cover_resource_id(), Some("cover_img".to_string()));
     }
 }
 

@@ -28,6 +28,10 @@ struct Args {
     /// Generate Word Wise sidecar (.kll) [default: true]
     #[arg(short, long, default_value_t = true, action = clap::ArgAction::Set)]
     word_wise: bool,
+
+    /// Kindle content definition environment type (EBOK for books/lockscreen, PDOC for personal documents) [default: EBOK]
+    #[arg(short = 'c', long = "content-type", default_value = "EBOK")]
+    content_type: String,
 }
 
 fn main() {
@@ -63,7 +67,7 @@ fn main() {
         println!("-> Converting EPUB to KFX...");
 
         let options = kfx_converter::ConversionOptions {
-            content_type: "EBOK".to_string(),
+            content_type: args.content_type.to_uppercase(),
             word_wise: args.word_wise,
             auto_deploy: args.sync,
             device_root: None,
@@ -97,16 +101,18 @@ fn main() {
                 if let Some(gloss_count) = report.word_wise_glosses {
                     println!("  [ENHANCEMENT] Word Wise sidecar generated ({} glosses)", gloss_count);
                 }
-                if args.sync {
-                    if report.synced_to_device {
-                        if let Some(dest) = report.synced_device_path {
-                            println!("-> [SYNC SUCCESS] Sideloaded to Kindle: {:?}", dest);
-                        }
-                    } else if let Some(err) = report.sync_error {
+                if report.synced_to_device {
+                    if let Some(dest) = report.synced_device_path {
+                        println!("-> [SYNC SUCCESS] Sideloaded to Kindle with lockscreen cover: {:?}", dest);
+                    }
+                } else if args.sync {
+                    if let Some(err) = report.sync_error {
                         eprintln!("-> [SYNC WARNING] Failed to transfer to device: {}", err);
                     } else {
                         println!("-> [SYNC NOTICE] No Kindle device detected (USB / MTP).");
                     }
+                } else if let Some(root) = kfx_converter::KindleSync::detect_kindle_root() {
+                    println!("-> [TIP] Connected Kindle detected at {:?}. Use '--sync' ('-s') to automatically install with lockscreen cover thumbnails.", root);
                 }
             }
             Err(e) => {

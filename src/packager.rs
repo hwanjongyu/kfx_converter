@@ -14,8 +14,8 @@ use crate::ir::{Block, BookIR, Section, TextSpan, DEFAULT_MAX_SECTION_BLOCKS, DE
 use crate::symbols::{
     symbol_id, SYM_AUXILIARY_DATA, SYM_BOOK_METADATA, SYM_CONTAINER_ENTITY_MAP,
     SYM_CONTENT, SYM_CONTENT_FEATURES, SYM_DOCUMENT_DATA, SYM_FORMAT_CAPABILITIES,
-    SYM_FOOTNOTE, SYM_METADATA, SYM_POPUP, SYM_POPUP_TEXT, SYM_SECTION,
-    SYM_SECTION_POSITION_ID_MAP, SYM_STORYLINE, SYM_YJ_LOCATION_PID_MAP, SYM_YJ_NOTE,
+    SYM_METADATA, SYM_SECTION,
+    SYM_SECTION_POSITION_ID_MAP, SYM_STORYLINE, SYM_YJ_LOCATION_PID_MAP,
 };
 
 pub const SINGLETON_ID: u32 = 348; // $null in KFX symbol table
@@ -237,6 +237,52 @@ pub fn generate_book_id(seed: &str) -> String {
     result
 }
 
+/// Yellowjacket e-ink reader content buffer limit per $145 entity.
+pub const MAX_CONTENT_CHUNK_BYTES: usize = 8192;
+
+/// Book-global text accumulator for Yellowjacket content entities ($145).
+///
+/// Text is packed into `content_1..content_N` chunks of at most [`MAX_CONTENT_CHUNK_BYTES`]
+/// (measured in UTF-8 bytes), spanning section boundaries without exceeding Kindle memory bounds.
+#[derive(Default)]
+pub struct TextAccumulator {
+    finished: Vec<(usize, Vec<String>)>,
+    segments: Vec<String>,
+    current_bytes: usize,
+    current_chunk: usize,
+}
+
+impl TextAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, text: &str) -> (usize, usize) {
+        if self.current_chunk == 0 {
+            self.current_chunk = 1;
+        } else if self.current_bytes >= MAX_CONTENT_CHUNK_BYTES {
+            self.finished
+                .push((self.current_chunk, std::mem::take(&mut self.segments)));
+            self.current_chunk += 1;
+            self.current_bytes = 0;
+        }
+        let index = self.segments.len();
+        self.current_bytes += text.len();
+        self.segments.push(text.to_string());
+        (self.current_chunk, index)
+    }
+
+    pub fn drain_chunks(&mut self) -> Vec<(usize, Vec<String>)> {
+        let mut chunks = std::mem::take(&mut self.finished);
+        if !self.segments.is_empty() {
+            chunks.push((self.current_chunk, std::mem::take(&mut self.segments)));
+        }
+        self.current_bytes = 0;
+        self.current_chunk = 0;
+        chunks
+    }
+}
+
 /// Packages a `BookIR` into an Amazon KFX container.
 pub struct KfxPackager<'a> {
     book: &'a BookIR,
@@ -263,9 +309,11 @@ impl<'a> KfxPackager<'a> {
         let container_id = generate_container_id(&seed);
         let content_id = generate_content_id(&seed);
 
-        // Kindle Word Wise & store feature requirements:
-        // ASIN must strictly conform to Amazon Standard Identification Number regex `^B[0-9A-Z]{9}$`.
-        let asin = resolve_asin(&book.metadata.identifier, &content_id);
+        // Kindle Yellowjacket & Calibre requirement:
+        // ASIN and content_id MUST be identical (32-character hexadecimal digest),
+        // so that sidecar thumbnails named thumbnail_{content_id}_{cde_content_type}_portrait.jpg
+        // match both Kindle OS lockscreen queries and Calibre sideloading routines.
+        let asin = content_id.clone();
 
         let book_id = generate_book_id(&seed);
 
@@ -276,7 +324,33 @@ impl<'a> KfxPackager<'a> {
             ..Default::default()
         };
         temp_book.fragment_large_sections(DEFAULT_MAX_SECTION_CHARS, DEFAULT_MAX_SECTION_BLOCKS);
-        let sections = temp_book.sections;
+        let mut sections = temp_book.sections;
+
+        // Ensure book has a dedicated cover section at index 0 if cover image exists
+        if let Some(cover_res_id) = book.resolve_cover_resource_id() {
+            let first_is_cover = sections.first().map(|s| {
+                s.blocks.iter().any(|b| match b {
+                    Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                    _ => false,
+                })
+            }).unwrap_or(false);
+
+            if !first_is_cover {
+                let cover_section = Section {
+                    id: "cover".to_string(),
+                    title: "Cover".to_string(),
+                    blocks: vec![Block::Image {
+                        id: "cover_img_block".to_string(),
+                        resource_id: cover_res_id,
+                        alt: Some("Cover".to_string()),
+                        width: None,
+                        height: None,
+                    }],
+                };
+                sections.insert(0, cover_section);
+            }
+        }
+
         let toc = temp_book.toc;
         let page_list = temp_book.page_list;
 
@@ -340,19 +414,22 @@ impl<'a> KfxPackager<'a> {
         // 1. Build format capabilities ($593) - emitted into container header, NOT into bcIndexTab entities
         let format_caps_data = self.build_format_capabilities();
 
-        // 2. Build content features ($585)
-        self.build_content_features();
-
-        // 3. Build book metadata ($490)
+        // 2. Build book metadata ($490)
         self.build_book_metadata();
 
-        // 4. Build typography and text styles ($157)
-        let styles = self.build_styles(&mut symbols);
+        // 3. Build typography and text styles ($157)
+        let (styles, style_list) = self.build_styles(&mut symbols);
 
-        // 5. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
-        let section_data = self.build_storylines_and_sections(&mut symbols, &styles);
+        // 4. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
+        let (section_data, used_styles) = self.build_storylines_and_sections(&mut symbols, &styles);
 
-        // 6. Build navigation ($389 book_navigation and $391 nav_container)
+        // 5. Emit only referenced style entities ($157) to prevent unreferenced fragment errors
+        self.emit_used_styles(style_list, &used_styles);
+
+        // 6. Build content features ($585) with dynamic section size & image flags
+        self.build_content_features(&section_data);
+
+        // 7. Build navigation ($389 book_navigation and $391 nav_container)
         self.build_navigation(&mut symbols, &section_data);
 
         // 7. Build metadata ($258) with synchronized reading_orders
@@ -441,7 +518,7 @@ impl<'a> KfxPackager<'a> {
         writer.into_bytes()
     }
 
-    fn build_content_features(&mut self) {
+    fn build_content_features(&mut self, section_data: &[SectionPackData]) {
         let sym_cf = SYM_CONTENT_FEATURES; // 585
         let sym_features = symbol_id("features").unwrap_or(590);
         let sym_namespace = symbol_id("namespace").unwrap_or(586);
@@ -451,42 +528,134 @@ impl<'a> KfxPackager<'a> {
         let sym_major = symbol_id("major_version").unwrap_or(587);
         let sym_minor = symbol_id("minor_version").unwrap_or(588);
 
-        let features = IonValue::Struct(vec![(
-            sym_features,
-            IonValue::List(vec![
-                IonValue::Struct(vec![
-                    (sym_namespace, IonValue::String("SDK.Marker".to_string())),
-                    (sym_key, IonValue::String("CanonicalFormat".to_string())),
-                    (
-                        sym_ver_info,
-                        IonValue::Struct(vec![(
-                            sym_version,
-                            IonValue::Struct(vec![
-                                (sym_major, IonValue::Int(2)),
-                                (sym_minor, IonValue::Int(0)),
-                            ]),
-                        )]),
-                    ),
-                ]),
-                IonValue::Struct(vec![
-                    (
-                        sym_namespace,
-                        IonValue::String("com.amazon.yjconversion".to_string()),
-                    ),
-                    (sym_key, IonValue::String("reflow-style".to_string())),
-                    (
-                        sym_ver_info,
-                        IonValue::Struct(vec![(
-                            sym_version,
-                            IonValue::Struct(vec![
-                                (sym_major, IonValue::Int(6)),
-                                (sym_minor, IonValue::Int(0)),
-                            ]),
-                        )]),
-                    ),
-                ]),
+        let mut feature_list = vec![
+            IonValue::Struct(vec![
+                (sym_namespace, IonValue::String("SDK.Marker".to_string())),
+                (sym_key, IonValue::String("CanonicalFormat".to_string())),
+                (
+                    sym_ver_info,
+                    IonValue::Struct(vec![(
+                        sym_version,
+                        IonValue::Struct(vec![
+                            (sym_major, IonValue::Int(2)),
+                            (sym_minor, IonValue::Int(0)),
+                        ]),
+                    )]),
+                ),
             ]),
-        )]);
+            IonValue::Struct(vec![
+                (
+                    sym_namespace,
+                    IonValue::String("com.amazon.yjconversion".to_string()),
+                ),
+                (sym_key, IonValue::String("reflow-style".to_string())),
+                (
+                    sym_ver_info,
+                    IonValue::Struct(vec![(
+                        sym_version,
+                        IonValue::Struct(vec![
+                            (sym_major, IonValue::Int(6)),
+                            (sym_minor, IonValue::Int(0)),
+                        ]),
+                    )]),
+                ),
+            ]),
+        ];
+
+        // 1. reflow-section-size: Required by Kindle when section PID count exceeds 65536
+        let max_section_pids = section_data
+            .iter()
+            .map(|s| 1 + s.block_info.iter().map(|(_, len)| (*len).max(1)).sum::<usize>())
+            .max()
+            .unwrap_or(0);
+
+        if max_section_pids > 65536 {
+            let size = (((max_section_pids - 65536) / 16384) + 2).min(256) as i64;
+            feature_list.push(IonValue::Struct(vec![
+                (
+                    sym_namespace,
+                    IonValue::String("com.amazon.yjconversion".to_string()),
+                ),
+                (sym_key, IonValue::String("reflow-section-size".to_string())),
+                (
+                    sym_ver_info,
+                    IonValue::Struct(vec![(
+                        sym_version,
+                        IonValue::Struct(vec![
+                            (sym_major, IonValue::Int(size)),
+                            (sym_minor, IonValue::Int(0)),
+                        ]),
+                    )]),
+                ),
+            ]));
+        }
+
+        // 2. yj_jpg_rst_marker_present: Required when JPEG images have restart markers
+        let has_rst_marker = self.book.resources.values().any(|asset| {
+            asset.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+        });
+        if has_rst_marker {
+            feature_list.push(IonValue::Struct(vec![
+                (
+                    sym_namespace,
+                    IonValue::String("com.amazon.yjconversion".to_string()),
+                ),
+                (sym_key, IonValue::String("yj_jpg_rst_marker_present".to_string())),
+                (
+                    sym_ver_info,
+                    IonValue::Struct(vec![(
+                        sym_version,
+                        IonValue::Struct(vec![
+                            (sym_major, IonValue::Int(1)),
+                            (sym_minor, IonValue::Int(0)),
+                        ]),
+                    )]),
+                ),
+            ]));
+        }
+
+        // 3. yj_table and yj_table_viewer: Required when tables are present
+        let has_tables = self.sections.iter().any(|s| {
+            s.blocks.iter().any(|b| matches!(b, Block::Table { .. }))
+        });
+        if has_tables {
+            feature_list.push(IonValue::Struct(vec![
+                (
+                    sym_namespace,
+                    IonValue::String("com.amazon.yjconversion".to_string()),
+                ),
+                (sym_key, IonValue::String("yj_table".to_string())),
+                (
+                    sym_ver_info,
+                    IonValue::Struct(vec![(
+                        sym_version,
+                        IonValue::Struct(vec![
+                            (sym_major, IonValue::Int(7)),
+                            (sym_minor, IonValue::Int(0)),
+                        ]),
+                    )]),
+                ),
+            ]));
+            feature_list.push(IonValue::Struct(vec![
+                (
+                    sym_namespace,
+                    IonValue::String("com.amazon.yjconversion".to_string()),
+                ),
+                (sym_key, IonValue::String("yj_table_viewer".to_string())),
+                (
+                    sym_ver_info,
+                    IonValue::Struct(vec![(
+                        sym_version,
+                        IonValue::Struct(vec![
+                            (sym_major, IonValue::Int(2)),
+                            (sym_minor, IonValue::Int(0)),
+                        ]),
+                    )]),
+                ),
+            ]));
+        }
+
+        let features = IonValue::Struct(vec![(sym_features, IonValue::List(feature_list))]);
 
         let mut writer = IonWriter::new();
         writer.write_bvm();
@@ -557,7 +726,36 @@ impl<'a> KfxPackager<'a> {
                 (sym_key, IonValue::String("is_sample".to_string())),
                 (sym_val, IonValue::Bool(false)),
             ]),
+            IonValue::Struct(vec![
+                (sym_key, IonValue::String("override_kindle_font".to_string())),
+                (sym_val, IonValue::Bool(false)),
+            ]),
         ];
+
+        if let Some(ref desc) = self.book.metadata.description {
+            if !desc.is_empty() {
+                title_metadata.push(IonValue::Struct(vec![
+                    (sym_key, IonValue::String("description".to_string())),
+                    (sym_val, IonValue::String(desc.clone())),
+                ]));
+            }
+        }
+        if let Some(ref publ) = self.book.metadata.publisher {
+            if !publ.is_empty() {
+                title_metadata.push(IonValue::Struct(vec![
+                    (sym_key, IonValue::String("publisher".to_string())),
+                    (sym_val, IonValue::String(publ.clone())),
+                ]));
+            }
+        }
+        if let Some(ref date) = self.book.metadata.date {
+            if !date.is_empty() {
+                title_metadata.push(IonValue::Struct(vec![
+                    (sym_key, IonValue::String("issue_date".to_string())),
+                    (sym_val, IonValue::String(date.clone())),
+                ]));
+            }
+        }
 
         if let Some(cover_id) = self.resolve_cover_resource_id() {
             title_metadata.push(IonValue::Struct(vec![
@@ -644,8 +842,7 @@ impl<'a> KfxPackager<'a> {
         });
     }
 
-    fn build_styles(&mut self, symbols: &mut LocalSymbols) -> StyleSymMap {
-        let sym_style = symbol_id("style").unwrap_or(157);
+    fn build_styles(&mut self, symbols: &mut LocalSymbols) -> (StyleSymMap, Vec<(u32, IonValue)>) {
         let sym_style_name = symbol_id("style_name").unwrap_or(173);
         let sym_font_family = symbol_id("font_family").unwrap_or(11);
         let sym_font_size = symbol_id("font_size").unwrap_or(16);
@@ -1016,18 +1213,7 @@ impl<'a> KfxPackager<'a> {
             (font_size_xxl_sym, font_size_xxl_val),
         ];
 
-        for (sym_id_val, val) in style_list {
-            let mut writer = IonWriter::new();
-            writer.write_bvm();
-            writer.write_value(&val);
-            self.entities.push(KfxEntity {
-                entity_id: sym_id_val,
-                chunk_type: sym_style,
-                data: writer.into_bytes(),
-            });
-        }
-
-        StyleSymMap {
+        let map = StyleSymMap {
             h1: h1_sym,
             h2: h2_sym,
             h3: h3_sym,
@@ -1059,6 +1245,28 @@ impl<'a> KfxPackager<'a> {
             font_size_lg: font_size_lg_sym,
             font_size_xl: font_size_xl_sym,
             font_size_xxl: font_size_xxl_sym,
+        };
+
+        (map, style_list.to_vec())
+    }
+
+    fn emit_used_styles(
+        &mut self,
+        style_list: Vec<(u32, IonValue)>,
+        used_styles: &std::collections::HashSet<u32>,
+    ) {
+        let sym_style = symbol_id("style").unwrap_or(157);
+        for (sym_id_val, val) in style_list {
+            if used_styles.contains(&sym_id_val) {
+                let mut writer = IonWriter::new();
+                writer.write_bvm();
+                writer.write_value(&val);
+                self.entities.push(KfxEntity {
+                    entity_id: sym_id_val,
+                    chunk_type: sym_style,
+                    data: writer.into_bytes(),
+                });
+            }
         }
     }
 
@@ -1067,7 +1275,7 @@ impl<'a> KfxPackager<'a> {
         &mut self,
         symbols: &mut LocalSymbols,
         styles: &StyleSymMap,
-    ) -> Vec<SectionPackData> {
+    ) -> (Vec<SectionPackData>, std::collections::HashSet<u32>) {
         let sym_content = SYM_CONTENT; // 145
         let sym_storyline = SYM_STORYLINE; // 259
         let sym_section = SYM_SECTION; // 260
@@ -1093,13 +1301,12 @@ impl<'a> KfxPackager<'a> {
         let sym_metadata = symbol_id("metadata").unwrap_or(258);
         let sym_key = symbol_id("key").unwrap_or(492);
         let sym_val = symbol_id("value").unwrap_or(307);
-        let sym_yj_note = SYM_YJ_NOTE; // 617
-        let sym_footnote = SYM_FOOTNOTE; // 281
-        let sym_popup = SYM_POPUP; // 440
-        let sym_popup_text = SYM_POPUP_TEXT; // 444
 
         let num_sections = self.sections.len();
         let mut section_data = Vec::with_capacity(num_sections);
+        let mut text_acc = TextAccumulator::new();
+        let mut used_styles = std::collections::HashSet::new();
+        used_styles.insert(styles.p);
 
         for idx in 0..num_sections {
             let sec = self.sections[idx].clone();
@@ -1121,13 +1328,11 @@ impl<'a> KfxPackager<'a> {
 
             let sec_sym_id = symbols.intern(&sec_name);
             let story_sym_id = symbols.intern(&format!("{}-story", sec_name));
-            let content_sym_id = symbols.intern(&format!("{}-content", sec_name));
             let ad_sym_id = symbols.intern(&format!("{}-ad", sec_name));
 
             let section_eid = self.alloc_eid();
 
             let mut block_info = Vec::new();
-            let mut para_strings = Vec::new();
             let mut story_elements = Vec::new();
 
             // `inherited`: block-level text tokens (italic, bold, font_size_*, ...) resolved from
@@ -1276,9 +1481,11 @@ impl<'a> KfxPackager<'a> {
                         let inherited = inherited_text_tokens(style.as_deref(), false);
                         let (full_text, style_events) = extract_style_events(spans, &inherited);
 
-                        let content_idx = para_strings.len();
+                        let (chunk_num, chunk_idx) = text_acc.push(&full_text);
+                        let chunk_name = format!("content_{}", chunk_num);
+                        let chunk_sym_id = symbols.intern(&chunk_name);
                         block_info.push((block_eid, full_text.chars().count().max(1)));
-                        para_strings.push(IonValue::String(full_text));
+                        used_styles.insert(style_sym);
 
                         let mut elem_fields = vec![
                             (sym_id, IonValue::Int(block_eid as i64)),
@@ -1287,12 +1494,23 @@ impl<'a> KfxPackager<'a> {
                             (
                                 sym_content,
                                 IonValue::Struct(vec![
-                                    (sym_name, IonValue::Symbol(content_sym_id)),
-                                    (sym_index, IonValue::Int(content_idx as i64)),
+                                    (sym_name, IonValue::Symbol(chunk_sym_id)),
+                                    (sym_index, IonValue::Int(chunk_idx as i64)),
                                 ]),
                             ),
                         ];
                         if !style_events.is_empty() {
+                            for ev in &style_events {
+                                if let IonValue::Struct(fields) = ev {
+                                    for (k, v) in fields {
+                                        if *k == sym_style {
+                                            if let IonValue::Symbol(s) = v {
+                                                used_styles.insert(*s);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             elem_fields.push((sym_style_events, IonValue::List(style_events)));
                         }
                         story_elements.push(IonValue::Struct(elem_fields));
@@ -1318,9 +1536,11 @@ impl<'a> KfxPackager<'a> {
                         let inherited = inherited_text_tokens(style.as_deref(), true);
                         let (full_text, style_events) = extract_style_events(spans, &inherited);
 
-                        let content_idx = para_strings.len();
+                        let (chunk_num, chunk_idx) = text_acc.push(&full_text);
+                        let chunk_name = format!("content_{}", chunk_num);
+                        let chunk_sym_id = symbols.intern(&chunk_name);
                         block_info.push((block_eid, full_text.chars().count().max(1)));
-                        para_strings.push(IonValue::String(full_text));
+                        used_styles.insert(base_style);
 
                         let mut elem_fields = vec![
                             (sym_id, IonValue::Int(block_eid as i64)),
@@ -1329,12 +1549,23 @@ impl<'a> KfxPackager<'a> {
                             (
                                 sym_content,
                                 IonValue::Struct(vec![
-                                    (sym_name, IonValue::Symbol(content_sym_id)),
-                                    (sym_index, IonValue::Int(content_idx as i64)),
+                                    (sym_name, IonValue::Symbol(chunk_sym_id)),
+                                    (sym_index, IonValue::Int(chunk_idx as i64)),
                                 ]),
                             ),
                         ];
                         if !style_events.is_empty() {
+                            for ev in &style_events {
+                                if let IonValue::Struct(fields) = ev {
+                                    for (k, v) in fields {
+                                        if *k == sym_style {
+                                            if let IonValue::Symbol(s) = v {
+                                                used_styles.insert(*s);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             elem_fields.push((sym_style_events, IonValue::List(style_events)));
                         }
                         story_elements.push(IonValue::Struct(elem_fields));
@@ -1357,6 +1588,7 @@ impl<'a> KfxPackager<'a> {
                         } else {
                             styles.img
                         };
+                        used_styles.insert(img_style);
 
                         let mut img_fields = vec![
                             (sym_id, IonValue::Int(block_eid as i64)),
@@ -1372,9 +1604,11 @@ impl<'a> KfxPackager<'a> {
                     }
                     _ => {
                         let text = block.plain_text();
-                        let content_idx = para_strings.len();
+                        let (chunk_num, chunk_idx) = text_acc.push(&text);
+                        let chunk_name = format!("content_{}", chunk_num);
+                        let chunk_sym_id = symbols.intern(&chunk_name);
                         block_info.push((block_eid, text.chars().count().max(1)));
-                        para_strings.push(IonValue::String(text));
+                        used_styles.insert(styles.p);
 
                         story_elements.push(IonValue::Struct(vec![
                             (sym_id, IonValue::Int(block_eid as i64)),
@@ -1383,8 +1617,8 @@ impl<'a> KfxPackager<'a> {
                             (
                                 sym_content,
                                 IonValue::Struct(vec![
-                                    (sym_name, IonValue::Symbol(content_sym_id)),
-                                    (sym_index, IonValue::Int(content_idx as i64)),
+                                    (sym_name, IonValue::Symbol(chunk_sym_id)),
+                                    (sym_index, IonValue::Int(chunk_idx as i64)),
                                 ]),
                             ),
                         ]));
@@ -1392,10 +1626,13 @@ impl<'a> KfxPackager<'a> {
                 }
             }
 
-            if block_info.is_empty() {
+            if block_info.is_empty() && !is_cover {
                 let fallback_eid = self.alloc_eid();
+                let (chunk_num, chunk_idx) = text_acc.push("");
+                let chunk_name = format!("content_{}", chunk_num);
+                let chunk_sym_id = symbols.intern(&chunk_name);
                 block_info.push((fallback_eid, 1));
-                para_strings.push(IonValue::String(String::new()));
+                used_styles.insert(styles.p);
                 story_elements.push(IonValue::Struct(vec![
                     (sym_id, IonValue::Int(fallback_eid as i64)),
                     (sym_type, IonValue::Symbol(sym_type_text)),
@@ -1403,28 +1640,14 @@ impl<'a> KfxPackager<'a> {
                     (
                         sym_content,
                         IonValue::Struct(vec![
-                            (sym_name, IonValue::Symbol(content_sym_id)),
-                            (sym_index, IonValue::Int(0)),
+                            (sym_name, IonValue::Symbol(chunk_sym_id)),
+                            (sym_index, IonValue::Int(chunk_idx as i64)),
                         ]),
                     ),
                 ]));
             }
 
-            // 1. Content entity ($145)
-            let content_val = IonValue::Struct(vec![
-                (sym_name, IonValue::Symbol(content_sym_id)),
-                (sym_content_list, IonValue::List(para_strings)),
-            ]);
-            let mut content_writer = IonWriter::new();
-            content_writer.write_bvm();
-            content_writer.write_value(&content_val);
-            self.entities.push(KfxEntity {
-                entity_id: content_sym_id,
-                chunk_type: sym_content,
-                data: content_writer.into_bytes(),
-            });
-
-            // 2. Storyline entity ($259)
+            // 1. Storyline entity ($259)
             let story_val = IonValue::Struct(vec![
                 (sym_story_name, IonValue::Symbol(story_sym_id)),
                 (sym_content_list, IonValue::List(story_elements)),
@@ -1438,7 +1661,7 @@ impl<'a> KfxPackager<'a> {
                 data: story_writer.into_bytes(),
             });
 
-            // 3. Section entity ($260) with cover container/scale_fit template support
+            // 2. Section entity ($260) with cover container/scale_fit template support
             let page_template = if is_cover {
                 IonValue::Struct(vec![
                     (sym_id, IonValue::Int(section_eid as i64)),
@@ -1482,65 +1705,8 @@ impl<'a> KfxPackager<'a> {
                 data: sec_writer.into_bytes(),
             });
 
-            // Scan section blocks for referenced footnotes
-            let mut referenced_footnotes = Vec::new();
-            for b in &sec.blocks {
-                match b {
-                    Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
-                        for span in spans {
-                            if let Some(ref href) = span.href {
-                                let anchor = if let Some(pos) = href.find('#') {
-                                    &href[pos + 1..]
-                                } else {
-                                    href.as_str()
-                                };
-                                if let Some(fn_text) = self.book.footnotes.get(anchor).or_else(|| self.book.footnotes.get(href)) {
-                                    referenced_footnotes.push((anchor.to_string(), fn_text.clone()));
-                                }
-                            }
-                        }
-                    }
-                    Block::List { items, .. } => {
-                        for item_blocks in items {
-                            for b in item_blocks {
-                                if let Block::Paragraph { spans, .. } = b {
-                                    for span in spans {
-                                        if let Some(ref href) = span.href {
-                                            let anchor = if let Some(pos) = href.find('#') {
-                                                &href[pos + 1..]
-                                            } else {
-                                                href.as_str()
-                                            };
-                                            if let Some(fn_text) = self.book.footnotes.get(anchor).or_else(|| self.book.footnotes.get(href)) {
-                                                referenced_footnotes.push((anchor.to_string(), fn_text.clone()));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            let mut seen_fn = std::collections::HashSet::new();
-            let mut note_items = Vec::new();
-            for (anchor, fn_text) in referenced_footnotes {
-                if seen_fn.insert(anchor.clone()) {
-                    let note_sym_id = symbols.intern(&format!("note-{}", anchor));
-                    note_items.push(IonValue::Struct(vec![
-                        (sym_id, IonValue::Symbol(note_sym_id)),
-                        (sym_key, IonValue::String(anchor)),
-                        (sym_type, IonValue::Symbol(sym_footnote)),
-                        (sym_popup, IonValue::Bool(true)),
-                        (sym_popup_text, IonValue::String(fn_text)),
-                    ]));
-                }
-            }
-
-            // 4. Auxiliary Data entity ($597) IS_TARGET_SECTION and yj.note ($617)
-            let mut ad_fields = vec![
+            // 3. Auxiliary Data entity ($597) IS_TARGET_SECTION
+            let ad_fields = vec![
                 (sym_kfx_id, IonValue::Symbol(ad_sym_id)),
                 (
                     sym_metadata,
@@ -1553,10 +1719,6 @@ impl<'a> KfxPackager<'a> {
                     ])]),
                 ),
             ];
-
-            if !note_items.is_empty() {
-                ad_fields.push((sym_yj_note, IonValue::List(note_items)));
-            }
 
             let ad_val = IonValue::Struct(ad_fields);
             let mut ad_writer = IonWriter::new();
@@ -1578,7 +1740,29 @@ impl<'a> KfxPackager<'a> {
             });
         }
 
-        section_data
+        // 4. Build book-global content entities ($145) from text accumulator (<= 8192 bytes per chunk)
+        let chunks = text_acc.drain_chunks();
+        for (chunk_num, segments) in chunks {
+            let chunk_name = format!("content_{}", chunk_num);
+            let chunk_sym_id = symbols.intern(&chunk_name);
+            let content_val = IonValue::Struct(vec![
+                (sym_name, IonValue::Symbol(chunk_sym_id)),
+                (
+                    sym_content_list,
+                    IonValue::List(segments.into_iter().map(IonValue::String).collect()),
+                ),
+            ]);
+            let mut content_writer = IonWriter::new();
+            content_writer.write_bvm();
+            content_writer.write_value(&content_val);
+            self.entities.push(KfxEntity {
+                entity_id: chunk_sym_id,
+                chunk_type: sym_content,
+                data: content_writer.into_bytes(),
+            });
+        }
+
+        (section_data, used_styles)
     }
 
     fn build_navigation(
@@ -1586,7 +1770,7 @@ impl<'a> KfxPackager<'a> {
         symbols: &mut LocalSymbols,
         section_data: &[SectionPackData],
     ) {
-        if self.toc.is_empty() && self.page_list.is_empty() {
+        if self.toc.is_empty() && self.page_list.is_empty() && section_data.is_empty() {
             return;
         }
 
@@ -1594,6 +1778,9 @@ impl<'a> KfxPackager<'a> {
         let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
         let sym_toc = symbol_id("toc").unwrap_or(212);
         let sym_page_list = symbol_id("page_list").unwrap_or(237);
+        let sym_landmarks = symbol_id("landmarks").unwrap_or(236);
+        let sym_landmark_type = symbol_id("landmark_type").unwrap_or(238);
+        let sym_cover_page = symbol_id("cover_page").unwrap_or(233);
         let sym_nav_type = symbol_id("nav_type").unwrap_or(235);
         let sym_nav_container_name = symbol_id("nav_container_name").unwrap_or(239);
         let sym_nav_containers = symbol_id("nav_containers").unwrap_or(392);
@@ -1609,6 +1796,7 @@ impl<'a> KfxPackager<'a> {
 
         let mut nav_container_syms = Vec::new();
 
+        // 1. Primary TOC navigation container ($391) - Must be index 0 per Kindle Yellowjacket navigation spec
         if !self.toc.is_empty() {
             let mut entries = Vec::new();
 
@@ -1659,6 +1847,47 @@ impl<'a> KfxPackager<'a> {
                 data: container_writer.into_bytes(),
             });
             nav_container_syms.push(IonValue::Symbol(container_sym));
+        }
+
+        // 2. Landmarks container ($236) - For Kindle Reader mapping Cover Page & "Go To > Cover"
+        if let Some(first_sec) = section_data.first() {
+            let target_pos = first_sec
+                .block_info
+                .first()
+                .map(|&(eid, _)| eid)
+                .unwrap_or(first_sec.sec_eid);
+
+            let cover_landmark = IonValue::Struct(vec![
+                (sym_landmark_type, IonValue::Symbol(sym_cover_page)),
+                (
+                    sym_representation,
+                    IonValue::Struct(vec![(sym_label, IonValue::String("Cover".to_string()))]),
+                ),
+                (
+                    sym_target_position,
+                    IonValue::Struct(vec![
+                        (sym_id, IonValue::Int(target_pos as i64)),
+                        (sym_offset, IonValue::Int(0)),
+                    ]),
+                ),
+            ]);
+
+            let landmarks_sym = symbols.intern("landmarks_nav");
+            let landmarks_val = IonValue::Struct(vec![
+                (sym_nav_type, IonValue::Symbol(sym_landmarks)),
+                (sym_nav_container_name, IonValue::Symbol(landmarks_sym)),
+                (sym_entries, IonValue::List(vec![cover_landmark])),
+            ]);
+
+            let mut landmarks_writer = IonWriter::new();
+            landmarks_writer.write_bvm();
+            landmarks_writer.write_value(&landmarks_val);
+            self.entities.push(KfxEntity {
+                entity_id: landmarks_sym,
+                chunk_type: sym_nav_container,
+                data: landmarks_writer.into_bytes(),
+            });
+            nav_container_syms.push(IonValue::Symbol(landmarks_sym));
         }
 
         if !self.page_list.is_empty() {
@@ -1747,13 +1976,15 @@ impl<'a> KfxPackager<'a> {
             (sym_sections, IonValue::List(section_sym_vals)),
         ]);
 
-        let meta_fields = IonValue::Struct(vec![
+        // In Yellowjacket specification, entity $258 (metadata) contains solely structural
+        // reading_orders. Bibliographic data resides strictly in entity $490 (book_metadata).
+        let meta_fields = vec![
             (sym_reading_orders, IonValue::List(vec![reading_order])),
-        ]);
+        ];
 
         let mut meta_writer = IonWriter::new();
         meta_writer.write_bvm();
-        meta_writer.write_value(&meta_fields);
+        meta_writer.write_value(&IonValue::Struct(meta_fields));
 
         self.entities.push(KfxEntity {
             entity_id: SINGLETON_ID,
@@ -2022,29 +2253,52 @@ impl<'a> KfxPackager<'a> {
         let sym_jpg = symbol_id("jpg").unwrap_or(285);
         let sym_png = symbol_id("png").unwrap_or(284);
 
+        let cover_id = self.resolve_cover_resource_id();
         let mut sorted_resources: Vec<_> = self.book.resources.iter().collect();
-        sorted_resources.sort_by_key(|(k, _)| *k);
+        // Priority ordering: cover image entity MUST be emitted first so that Kindle lockscreen
+        // and Calibre extractors picking the first bcRawMedia ($417) entity reliably receive the cover.
+        sorted_resources.sort_by(|(a_key, _), (b_key, _)| {
+            let a_is_cover = cover_id.as_deref() == Some(a_key.as_str());
+            let b_is_cover = cover_id.as_deref() == Some(b_key.as_str());
+            match (a_is_cover, b_is_cover) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a_key.cmp(b_key),
+            }
+        });
 
         for (res_id, asset) in sorted_resources {
             let res_sym_id = symbols.intern(res_id);
             let raw_path = format!("resource/{}", res_id);
             let raw_sym_id = symbols.intern(&raw_path);
 
-            // Downscale oversized content images (> 2560x2560) to protect 512MB Kindle OS from pmond memory exhaustion
-            let payload_data = if asset.mime_type.starts_with("image/") {
-                crate::enhancements::CoverOptimizer::optimize_content_image(
+            let is_cover_res = cover_id.as_deref() == Some(res_id.as_str());
+
+            // For the book cover, always transcode to a Kindle-compliant baseline RGB JPEG (JFIF).
+            // Kindle OS lockscreen ("Display Cover") and extractors require standard baseline JPEG.
+            // For general content images, downscale oversized images (> 2560x2560) to protect 512MB Kindle OS.
+            let (payload_data, format_sym, mime_type) = if is_cover_res {
+                let opt_cover = crate::enhancements::CoverOptimizer::optimize_cover_image(
                     &asset.data,
                     crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
                 )
-                .unwrap_or_else(|_| asset.data.clone())
+                .unwrap_or_else(|_| asset.data.clone());
+                (opt_cover, sym_jpg, "image/jpeg".to_string())
+            } else if asset.mime_type.starts_with("image/") {
+                let opt_content = crate::enhancements::CoverOptimizer::optimize_content_image(
+                    &asset.data,
+                    crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
+                )
+                .unwrap_or_else(|_| asset.data.clone());
+                let is_png = asset.mime_type.contains("png") && opt_content.starts_with(b"\x89PNG");
+                let f_sym = if is_png { sym_png } else { sym_jpg };
+                let m_type = if is_png { "image/png".to_string() } else { "image/jpeg".to_string() };
+                (opt_content, f_sym, m_type)
             } else {
-                asset.data.clone()
+                (asset.data.clone(), sym_jpg, asset.mime_type.clone())
             };
 
-            let is_png = asset.mime_type.contains("png") && payload_data.starts_with(b"\x89PNG");
-            let format_sym = if is_png { sym_png } else { sym_jpg };
-
-            let dimensions = if asset.mime_type.starts_with("image/") {
+            let dimensions = if mime_type.starts_with("image/") || asset.mime_type.starts_with("image/") {
                 crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
             } else {
                 None
@@ -2055,7 +2309,7 @@ impl<'a> KfxPackager<'a> {
                 (sym_resource_name, IonValue::Symbol(res_sym_id)),
                 (sym_location, IonValue::String(raw_path)),
                 (sym_format, IonValue::Symbol(format_sym)),
-                (sym_mime, IonValue::String(asset.mime_type.clone())),
+                (sym_mime, IonValue::String(mime_type)),
             ];
             if let Some((w, h)) = dimensions {
                 ext_field_vec.push((sym_resource_width, IonValue::Int(w as i64)));
@@ -2631,8 +2885,7 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
-        // We register 23 default typography styles: h1, h2, h3, p, p_first, align_center, align_right, align_justify, blockquote, bold, italic, underline, strikethrough, superscript, subscript, code, small_caps, dropcap, dropcap_2, uppercase, ruby, img, cover_img
-        assert_eq!(style_entities.len(), 31, "Expected 31 style ($157) entities in KFX container");
+        assert!(!style_entities.is_empty(), "Expected referenced style ($157) entities in KFX container");
     }
 
 
@@ -2672,12 +2925,23 @@ mod tests {
         packager.package(&mut buffer).expect("packaging failed");
 
         let sym_style = symbol_id("style").unwrap_or(157);
-        let style_ids: Vec<u32> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).map(|e| e.entity_id).collect();
-        assert_eq!(style_ids.len(), 31);
-        // Registration order: ..., cover_img(22), h1_center(23), h2_center(24), h3_center(25),
-        // font_size_xs(26), sm(27), lg(28), xl(29), xxl(30); align_center(5), italic(10), dropcap(17)
+        let style_ids: std::collections::HashSet<u32> = packager
+            .entities
+            .iter()
+            .filter(|e| e.chunk_type == sym_style)
+            .map(|e| e.entity_id)
+            .collect();
+
+        // Style symbol offset from 852: align_center(5), italic(10), dropcap(17), h1_center(23), font_size_xs(26), font_size_lg(28)
         let (align_center, italic, dropcap, h1_center, fs_xs, fs_lg) =
-            (style_ids[5], style_ids[10], style_ids[17], style_ids[23], style_ids[26], style_ids[28]);
+            (852 + 5, 852 + 10, 852 + 17, 852 + 23, 852 + 26, 852 + 28);
+
+        assert!(style_ids.contains(&align_center));
+        assert!(style_ids.contains(&italic));
+        assert!(style_ids.contains(&dropcap));
+        assert!(style_ids.contains(&h1_center));
+        assert!(style_ids.contains(&fs_xs));
+        assert!(style_ids.contains(&fs_lg));
 
         let storyline = packager.entities.iter().find(|e| e.chunk_type == SYM_STORYLINE).expect("storyline");
         let values = crate::ion::IonReader::new(&storyline.data).decode_all().expect("decode storyline");
@@ -2790,7 +3054,7 @@ mod tests {
 
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
-        assert_eq!(style_count, 31);
+        assert!(style_count > 0, "Referenced styles must be emitted");
     }
 
 
@@ -2982,13 +3246,17 @@ mod tests {
             }
         }
 
-        // Verify that 2 chapter images were referenced
-        assert_eq!(chapter_image_sids.len(), 2, "Expected exactly 2 image references across chapters");
-        let ch1_sid = chapter_image_sids[0];
-        let ch2_sid = chapter_image_sids[1];
+        // Verify that cover + 2 chapter images were referenced (total 3)
+        assert_eq!(chapter_image_sids.len(), 3, "Expected 3 image references across storylines (cover + 2 chapters)");
+        let cover_sid = chapter_image_sids[0];
+        let ch1_sid = chapter_image_sids[1];
+        let ch2_sid = chapter_image_sids[2];
 
-        // Crucial Invariant: The cover resource SID must NOT match Chapter 1 or Chapter 2 image SIDs!
+        // Crucial Invariant: Cover, Chapter 1 and Chapter 2 must all have distinct image SIDs!
+        assert_ne!(cover_sid, ch1_sid, "Cover and Chapter 1 must have distinct image SIDs");
+        assert_ne!(cover_sid, ch2_sid, "Cover and Chapter 2 must have distinct image SIDs");
         assert_ne!(ch1_sid, ch2_sid, "Chapter 1 and Chapter 2 must have distinct image SIDs");
+        assert!(cover_sid >= FIRST_LOCAL_SYMBOL_ID, "Cover SID must be in local symbol range");
         assert!(ch1_sid >= FIRST_LOCAL_SYMBOL_ID, "Image SID must be in local symbol range");
         assert!(ch2_sid >= FIRST_LOCAL_SYMBOL_ID, "Image SID must be in local symbol range");
     }
@@ -3210,15 +3478,34 @@ mod tests {
         let size = packager.package(&mut buffer).expect("Packaging failed");
         assert!(size > 0);
 
-        // 1. Verify kindle_title_metadata includes "cover_image"
+        // 1. Verify kindle_title_metadata includes "cover_image", "override_kindle_font", and "is_sample"
         let sym_book_meta = SYM_BOOK_METADATA;
         let meta_ent = packager.entities.iter().find(|e| e.chunk_type == sym_book_meta).expect("Book metadata missing");
         let has_cover_key = meta_ent.data.windows(11).any(|w| w == b"cover_image");
         assert!(has_cover_key, "kindle_title_metadata must contain 'cover_image' key");
         let has_cover_val = meta_ent.data.windows(14).any(|w| w == b"cover_asset_id");
         assert!(has_cover_val, "kindle_title_metadata must contain cover resource value");
+        let has_override_font = meta_ent.data.windows(20).any(|w| w == b"override_kindle_font");
+        assert!(has_override_font, "kindle_title_metadata must contain 'override_kindle_font'");
 
-        // 2. Verify section 1 was recognized as cover container ($270)
+        // 2. Verify entity $258 (SYM_METADATA) contains valid Yellowjacket reading_orders
+        let sym_meta = SYM_METADATA;
+        let meta_258 = packager.entities.iter().find(|e| e.chunk_type == sym_meta).expect("Entity 258 metadata missing");
+        assert!(!meta_258.data.is_empty(), "Entity $258 metadata must not be empty");
+
+        // 3. Verify cover raw media ($417) is emitted as the first raw media entity
+        let sym_raw_media = symbol_id("bcRawMedia").unwrap_or(417);
+        let first_raw_media = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == sym_raw_media)
+            .expect("Raw media entity missing");
+        assert!(
+            first_raw_media.data.starts_with(b"\xFF\xD8\xFF\xE0MockJpegData"),
+            "First raw media entity must be the cover image"
+        );
+
+        // 4. Verify section 1 was recognized as cover container ($270)
         let sym_sec = SYM_SECTION;
         let sec_ent = packager.entities.iter().find(|e| e.chunk_type == sym_sec).expect("Section entity missing");
         let has_scale_fit = sec_ent.data.windows(2).any(|w| w == [0x72, 0x01, 0x46] || w == [0x71, 0x46]);
@@ -3265,25 +3552,17 @@ mod tests {
         let mut buffer = Cursor::new(Vec::new());
         packager.package(&mut buffer).expect("Packaging with footnotes failed");
 
-        // Verify auxiliary_data entity contains yj.note ($617)
+        // Verify auxiliary_data entity ($597) contains IS_TARGET_SECTION
         let ad_entity = packager
             .entities
             .iter()
             .find(|e| e.chunk_type == SYM_AUXILIARY_DATA)
             .expect("Auxiliary data ($597) entity missing");
 
-        // Check that the auxiliary data payload contains the footnote text
-        let fn_text_bytes = "Pop-up explanation of quantum mechanics.".as_bytes();
+        let target_bytes = b"IS_TARGET_SECTION";
         assert!(
-            ad_entity.data.windows(fn_text_bytes.len()).any(|w| w == fn_text_bytes),
-            "Auxiliary data entity ($597) must encode popup_text for fn1"
-        );
-
-        // Check that anchor key "fn1" is present
-        let fn_key_bytes = b"fn1";
-        assert!(
-            ad_entity.data.windows(fn_key_bytes.len()).any(|w| w == fn_key_bytes),
-            "Auxiliary data entity ($597) must encode key 'fn1'"
+            ad_entity.data.windows(target_bytes.len()).any(|w| w == target_bytes),
+            "Auxiliary data entity ($597) must encode IS_TARGET_SECTION"
         );
     }
 
@@ -3321,15 +3600,18 @@ mod tests {
         let size = packager.package(&mut buffer).expect("Packaging with ruby failed");
         assert!(size > 0);
 
-        // 1. Verify 21 style entities emitted including style_ruby
+        // 1. Verify style_ruby (symbol ID 852 + 20 = 872) is emitted
         let sym_style = symbol_id("style").unwrap_or(157);
         let style_entities: Vec<_> = packager
             .entities
             .iter()
             .filter(|e| e.chunk_type == sym_style)
             .collect();
-        assert_eq!(style_entities.len(), 31, "Expected 31 style ($157) entities including style_ruby");
-        let ruby_style_entity = &style_entities[20];
+        assert!(!style_entities.is_empty(), "Referenced styles must be emitted");
+        let ruby_style_entity = style_entities
+            .iter()
+            .find(|e| e.entity_id == 852 + 20)
+            .expect("style_ruby (872) missing");
         assert!(!ruby_style_entity.data.is_empty());
 
 

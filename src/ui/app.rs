@@ -830,10 +830,24 @@ impl KindleStudio {
                             .gap_3()
                             .child(
                                 div()
+                                    .id("toggle_content_type")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .bg(Theme::accent_amber())
                                     .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::BOLD)
                                     .text_color(Theme::text_primary())
-                                    .child("Format: EBOK"),
+                                    .child(format!("Format: {}", self.settings.content_type))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settings.content_type = if this.settings.content_type == "PDOC" {
+                                            "EBOK".into()
+                                        } else {
+                                            "PDOC".into()
+                                        };
+                                        cx.notify();
+                                    })),
                             )
                             .child(
                                 div()

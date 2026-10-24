@@ -410,12 +410,14 @@ impl KindleSync {
         Ok(())
     }
 
-    /// Synchronizes a converted KFX file and optional sidecars to the Kindle.
+    /// Synchronizes a converted KFX file, multi-identifier cover thumbnails, and optional sidecars to the Kindle.
     pub fn sync_to_device(
         device_root: &Path,
         kfx_source: &Path,
         book_title: &str,
         asin: &str,
+        content_id: Option<&str>,
+        cde_content_type: Option<&str>,
         cover_jpeg: Option<&[u8]>,
         kll_bytes: Option<&[u8]>,
     ) -> Result<PathBuf, SyncError> {
@@ -457,23 +459,68 @@ impl KindleSync {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        // 2. Sync Cover Thumbnail (system/thumbnails or .system/thumbnails)
+        // 2. Sync Cover Thumbnail across system/thumbnails, .system/thumbnails, and amazon-cover-bug
         if let Some(jpeg) = cover_jpeg {
-            let thumb_dir = if device_root.join(".system").is_dir() {
-                device_root.join(".system").join("thumbnails")
-            } else {
-                device_root.join("system").join("thumbnails")
-            };
-            let _ = std::fs::create_dir_all(&thumb_dir);
-            let thumb_path = thumb_dir.join(format!("thumbnail_{}_EBOK_portrait.jpg", safe_asin));
-            if thumb_path.starts_with(&thumb_dir) {
-                // Non-fatal: cover write failure should not abort the successful KFX sync
-                let _ = Self::write_bytes(&thumb_path, jpeg);
+            let mut thumb_dirs = Vec::new();
+            if device_root.join(".system").is_dir() {
+                thumb_dirs.push(device_root.join(".system").join("thumbnails"));
+            }
+            if device_root.join("system").is_dir() || thumb_dirs.is_empty() {
+                thumb_dirs.push(device_root.join("system").join("thumbnails"));
+            }
+            // Calibre-compatible amazon-cover-bug directory to survive WiFi sync
+            thumb_dirs.push(device_root.join("amazon-cover-bug"));
+
+            let cde = cde_content_type.unwrap_or("EBOK");
+            let alt_cde = if cde == "EBOK" { "PDOC" } else { "EBOK" };
+
+            let mut ids_to_sync = vec![safe_asin.clone()];
+            if let Some(cid) = content_id {
+                let safe_cid = Self::sanitize_asin(cid);
+                if safe_cid != safe_asin && !safe_cid.is_empty() {
+                    ids_to_sync.push(safe_cid);
+                }
+            }
+
+            for thumb_dir in thumb_dirs {
+                let _ = std::fs::create_dir_all(&thumb_dir);
+                for id in &ids_to_sync {
+                    // Primary CDE type thumbnail (e.g. thumbnail_{id}_PDOC_portrait.jpg)
+                    let p1 = thumb_dir.join(format!("thumbnail_{}_{}_portrait.jpg", id, cde));
+                    if p1.starts_with(&thumb_dir) {
+                        let _ = Self::write_bytes(&p1, jpeg);
+                        if let Ok(meta) = std::fs::metadata(&p1) {
+                            let mut perms = meta.permissions();
+                            perms.set_readonly(true);
+                            let _ = std::fs::set_permissions(&p1, perms);
+                        }
+                    }
+                    // Alternate CDE type thumbnail (e.g. thumbnail_{id}_EBOK_portrait.jpg)
+                    let p2 = thumb_dir.join(format!("thumbnail_{}_{}_portrait.jpg", id, alt_cde));
+                    if p2.starts_with(&thumb_dir) {
+                        let _ = Self::write_bytes(&p2, jpeg);
+                        if let Ok(meta) = std::fs::metadata(&p2) {
+                            let mut perms = meta.permissions();
+                            perms.set_readonly(true);
+                            let _ = std::fs::set_permissions(&p2, perms);
+                        }
+                    }
+                    // Legacy unqualified thumbnail (e.g. thumbnail_{id}_portrait.jpg)
+                    let p3 = thumb_dir.join(format!("thumbnail_{}_portrait.jpg", id));
+                    if p3.starts_with(&thumb_dir) {
+                        let _ = Self::write_bytes(&p3, jpeg);
+                        if let Ok(meta) = std::fs::metadata(&p3) {
+                            let mut perms = meta.permissions();
+                            perms.set_readonly(true);
+                            let _ = std::fs::set_permissions(&p3, perms);
+                        }
+                    }
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        // 3. Ensure companion .sdr folder exists and sanitize stale files
+        // 3. Ensure companion .sdr folder exists, write covers/thumbnails, and sanitize stale files
         let sdr_dir = docs_dir.join(format!("{}.sdr", safe_title));
         if !sdr_dir.starts_with(&docs_dir) {
             return Err(SyncError::SecurityViolation(format!(
@@ -481,19 +528,58 @@ impl KindleSync {
                 safe_title
             )));
         }
-        if kll_bytes.is_some() && !sdr_dir.exists() {
-            let _ = std::fs::create_dir_all(&sdr_dir);
+        let _ = std::fs::create_dir_all(&sdr_dir);
+
+        if let Some(jpeg) = cover_jpeg {
+            let cde = cde_content_type.unwrap_or("EBOK");
+            let alt_cde = if cde == "EBOK" { "PDOC" } else { "EBOK" };
+            let _ = Self::write_bytes(&sdr_dir.join("cover.jpg"), jpeg);
+            let _ = Self::write_bytes(
+                &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_asin, cde)),
+                jpeg,
+            );
+            let _ = Self::write_bytes(
+                &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_asin, alt_cde)),
+                jpeg,
+            );
+            let _ = Self::write_bytes(
+                &sdr_dir.join(format!("thumbnail_{}_portrait.jpg", safe_asin)),
+                jpeg,
+            );
+            if let Some(cid) = content_id {
+                let safe_cid = Self::sanitize_asin(cid);
+                if safe_cid != safe_asin && !safe_cid.is_empty() {
+                    let _ = Self::write_bytes(
+                        &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_cid, cde)),
+                        jpeg,
+                    );
+                    let _ = Self::write_bytes(
+                        &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_cid, alt_cde)),
+                        jpeg,
+                    );
+                    let _ = Self::write_bytes(
+                        &sdr_dir.join(format!("thumbnail_{}_portrait.jpg", safe_cid)),
+                        jpeg,
+                    );
+                }
+            }
         }
+
         let purge_ww = kll_bytes.is_none();
         Self::clean_stale_sdr_files(&sdr_dir, Some(&safe_asin), purge_ww);
 
         // 4. Sync Word Wise Sidecar (<Title>.sdr/LanguageLayer.en.{asin}.kll)
         if let Some(kll) = kll_bytes {
-            if !sdr_dir.exists() {
-                let _ = std::fs::create_dir_all(&sdr_dir);
-            }
             let kll_path = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
             let _ = Self::write_bytes(&kll_path, kll);
+            if let Some(cid) = content_id {
+                let safe_cid = Self::sanitize_asin(cid);
+                if safe_cid != safe_asin && !safe_cid.is_empty() {
+                    let fallback_path =
+                        sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_cid));
+                    let _ = Self::write_bytes(&fallback_path, kll);
+                }
+            }
         }
 
         // Final settle delay to ensure all FAT directory transactions are safely buffered
@@ -708,6 +794,8 @@ mod tests {
             &kfx_src,
             "../../../../etc/shadow",
             "B00TESTASIN",
+            Some("1234567890ABCDEF1234567890ABCDEF"),
+            Some("EBOK"),
             None,
             None,
         );
@@ -716,6 +804,55 @@ mod tests {
         // Ensure destination path stays strictly inside documents
         assert!(synced_path.starts_with(&docs));
         assert!(!synced_path.to_string_lossy().contains(".."));
+    }
+
+    #[test]
+    fn test_sync_to_device_multi_alias_thumbnails() {
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        let kfx_src = temp.path().join("book.kfx");
+        std::fs::write(&kfx_src, b"FAKE_KFX").unwrap();
+
+        let fake_jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        let result = KindleSync::sync_to_device(
+            temp.path(),
+            &kfx_src,
+            "My Great Novel",
+            "B00TEST1234",
+            Some("ABCDEF1234567890ABCDEF1234567890"),
+            Some("EBOK"),
+            Some(&fake_jpeg),
+            None,
+        );
+        assert!(result.is_ok());
+
+        let thumb_dir = temp.path().join("system").join("thumbnails");
+        assert!(thumb_dir.is_dir());
+
+        // 1. ASIN-keyed thumbnails (both EBOK and PDOC)
+        let asin_ebok = thumb_dir.join("thumbnail_B00TEST1234_EBOK_portrait.jpg");
+        let asin_pdoc = thumb_dir.join("thumbnail_B00TEST1234_PDOC_portrait.jpg");
+        assert!(asin_ebok.is_file(), "ASIN EBOK thumbnail missing");
+        assert!(asin_pdoc.is_file(), "ASIN PDOC thumbnail missing");
+
+        // 2. Content-ID-keyed thumbnails (both EBOK and PDOC)
+        let cid_ebok = thumb_dir.join("thumbnail_ABCDEF1234567890ABCDEF1234567890_EBOK_portrait.jpg");
+        let cid_pdoc = thumb_dir.join("thumbnail_ABCDEF1234567890ABCDEF1234567890_PDOC_portrait.jpg");
+        assert!(cid_ebok.is_file(), "Content-ID EBOK thumbnail missing");
+        assert!(cid_pdoc.is_file(), "Content-ID PDOC thumbnail missing");
+
+        // 3. amazon-cover-bug backup directory
+        let acb_dir = temp.path().join("amazon-cover-bug");
+        assert!(acb_dir.is_dir(), "amazon-cover-bug directory missing");
+        assert!(acb_dir.join("thumbnail_B00TEST1234_PDOC_portrait.jpg").is_file());
+
+        // 4. Companion .sdr directory covers
+        let sdr_dir = docs.join("book.sdr");
+        assert!(sdr_dir.is_dir(), ".sdr directory missing");
+        assert!(sdr_dir.join("cover.jpg").is_file(), "cover.jpg in .sdr missing");
+        assert!(sdr_dir.join("thumbnail_B00TEST1234_PDOC_portrait.jpg").is_file());
     }
 
     #[test]
