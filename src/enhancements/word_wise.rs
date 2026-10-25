@@ -273,6 +273,18 @@ impl WordWiseBuilder {
         self.populate_connection(&mut conn)
     }
 
+    /// Serializes the Word Wise `.kll` SQLite database directly into an in-memory byte vector.
+    pub fn to_bytes(&self) -> SqlResult<Vec<u8>> {
+        let tmp_file = tempfile::NamedTempFile::new()
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        {
+            let mut conn = Connection::open(tmp_file.path())?;
+            self.populate_connection(&mut conn)?;
+        }
+        std::fs::read(tmp_file.path())
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+    }
+
     /// Populates tables and metadata into a SQLite connection.
     pub fn populate_connection(&self, conn: &mut Connection) -> SqlResult<()> {
         // Optimize PRAGMAs for Kindle OS eMMC flash memory, write amplification mitigation,
@@ -405,6 +417,11 @@ mod tests {
             )
             .unwrap();
         assert!(index_exists, "idx_glosses_diff_start must exist");
+
+        // Verify to_bytes serialization
+        let bytes = builder.to_bytes().expect("to_bytes must succeed");
+        assert!(bytes.len() >= 4096, "SQLite database must be at least 4KB");
+        assert!(bytes.starts_with(b"SQLite format 3\0"), "Must be valid SQLite header");
     }
 
     #[test]

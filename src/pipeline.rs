@@ -166,15 +166,9 @@ impl ConversionPipeline {
             let gloss_count = ww_builder.generate_from_book(&ir);
             word_wise_glosses = Some(gloss_count);
 
-            if let Ok(tmp_kll) = tempfile::NamedTempFile::new()
-                && ww_builder.write_to_file(tmp_kll.path()).is_ok() {
-                    use std::io::Read;
-                    let mut buf = Vec::new();
-                    if let Ok(mut f) = tmp_kll.reopen() {
-                        let _ = f.read_to_end(&mut buf);
-                        kll_bytes = Some(buf);
-                    }
-                }
+            if let Ok(bytes) = ww_builder.to_bytes() {
+                kll_bytes = Some(bytes);
+            }
 
             // Always deploy companion .sdr directory and .kll database alongside output_path
             let sdr_path = output_path.with_extension("sdr");
@@ -185,6 +179,16 @@ impl ConversionPipeline {
                 if let Some(ref kll) = kll_bytes {
                     let kll_path = sdr_path.join(format!("LanguageLayer.en.{}.kll", safe_asin));
                     let _ = std::fs::write(&kll_path, kll);
+                    // Also write 10-char canonical ASIN alias if safe_asin is 32-hex
+                    if safe_asin.len() >= 9 {
+                        let asin_10 = format!("B{}", &safe_asin[..9]);
+                        if asin_10 != safe_asin {
+                            let _ = std::fs::write(
+                                sdr_path.join(format!("LanguageLayer.en.{}.kll", asin_10)),
+                                kll,
+                            );
+                        }
+                    }
                     // Also write fallback with content_id for dual-lookup compatibility
                     if safe_cid != safe_asin && !safe_cid.is_empty() {
                         let fallback_path =
@@ -324,5 +328,84 @@ mod tests {
         assert!(opts.word_wise);
         assert!(opts.auto_deploy);
         assert!(opts.device_root.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_generates_word_wise_sdr_sidecars() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let epub_path = temp_dir.path().join("test_book.epub");
+        let kfx_path = temp_dir.path().join("test_book.kfx");
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+
+            zip.start_file("mimetype", opts).unwrap();
+            std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
+
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#).unwrap();
+
+            zip.start_file("content.opf", opts).unwrap();
+            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Vocabulary Test Book</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#).unwrap();
+
+            zip.start_file("c1.xhtml", opts).unwrap();
+            std::io::Write::write_all(&mut zip, br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>This is an abstruse and chimerical test for Word Wise vocabulary glosses.</p></body></html>"#).unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        std::fs::write(&epub_path, buf.into_inner()).unwrap();
+
+        let options = ConversionOptions {
+            content_type: "EBOK".into(),
+            word_wise: true,
+            auto_deploy: false,
+            device_root: None,
+        };
+
+        let report = ConversionPipeline::run(
+            &epub_path,
+            Some(&kfx_path),
+            &options,
+            None::<fn(f32, &str)>,
+        ).expect("Pipeline should succeed");
+
+        assert!(kfx_path.is_file(), "KFX file must be created");
+        assert!(report.word_wise_glosses.is_some_and(|g| g > 0), "Should find vocabulary glosses");
+
+        // Verify .sdr directory and .kll database deployment
+        let sdr_path = temp_dir.path().join("test_book.sdr");
+        assert!(sdr_path.is_dir(), "Companion SDR directory must exist");
+
+        let mut kll_count = 0;
+        for entry in std::fs::read_dir(&sdr_path).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".kll") {
+                kll_count += 1;
+                let kll_data = std::fs::read(entry.path()).unwrap();
+                assert!(kll_data.starts_with(b"SQLite format 3\0"), "KLL must be valid SQLite database");
+            }
+        }
+        assert!(kll_count >= 1, "At least one .kll file must exist in the SDR directory");
     }
 }

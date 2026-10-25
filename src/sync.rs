@@ -663,6 +663,16 @@ impl KindleSync {
         if let Some(kll) = kll_bytes {
             let kll_path = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
             let _ = Self::write_bytes(&kll_path, kll);
+            // Also write 10-char canonical ASIN alias if safe_asin is 32-hex
+            if safe_asin.len() >= 9 {
+                let asin_10 = format!("B{}", &safe_asin[..9]);
+                if asin_10 != safe_asin {
+                    let _ = Self::write_bytes(
+                        &sdr_dir.join(format!("LanguageLayer.en.{}.kll", asin_10)),
+                        kll,
+                    );
+                }
+            }
             if let Some(cid) = content_id {
                 let safe_cid = Self::sanitize_asin(cid);
                 if safe_cid != safe_asin && !safe_cid.is_empty() {
@@ -706,8 +716,14 @@ impl KindleSync {
                         let _ = std::fs::remove_file(&path);
                     } else if let Some(asin) = current_asin {
                         let asin_lower = asin.to_lowercase();
+                        let asin_10 = if asin_lower.len() >= 9 {
+                            format!("b{}", &asin_lower[..9])
+                        } else {
+                            asin_lower.clone()
+                        };
                         if (fname_lower.contains(".kll") || fname_lower.contains(".asc"))
                             && !fname_lower.contains(&asin_lower)
+                            && !fname_lower.contains(&asin_10)
                         {
                             let _ = std::fs::remove_file(&path);
                         }
