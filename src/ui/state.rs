@@ -578,11 +578,15 @@ mod tests {
 
         let way_of_kings = files.iter().find(|f| f.name == "WayOfKings.azw3").unwrap();
         assert_eq!(way_of_kings.format, "AZW3");
+        assert_eq!(way_of_kings.author, "Brandon Sanderson");
+        assert_eq!(way_of_kings.title, "WayOfKings");
         assert!(way_of_kings.has_sdr);
         assert!(way_of_kings.has_word_wise);
 
         let store_item = files.iter().find(|f| f.name == "StoreItem.kfx").unwrap();
         assert_eq!(store_item.format, "KFX");
+        assert_eq!(store_item.author, "Unknown");
+        assert_eq!(store_item.title, "StoreItem");
         assert!(!store_item.has_sdr);
         assert!(!store_item.has_word_wise);
     }

@@ -33,9 +33,13 @@ pub struct KindleDeviceInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindleBookFile {
     pub name: String,
+    pub title: String,
+    pub author: String,
     pub format: String,
     pub size_formatted: String,
+    pub size_bytes: u64,
     pub modified: String,
+    pub modified_timestamp: u64,
     pub full_path: PathBuf,
     pub has_word_wise: bool,
     pub has_sdr: bool,
@@ -319,7 +323,7 @@ impl KindleSync {
             return files;
         }
 
-        fn scan_dir_recursive(dir: &Path, depth: usize, max_depth: usize, files: &mut Vec<KindleBookFile>) {
+        fn scan_dir_recursive(doc_path: &Path, dir: &Path, depth: usize, max_depth: usize, files: &mut Vec<KindleBookFile>) {
             if depth > max_depth {
                 return;
             }
@@ -330,7 +334,7 @@ impl KindleSync {
                     if path.is_dir() {
                         let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
                         if !name.starts_with('.') && !name.ends_with(".sdr") {
-                            scan_dir_recursive(&path, depth + 1, max_depth, files);
+                            scan_dir_recursive(doc_path, &path, depth + 1, max_depth, files);
                         }
                     } else if path.is_file() {
                         let ext = path
@@ -342,22 +346,27 @@ impl KindleSync {
                         if valid_exts.contains(&ext.as_str()) {
                             let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                             let format = ext.to_uppercase();
-                            let size_formatted = match std::fs::metadata(&path) {
+                            let (size_bytes, size_formatted) = match std::fs::metadata(&path) {
                                 Ok(meta) => {
                                     let bytes = meta.len();
-                                    if bytes >= 1024 * 1024 {
+                                    let s = if bytes >= 1024 * 1024 {
                                         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
                                     } else {
                                         format!("{} KB", bytes / 1024)
-                                    }
+                                    };
+                                    (bytes, s)
                                 }
-                                Err(_) => "0 KB".into(),
+                                Err(_) => (0, "0 KB".into()),
                             };
 
-                            let modified = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+                            let (modified_timestamp, modified) = match std::fs::metadata(&path).and_then(|m| m.modified()) {
                                 Ok(time) => {
+                                    let ts = time
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0);
                                     let duration = time.elapsed().unwrap_or_default();
-                                    if duration.as_secs() < 60 {
+                                    let s = if duration.as_secs() < 60 {
                                         "Just now".into()
                                     } else if duration.as_secs() < 3600 {
                                         format!("{}m ago", duration.as_secs() / 60)
@@ -365,9 +374,38 @@ impl KindleSync {
                                         format!("{}h ago", duration.as_secs() / 3600)
                                     } else {
                                         format!("{}d ago", duration.as_secs() / 86400)
+                                    };
+                                    (ts, s)
+                                }
+                                Err(_) => (0, "Unknown".into()),
+                            };
+
+                            let (title, author) = if let Ok(rel) = path.strip_prefix(doc_path) {
+                                let components: Vec<_> = rel.iter().collect();
+                                if components.len() > 1 {
+                                    let first_dir = components[0].to_string_lossy();
+                                    if first_dir.eq_ignore_ascii_case("downloads") || first_dir.eq_ignore_ascii_case("system") {
+                                        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                                        if let Some((t, a)) = stem.split_once(" - ") {
+                                            (t.trim().to_string(), a.trim().to_string())
+                                        } else {
+                                            (stem.to_string(), "Unknown".to_string())
+                                        }
+                                    } else {
+                                        let author_str = first_dir.to_string();
+                                        let title_str = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                                        (title_str, author_str)
+                                    }
+                                } else {
+                                    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                                    if let Some((t, a)) = stem.split_once(" - ") {
+                                        (t.trim().to_string(), a.trim().to_string())
+                                    } else {
+                                        (stem.to_string(), "Unknown".to_string())
                                     }
                                 }
-                                Err(_) => "Unknown".into(),
+                            } else {
+                                (path.file_stem().unwrap_or_default().to_string_lossy().to_string(), "Unknown".to_string())
                             };
 
                             let file_stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -388,9 +426,13 @@ impl KindleSync {
 
                             files.push(KindleBookFile {
                                 name,
+                                title,
+                                author,
                                 format,
                                 size_formatted,
+                                size_bytes,
                                 modified,
+                                modified_timestamp,
                                 full_path: path,
                                 has_word_wise,
                                 has_sdr,
@@ -401,7 +443,7 @@ impl KindleSync {
             }
         }
 
-        scan_dir_recursive(doc_path, 0, 3, &mut files);
+        scan_dir_recursive(doc_path, doc_path, 0, 3, &mut files);
         files.sort_by_key(|a| a.name.to_lowercase());
         files
     }

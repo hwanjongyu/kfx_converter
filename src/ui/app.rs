@@ -24,6 +24,8 @@ pub struct KindleStudio {
     batch_cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     folder_scroll_handle: UniformListScrollHandle,
     explorer_scroll_handle: UniformListScrollHandle,
+    explorer_sort_field: EpubSortField,
+    explorer_sort_direction: SortDirection,
 }
 
 impl KindleStudio {
@@ -45,6 +47,8 @@ impl KindleStudio {
             batch_cancel_token: None,
             folder_scroll_handle: UniformListScrollHandle::new(),
             explorer_scroll_handle: UniformListScrollHandle::new(),
+            explorer_sort_field: EpubSortField::Title,
+            explorer_sort_direction: SortDirection::Ascending,
         }
     }
 
@@ -61,8 +65,21 @@ impl KindleStudio {
                 .await;
 
             this.update(cx, |this, cx| {
+                let mut f_list = files;
+                for file in &mut f_list {
+                    if file.author == "Unknown" {
+                        let file_stem = file.full_path.file_stem().unwrap_or_default().to_string_lossy();
+                        if let Some(item) = this.folder_state.items.iter().find(|i| {
+                            i.path.file_stem().map(|s| s.to_string_lossy()) == Some(file_stem.clone())
+                            || i.title.eq_ignore_ascii_case(&file.title)
+                        }) {
+                            file.title = item.title.clone();
+                            file.author = item.author.clone();
+                        }
+                    }
+                }
                 this.device = device;
-                this.files = files;
+                this.files = f_list;
                 this.status_message = None;
                 cx.notify();
             })
@@ -379,11 +396,16 @@ impl KindleStudio {
                                         let kfx_name = r.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                                         if !this.files.iter().any(|f| f.name == kfx_name) {
                                             let dev_path = this.device.path.as_ref().map(|p| p.join(&kfx_name)).unwrap_or_else(|| r.output_path.clone());
+                                            let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                                             this.files.push(kfx_converter::KindleBookFile {
                                                 name: kfx_name,
+                                                title: item.title.clone(),
+                                                author: item.author.clone(),
                                                 format: "KFX".into(),
                                                 size_formatted: "Synced".into(),
+                                                size_bytes: 0,
                                                 modified: "Just now".into(),
+                                                modified_timestamp: now_ts,
                                                 full_path: dev_path,
                                                 has_word_wise: true,
                                                 has_sdr: true,
@@ -504,11 +526,21 @@ impl KindleStudio {
                                 let kfx_name = res.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                                 if !this.files.iter().any(|f| f.name == kfx_name) {
                                     let dev_path = this.device.path.as_ref().map(|p| p.join(&kfx_name)).unwrap_or_else(|| res.output_path.clone());
+                                    let (item_title, item_author) = if let Some(item) = this.folder_state.items.iter().find(|i| i.path == target_path) {
+                                        (item.title.clone(), item.author.clone())
+                                    } else {
+                                        (kfx_name.clone(), "Unknown".into())
+                                    };
+                                    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                                     this.files.push(kfx_converter::KindleBookFile {
                                         name: kfx_name,
+                                        title: item_title,
+                                        author: item_author,
                                         format: "KFX".into(),
                                         size_formatted: "Synced".into(),
+                                        size_bytes: 0,
                                         modified: "Just now".into(),
+                                        modified_timestamp: now_ts,
                                         full_path: dev_path,
                                         has_word_wise: true,
                                         has_sdr: true,
@@ -2256,7 +2288,7 @@ impl KindleStudio {
         let count_mobi = self.files.iter().filter(|f| f.format == "MOBI").count();
         let count_all = self.files.len();
 
-        let filtered_indices: Vec<usize> = self.files
+        let mut filtered_indices: Vec<usize> = self.files
             .iter()
             .enumerate()
             .filter(|(_, f)| {
@@ -2271,11 +2303,41 @@ impl KindleStudio {
                     true
                 } else {
                     f.name.to_lowercase().contains(&self.search_query.to_lowercase())
+                        || f.title.to_lowercase().contains(&self.search_query.to_lowercase())
+                        || f.author.to_lowercase().contains(&self.search_query.to_lowercase())
                 };
                 fmt_match && query_match
             })
             .map(|(idx, _)| idx)
             .collect();
+
+        filtered_indices.sort_by(|&a_idx, &b_idx| {
+            let a = &self.files[a_idx];
+            let b = &self.files[b_idx];
+
+            let cmp = match self.explorer_sort_field {
+                EpubSortField::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                EpubSortField::Author => {
+                    let a_unknown = a.author.eq_ignore_ascii_case("unknown");
+                    let b_unknown = b.author.eq_ignore_ascii_case("unknown");
+                    match (a_unknown, b_unknown) {
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => a.author.to_lowercase().cmp(&b.author.to_lowercase()),
+                    }
+                }
+                EpubSortField::FileSize => a.size_bytes.cmp(&b.size_bytes),
+                EpubSortField::DateModified => a.modified_timestamp.cmp(&b.modified_timestamp),
+                EpubSortField::Status => a.format.cmp(&b.format),
+            };
+
+            let ordered_cmp = match self.explorer_sort_direction {
+                SortDirection::Ascending => cmp,
+                SortDirection::Descending => cmp.reverse(),
+            };
+
+            ordered_cmp.then_with(|| a.name.cmp(&b.name))
+        });
         let file_count = filtered_indices.len();
 
         let free_gb = (self.device.total_gb - self.device.used_gb).max(0.0);
@@ -2544,6 +2606,7 @@ impl KindleStudio {
                     let indices = filtered_indices.clone();
                     div()
                         .flex()
+                        .flex_col()
                         .flex_1()
                         .w_full()
                         .min_h_0()
@@ -2552,41 +2615,180 @@ impl KindleStudio {
                         .bg(Theme::bg_card())
                         .border_1()
                         .border_color(Theme::border())
-                        .p_2()
-                        .gap_1p5()
+                        .child(self.render_kindle_table_column_headers(cx))
                         .child(
                             div()
-                                .id("kindle_files_list_scroll")
+                                .flex()
                                 .flex_1()
-                                .min_w_0()
-                                .h_full()
+                                .w_full()
+                                .min_h_0()
                                 .overflow_hidden()
+                                .p_2()
+                                .gap_1p5()
                                 .child(
-                                    uniform_list(
-                                        "kindle_files_uniform_list",
-                                        indices.len(),
-                                        cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
-                                            range
-                                                .map(|r_idx| {
-                                                    let file_idx = indices[r_idx];
-                                                    let file = &this.files[file_idx];
-                                                    Self::render_kindle_file_row(file, &view)
-                                                })
-                                                .collect()
-                                        }),
-                                    )
-                                    .track_scroll(self.explorer_scroll_handle.clone())
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full(),
+                                    div()
+                                        .id("kindle_files_list_scroll")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h_full()
+                                        .overflow_hidden()
+                                        .child(
+                                            uniform_list(
+                                                "kindle_files_uniform_list",
+                                                indices.len(),
+                                                cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
+                                                    range
+                                                        .map(|r_idx| {
+                                                            let file_idx = indices[r_idx];
+                                                            let file = &this.files[file_idx];
+                                                            Self::render_kindle_file_row(file, &view)
+                                                        })
+                                                        .collect()
+                                                }),
+                                            )
+                                            .track_scroll(self.explorer_scroll_handle.clone())
+                                            .flex_1()
+                                            .min_w_0()
+                                            .h_full(),
+                                        )
                                 )
-                        )
-                        .child(
-                            self.render_custom_scrollbar(&self.explorer_scroll_handle, filtered_indices.len(), px(48.0), "kindle", cx)
+                                .child(
+                                    self.render_custom_scrollbar(&self.explorer_scroll_handle, filtered_indices.len(), px(48.0), "kindle", cx)
+                                )
                         )
                         .into_any_element()
                 }
             )
+    }
+
+    /// Renders sortable column headers for the connected Kindle explorer table.
+    fn render_kindle_table_column_headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sort_field = self.explorer_sort_field;
+        let sort_dir = self.explorer_sort_direction;
+
+        div()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(32.0))
+            .px_3()
+            .bg(Theme::bg_card_hover())
+            .border_b_1()
+            .border_color(Theme::border())
+            .gap_2()
+            .text_xs()
+            .font_weight(FontWeight::BOLD)
+            // 1. Format Header
+            .child(
+                self.render_explorer_sort_column_cell(
+                    "Format",
+                    EpubSortField::Status,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(70.0)).flex_shrink_0(),
+                    cx,
+                )
+            )
+            // 2. Title Header
+            .child(
+                self.render_explorer_sort_column_cell(
+                    "Title",
+                    EpubSortField::Title,
+                    sort_field,
+                    sort_dir,
+                    div().flex_1().min_w_0(),
+                    cx,
+                )
+            )
+            // 3. Author Header
+            .child(
+                self.render_explorer_sort_column_cell(
+                    "Author",
+                    EpubSortField::Author,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(130.0)).flex_shrink_0().min_w_0(),
+                    cx,
+                )
+            )
+            // 4. Size Header
+            .child(
+                self.render_explorer_sort_column_cell(
+                    "Size",
+                    EpubSortField::FileSize,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(65.0)).flex_shrink_0(),
+                    cx,
+                )
+            )
+            // 5. Date Header
+            .child(
+                self.render_explorer_sort_column_cell(
+                    "Date",
+                    EpubSortField::DateModified,
+                    sort_field,
+                    sort_dir,
+                    div().w(px(75.0)).flex_shrink_0(),
+                    cx,
+                )
+            )
+            // Action spacer
+            .child(div().w(px(32.0)).flex_shrink_0())
+            // Scrollbar spacer (14px)
+            .child(div().w(px(14.0)).flex_shrink_0())
+    }
+
+    fn render_explorer_sort_column_cell(
+        &self,
+        label: &'static str,
+        target_field: EpubSortField,
+        active_field: EpubSortField,
+        active_dir: SortDirection,
+        container: Div,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_active = active_field == target_field;
+        let arrow_symbol = if is_active {
+            active_dir.symbol()
+        } else {
+            "↕"
+        };
+
+        container
+            .id(ElementId::Name(format!("col_explorer_sort_{}", label.to_lowercase()).into()))
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .text_color(if is_active { Theme::accent_amber() } else { Theme::text_muted() })
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(if is_active { Theme::accent_amber() } else { Theme::text_muted() })
+                    .child(arrow_symbol),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.handle_explorer_sort_column_click(target_field, cx);
+            }))
+            .into_any_element()
+    }
+
+    fn handle_explorer_sort_column_click(&mut self, field: EpubSortField, cx: &mut Context<Self>) {
+        if self.explorer_sort_field == field {
+            self.explorer_sort_direction = self.explorer_sort_direction.toggle();
+        } else {
+            self.explorer_sort_field = field;
+            self.explorer_sort_direction = match field {
+                EpubSortField::DateModified | EpubSortField::FileSize => SortDirection::Descending,
+                _ => SortDirection::Ascending,
+            };
+        }
+        cx.notify();
     }
 
     /// Renders a single Kindle file row with strict 48px height for virtualization.
@@ -2609,26 +2811,25 @@ impl KindleStudio {
             .child(
                 div()
                     .flex()
-                    .justify_between()
                     .items_center()
                     .w_full()
                     .h(px(44.0))
-                    .p_2p5()
+                    .px_3()
                     .rounded_md()
                     .bg(Theme::bg_card())
                     .border_1()
                     .border_color(Theme::border())
+                    .gap_2()
+                    // 1. Format & Word Wise badges
                     .child(
                         div()
+                            .w(px(70.0))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .gap_2p5()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
+                            .gap_1()
                             .child(
                                 div()
-                                    .flex_shrink_0()
                                     .px_1p5()
                                     .py_0p5()
                                     .rounded_sm()
@@ -2641,7 +2842,6 @@ impl KindleStudio {
                             .children(if file.has_word_wise {
                                 Some(
                                     div()
-                                        .flex_shrink_0()
                                         .px_1p5()
                                         .py_0p5()
                                         .rounded_sm()
@@ -2649,40 +2849,61 @@ impl KindleStudio {
                                         .text_xs()
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(Theme::text_primary())
-                                        .child("Word Wise"),
+                                        .child("WW"),
                                 )
                             } else {
                                 None
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(Theme::text_primary())
-                                    .truncate()
-                                    .child(file.name.clone()),
-                            ),
+                            }),
                     )
+                    // 2. Title
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(Theme::text_primary())
+                            .truncate()
+                            .child(file.title.clone()),
+                    )
+                    // 3. Author
+                    .child(
+                        div()
+                            .w(px(130.0))
+                            .flex_shrink_0()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_xs()
+                            .text_color(Theme::text_muted())
+                            .truncate()
+                            .child(file.author.clone()),
+                    )
+                    // 4. Size
+                    .child(
+                        div()
+                            .w(px(65.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(Theme::text_muted())
+                            .child(file.size_formatted.clone()),
+                    )
+                    // 5. Date
+                    .child(
+                        div()
+                            .w(px(75.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(Theme::text_muted())
+                            .child(file.modified.clone()),
+                    )
+                    // 6. Delete Action Button
+                    .child(
+                        div()
+                            .w(px(32.0))
                             .flex_shrink_0()
                             .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(Theme::text_muted())
-                                    .child(file.size_formatted.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(Theme::text_muted())
-                                    .child(file.modified.clone()),
-                            )
+                            .justify_end()
                             .child(
                                 div()
                                     .id(ElementId::Name(format!("del_{}", file_name).into()))
