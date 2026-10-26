@@ -11,8 +11,8 @@ impl<'a> KfxPackager<'a> {
     ///
     /// For every resource in `BookIR::resources`, Yellowjacket emits a dual-entity pair:
     /// 1. $164 (`external_resource`) metadata entity containing MIME type, format, and dimensions
-    ///      required by Kindle OS layout engine (KPP / Hermes JS) to compute e-ink pagination
-    ///      and bounding boxes. Omission results in height=0px rendering collapse.
+    ///    required by Kindle OS layout engine (KPP / Hermes JS) to compute e-ink pagination
+    ///    and bounding boxes. Omission results in height=0px rendering collapse.
     /// 2. $417 (`bcRawMedia`) raw binary image payload entity.
     pub(crate) fn build_resources(&mut self, symbols: &mut LocalSymbols) {
         let sym_ext_resource = symbol_id("external_resource").unwrap_or(164);

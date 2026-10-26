@@ -131,10 +131,9 @@ impl KfxContainer {
                 if let Some(fields) = struct_fields {
                     for (sid, val) in fields {
                         if sid == 414 { // bcIndexTabLength
-                            if let IonValue::Int(len) = val {
-                                if len > 0 && (len as usize) < index_tab_len {
+                            if let IonValue::Int(len) = val
+                                && len > 0 && (len as usize) < index_tab_len {
                                     index_tab_len = len as usize;
-                                }
                             }
                             break;
                         }
