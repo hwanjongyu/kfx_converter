@@ -108,6 +108,9 @@ fn main() {
                 } else if args.sync {
                     if let Some(err) = report.sync_error {
                         eprintln!("-> [SYNC WARNING] Failed to transfer to device: {}", err);
+                    } else if let Some(usb) = kfx_converter::KindleSync::probe_unmounted_usb_kindle() {
+                        eprintln!("-> [SYNC NOTICE] Amazon Kindle USB hardware (1949:{}, '{}') detected, but no active filesystem mount was found.", usb.product_id, usb.product_name);
+                        eprintln!("-> [TIP] In headless Linux or Docker, mount with 'jmtpfs /media/Kindle' or specify 'KINDLE_ROOT=/path/to/mount'.");
                     } else {
                         println!("-> [SYNC NOTICE] No Kindle device detected (USB / MTP).");
                     }

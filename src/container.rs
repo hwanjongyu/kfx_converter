@@ -536,10 +536,10 @@ mod tests {
 
         // bcIndexTab (24 bytes for 1 chunk)
         let mut chunk_entry = vec![0u8; 24];
-        (&mut chunk_entry[0..4]).copy_from_slice(&852u32.to_le_bytes()); // id
-        (&mut chunk_entry[4..6]).copy_from_slice(&145u16.to_le_bytes()); // type
-        (&mut chunk_entry[8..12]).copy_from_slice(&(header_len as u32).to_le_bytes()); // offset
-        (&mut chunk_entry[12..16]).copy_from_slice(&10u32.to_le_bytes()); // length
+        chunk_entry[0..4].copy_from_slice(&852u32.to_le_bytes()); // id
+        chunk_entry[4..6].copy_from_slice(&145u16.to_le_bytes()); // type
+        chunk_entry[8..12].copy_from_slice(&header_len.to_le_bytes()); // offset
+        chunk_entry[12..16].copy_from_slice(&10u32.to_le_bytes()); // length
         data.extend_from_slice(&chunk_entry);
 
         // ContainerInfo

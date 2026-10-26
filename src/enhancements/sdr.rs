@@ -110,14 +110,14 @@ mod tests {
         let sdr_path = temp.path().join("SampleBook.sdr");
 
         let asin = "123456789ABCDEF0123456789ABCDEF0";
-        let content_id = Some("CID_DIFFERENT_987654321");
+        let content_id = "CID_DIFFERENT_987654321";
         let cover_data = b"MOCK_JPEG_DATA";
         let kll_data = b"MOCK_SQLITE_KLL";
 
         SdrDeployer::deploy(
             &sdr_path,
             asin,
-            content_id,
+            Some(content_id),
             Some("EBOK"),
             Some(cover_data),
             Some(kll_data),
@@ -127,13 +127,13 @@ mod tests {
         // 1. Verify primary and alias .kll files
         assert!(sdr_path.join(format!("LanguageLayer.en.{}.kll", asin)).is_file());
         assert!(sdr_path.join(format!("LanguageLayer.en.B{}.kll", &asin[..9])).is_file());
-        assert!(sdr_path.join(format!("LanguageLayer.en.{}.kll", content_id.unwrap())).is_file());
+        assert!(sdr_path.join(format!("LanguageLayer.en.{}.kll", content_id)).is_file());
 
         // 2. Verify cover.jpg and thumbnails
         assert!(sdr_path.join("cover.jpg").is_file());
         assert!(sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", asin)).is_file());
         assert!(sdr_path.join(format!("thumbnail_{}_PDOC_portrait.jpg", asin)).is_file());
         assert!(sdr_path.join(format!("thumbnail_{}_portrait.jpg", asin)).is_file());
-        assert!(sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", content_id.unwrap())).is_file());
+        assert!(sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", content_id)).is_file());
     }
 }

@@ -29,6 +29,14 @@ pub struct KindleDeviceInfo {
     pub total_gb: f32,
 }
 
+/// Represents an unmounted Amazon Kindle hardware device detected via USB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmountedKindleUsb {
+    pub vendor_id: String,
+    pub product_id: String,
+    pub product_name: String,
+}
+
 /// Represents an e-book file stored on a Kindle device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindleBookFile {
@@ -260,8 +268,71 @@ impl KindleSync {
         "Kindle".to_string()
     }
 
+    /// On Linux, inspects `/sys/bus/usb/devices/` to detect any connected Amazon Kindle USB devices
+    /// (Vendor ID 0x1949 / Lab126) that are currently not mounted as a filesystem.
+    pub fn probe_unmounted_usb_kindle() -> Option<UnmountedKindleUsb> {
+        #[cfg(target_os = "linux")]
+        {
+            Self::probe_unmounted_usb_kindle_in(Path::new("/sys/bus/usb/devices"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    /// Parameterized helper to probe an arbitrary sysfs USB devices directory.
+    pub fn probe_unmounted_usb_kindle_in(usb_dir: &Path) -> Option<UnmountedKindleUsb> {
+        if !usb_dir.is_dir() {
+            return None;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(usb_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let vpath = p.join("idVendor");
+                if let Ok(v) = std::fs::read_to_string(&vpath)
+                    && v.trim().eq_ignore_ascii_case("1949")
+                {
+                    let product_id = std::fs::read_to_string(p.join("idProduct"))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    let product_name = std::fs::read_to_string(p.join("product"))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|_| "Kindle Device".to_string());
+                    return Some(UnmountedKindleUsb {
+                        vendor_id: "1949".to_string(),
+                        product_id,
+                        product_name,
+                    });
+                }
+            }
+        }
+        None
+    }
+
     /// Detects connected Kindle root directory and metadata (GVFS MTP or USB UMS mount).
     pub fn detect_device_info() -> Option<KindleDeviceInfo> {
+        // 0. Explicit environment variable overrides for headless servers / CI / Docker
+        if let Ok(custom_root) = std::env::var("KINDLE_ROOT").or_else(|_| std::env::var("KINDLE_MOUNT_PATH")) {
+            let root = PathBuf::from(custom_root);
+            if root.is_dir() {
+                let internal = root.join("Internal Storage");
+                let active_root = if internal.is_dir() { internal } else { root.clone() };
+                let doc_path = active_root.join("documents");
+                let final_docs = if doc_path.is_dir() { doc_path } else { active_root.clone() };
+                let model = Self::resolve_model_name(&active_root, &active_root.to_string_lossy());
+                let (used_gb, total_gb) = Self::get_storage_stats(&active_root).unwrap_or((12.4, 27.2));
+                return Some(KindleDeviceInfo {
+                    root: active_root,
+                    documents_dir: final_docs,
+                    model_name: model,
+                    used_gb,
+                    total_gb,
+                });
+            }
+        }
+
         // 1. Check GVFS MTP on Linux
         #[cfg(target_os = "linux")]
         {
@@ -348,6 +419,16 @@ impl KindleSync {
             }
             candidates.push(PathBuf::from("/media/Kindle"));
             candidates.push(PathBuf::from("/mnt/Kindle"));
+
+            // Headless / FUSE mount fallback candidates
+            if let Ok(home) = std::env::var("HOME") {
+                candidates.push(PathBuf::from(format!("{}/kindle", home)));
+                candidates.push(PathBuf::from(format!("{}/Kindle", home)));
+            }
+            candidates.push(PathBuf::from("/tmp/kindle"));
+            candidates.push(PathBuf::from("/tmp/kindle_mtp"));
+            candidates.push(PathBuf::from("/media/kindle"));
+            candidates.push(PathBuf::from("/mnt/kindle"));
 
             // Also inspect /proc/mounts to find any mounted filesystem labeled or pointing to Kindle
             if let Ok(mounts_content) = std::fs::read_to_string("/proc/mounts") {
@@ -1418,5 +1499,56 @@ mod tests {
 
         std::fs::write(&ver_file, b"Device Serial: B0131234567890AB").unwrap();
         assert_eq!(KindleSync::resolve_model_name(root, "/media/drew/Drive"), "Kindle Voyage");
+    }
+
+    #[test]
+    fn test_probe_unmounted_usb_kindle_mock_sysfs() {
+        let temp = tempfile::tempdir().unwrap();
+        let sys_usb = temp.path();
+
+        // 1. Initially empty directory -> None
+        assert!(KindleSync::probe_unmounted_usb_kindle_in(sys_usb).is_none());
+
+        // 2. Non-Amazon device (e.g. Google Pixel 18d1:4ee7) -> None
+        let dev1 = sys_usb.join("1-2.1");
+        std::fs::create_dir_all(&dev1).unwrap();
+        std::fs::write(dev1.join("idVendor"), b"18d1\n").unwrap();
+        std::fs::write(dev1.join("idProduct"), b"4ee7\n").unwrap();
+        std::fs::write(dev1.join("product"), b"Pixel 8\n").unwrap();
+        assert!(KindleSync::probe_unmounted_usb_kindle_in(sys_usb).is_none());
+
+        // 3. Amazon Kindle hardware (1949:0340) -> Detected!
+        let dev2 = sys_usb.join("1-2.2");
+        std::fs::create_dir_all(&dev2).unwrap();
+        std::fs::write(dev2.join("idVendor"), b"1949\n").unwrap();
+        std::fs::write(dev2.join("idProduct"), b"0340\n").unwrap();
+        std::fs::write(dev2.join("product"), b"Kindle Scribe\n").unwrap();
+
+        let detected = KindleSync::probe_unmounted_usb_kindle_in(sys_usb);
+        assert!(detected.is_some());
+        let info = detected.unwrap();
+        assert_eq!(info.vendor_id, "1949");
+        assert_eq!(info.product_id, "0340");
+        assert_eq!(info.product_name, "Kindle Scribe");
+    }
+
+    #[test]
+    fn test_detect_device_info_env_var_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("mock_kindle");
+        let docs = root.join("documents");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        // Set KINDLE_ROOT environment variable
+        unsafe { std::env::set_var("KINDLE_ROOT", &root) };
+
+        let info = KindleSync::detect_device_info();
+        // Clear environment variable
+        unsafe { std::env::remove_var("KINDLE_ROOT") };
+
+        assert!(info.is_some());
+        let dev = info.unwrap();
+        assert_eq!(dev.root, root);
+        assert_eq!(dev.documents_dir, docs);
     }
 }
