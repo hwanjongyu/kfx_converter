@@ -166,6 +166,94 @@ impl WordWiseBuilder {
         self.glosses.len()
     }
 
+    /// Applies difficulty-first priority pacing across candidate glosses.
+    ///
+    /// Ensures:
+    /// 1. Higher-difficulty words (difficulty 1 > 2 > 3 > 4 > 5) are prioritized over easier words.
+    /// 2. If two words are within `min_distance`, the harder word wins (or earlier word if equal).
+    /// 3. In any `window_size` (default 800 chars), at most `max_glosses_per_window` (default 4) words are kept.
+    /// 4. Respects `min_difficulty`, `frontmatter_skip_chars`, and `max_total_glosses`.
+    pub fn filter_candidates_priority_paced(
+        candidates: &[WordWiseGloss],
+        pacing: &WordWisePacingConfig,
+    ) -> Vec<WordWiseGloss> {
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let mut valid: Vec<&WordWiseGloss> = candidates
+            .iter()
+            .filter(|c| {
+                c.difficulty >= pacing.min_difficulty && c.start >= pacing.frontmatter_skip_chars
+            })
+            .collect();
+
+        // Sort by priority:
+        // Primary: difficulty ASC (1 is highest priority / hardest, 5 is lowest / easiest)
+        // Secondary: start ASC (reading order)
+        valid.sort_by(|a, b| {
+            a.difficulty
+                .cmp(&b.difficulty)
+                .then_with(|| a.start.cmp(&b.start))
+        });
+
+        let mut selected = BTreeMap::new();
+
+        for candidate in valid {
+            if selected.len() >= pacing.max_total_glosses {
+                break;
+            }
+
+            let start = candidate.start;
+
+            // Check min_distance against closest neighbors in selected
+            let prev_close = selected
+                .range(..=start)
+                .next_back()
+                .is_some_and(|(&pos, _)| start.saturating_sub(pos) < pacing.min_distance);
+
+            let next_close = selected
+                .range(start..)
+                .next()
+                .is_some_and(|(&pos, _)| pos.saturating_sub(start) < pacing.min_distance);
+
+            if prev_close || next_close {
+                continue;
+            }
+
+            // Check sliding window density
+            let window_start = start.saturating_sub(pacing.window_size);
+            let window_end = start + pacing.window_size;
+
+            let in_vicinity: Vec<usize> = selected
+                .range(window_start..=window_end)
+                .map(|(&pos, _)| pos)
+                .collect();
+
+            let mut all_windows = in_vicinity;
+            all_windows.push(start);
+            all_windows.sort_unstable();
+
+            let mut window_violated = false;
+            for &anchor in &all_windows {
+                let count = all_windows
+                    .iter()
+                    .filter(|&&p| p >= anchor && p.saturating_sub(anchor) < pacing.window_size)
+                    .count();
+                if count > pacing.max_glosses_per_window {
+                    window_violated = true;
+                    break;
+                }
+            }
+
+            if !window_violated {
+                selected.insert(start, candidate.clone());
+            }
+        }
+
+        selected.into_values().collect()
+    }
+
     /// Extracts tokens and populates Word Wise glosses directly from a BookIR document.
     pub fn generate_from_book(&mut self, book: &crate::ir::BookIR) -> usize {
         let dict = super::dictionary::LemmaDictionary::new();
@@ -203,6 +291,7 @@ impl WordWiseBuilder {
         };
 
         let mut pid = 0usize;
+        let mut raw_candidates = Vec::new();
 
         for section in sections {
             // Section root element occupies 1 PID position in Yellowjacket position_id_map ($265)
@@ -230,13 +319,13 @@ impl WordWiseBuilder {
                         word_str.push(ch);
                     } else if let Some(start_c) = word_char_start.take() {
                         if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
-                            self.add_gloss_paced(
-                                pid + start_c,
-                                None,
+                            raw_candidates.push(WordWiseGloss {
+                                start: pid + start_c,
+                                end: None,
                                 difficulty,
                                 sense_id,
-                                false,
-                            );
+                                low_confidence: false,
+                            });
                         }
                         word_str.clear();
                     }
@@ -245,18 +334,29 @@ impl WordWiseBuilder {
 
                 if let Some(start_c) = word_char_start.take()
                     && let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
-                        self.add_gloss_paced(
-                            pid + start_c,
-                            None,
+                        raw_candidates.push(WordWiseGloss {
+                            start: pid + start_c,
+                            end: None,
                             difficulty,
                             sense_id,
-                            false,
-                        );
+                            low_confidence: false,
+                        });
                     }
 
                 let block_len = char_idx.max(1);
                 pid += block_len;
             }
+        }
+
+        let prioritized = Self::filter_candidates_priority_paced(&raw_candidates, &self.pacing);
+        for gloss in prioritized {
+            self.add_gloss(
+                gloss.start,
+                gloss.end,
+                gloss.difficulty,
+                gloss.sense_id,
+                gloss.low_confidence,
+            );
         }
 
         self.glosses.len() - initial_count
@@ -674,5 +774,73 @@ mod tests {
             .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count2, 2);
+    }
+
+    #[test]
+    fn test_word_wise_priority_pacing_retains_hard_words() {
+        let pacing = WordWisePacingConfig {
+            min_difficulty: 1,
+            target_difficulty: 5,
+            min_distance: 20,
+            max_glosses_per_window: 4,
+            window_size: 800,
+            frontmatter_skip_chars: 0,
+            max_total_glosses: 100,
+        };
+
+        // 4 easy words (Difficulty 5: grief, coffin, hesitate, download) appear earlier in the window,
+        // followed by a harder word (Difficulty 4: jaundiced).
+        let candidates = vec![
+            WordWiseGloss { start: 100, end: None, difficulty: 5, sense_id: 41273, low_confidence: false }, // grief
+            WordWiseGloss { start: 200, end: None, difficulty: 5, sense_id: 13689, low_confidence: false }, // coffin
+            WordWiseGloss { start: 300, end: None, difficulty: 5, sense_id: 5308, low_confidence: false },  // hesitate
+            WordWiseGloss { start: 400, end: None, difficulty: 5, sense_id: 28861, low_confidence: false }, // download
+            WordWiseGloss { start: 500, end: None, difficulty: 4, sense_id: 19346, low_confidence: false }, // jaundiced
+        ];
+
+        let selected = WordWiseBuilder::filter_candidates_priority_paced(&candidates, &pacing);
+
+        // Window quota is 4, so exactly 4 words must be selected.
+        assert_eq!(selected.len(), 4);
+
+        // Verify that the harder word `jaundiced` (start 500, diff 4) IS selected!
+        assert!(
+            selected.iter().any(|g| g.start == 500 && g.difficulty == 4),
+            "Expected harder word (diff 4, jaundiced) to be retained over diff 5 words!"
+        );
+
+        // Verify that the lowest-priority word `download` (start 400, diff 5) was dropped
+        assert!(
+            !selected.iter().any(|g| g.start == 400),
+            "Expected lowest-priority word (start 400, download) to be dropped when quota exceeded!"
+        );
+    }
+
+    #[test]
+    fn test_word_wise_priority_proximity_conflict() {
+        let pacing = WordWisePacingConfig {
+            min_difficulty: 1,
+            target_difficulty: 5,
+            min_distance: 20,
+            max_glosses_per_window: 4,
+            window_size: 800,
+            frontmatter_skip_chars: 0,
+            max_total_glosses: 100,
+        };
+
+        // Two words within 10 characters (less than min_distance = 20):
+        // Word 1: easy word (diff 5, start 100)
+        // Word 2: hard word (diff 2, start 110)
+        let candidates = vec![
+            WordWiseGloss { start: 100, end: None, difficulty: 5, sense_id: 41273, low_confidence: false },
+            WordWiseGloss { start: 110, end: None, difficulty: 2, sense_id: 1001, low_confidence: false },
+        ];
+
+        let selected = WordWiseBuilder::filter_candidates_priority_paced(&candidates, &pacing);
+
+        assert_eq!(selected.len(), 1);
+        // The harder word (start 110, diff 2) must win over the easier word (start 100, diff 5)
+        assert_eq!(selected[0].start, 110);
+        assert_eq!(selected[0].difficulty, 2);
     }
 }

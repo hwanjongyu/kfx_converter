@@ -64,7 +64,8 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("incredulous", 1, 32470), ("indistinct", 1, 2931), ("ingenuous", 1, 14362),
     ("inimical", 1, 2200), ("innovate", 1, 37825), ("insouciance", 1, 8071),
     ("instigate", 1, 9675), ("interminable", 1, 6624), ("inundate", 1, 22043),
-    ("invidious", 1, 16850), ("irresolute", 1, 18362), ("juxtapose", 1, 36183),
+    ("invidious", 1, 16850), ("irresolute", 1, 18362), ("jaundice", 1, 1306),
+    ("jaundiced", 1, 19346), ("juxtapose", 1, 36183),
     ("lachrymose", 1, 14195), ("laudable", 1, 14417), ("lectern", 1, 8634),
     ("lugubrious", 1, 858), ("malediction", 1, 78859), ("maverick", 1, 36779),
     ("mendacious", 1, 35829), ("misanthrope", 1, 29802), ("mischievous", 1, 4629),
@@ -239,7 +240,7 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("derive", 5, 12563), ("deter", 5, 6440), ("docile", 5, 13436),
     ("dormant", 5, 6990), ("download", 5, 28861), ("dubious", 5, 18148),
     ("endure", 5, 1197), ("genuine", 5, 21375), ("hesitate", 5, 5308),
-    ("hostile", 5, 14994), ("immense", 5, 7997), ("intense", 5, 22987),
+    ("hostile", 5, 14994), ("housewife", 5, 7958), ("immense", 5, 7997), ("intense", 5, 22987),
     ("persist", 5, 61561), ("provoke", 5, 69473), ("prudent", 5, 53379),
     ("pursue", 5, 68585), ("rational", 5, 54323), ("resemble", 5, 48774),
     ("restrain", 5, 62551), ("rhetoric", 5, 72759), ("sincere", 5, 52396),
@@ -411,6 +412,11 @@ mod tests {
         assert_eq!(res4, Some((1, 35386)));
         let res5 = dict.lookup("ameliorate's", 3);
         assert_eq!(res5, Some((1, 35386)));
+
+        // 7. Verify curated difficulty calibrations for jaundiced and housewife
+        assert_eq!(dict.lookup("jaundiced", 3), Some((1, 19346)));
+        assert_eq!(dict.lookup("jaundice", 3), Some((1, 1306)));
+        assert_eq!(dict.lookup("housewife", 3), Some((5, 7958)));
     }
 
     #[test]
