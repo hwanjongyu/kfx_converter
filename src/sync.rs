@@ -468,14 +468,15 @@ impl KindleSync {
             ));
         }
 
-        if let Some(root) = allowed_root
-            && let (Ok(canon_root), Ok(canon_target)) = (root.canonicalize(), full_path.canonicalize())
-            && !canon_target.starts_with(&canon_root)
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("Target path {:?} is outside allowed directory {:?}", full_path, root),
-            ));
+        if let Some(root) = allowed_root {
+            let canon_root = root.canonicalize()?;
+            let canon_target = full_path.canonicalize()?;
+            if !canon_target.starts_with(&canon_root) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Target path {:?} is outside allowed directory {:?}", full_path, root),
+                ));
+            }
         }
 
         if full_path.is_file() {
@@ -488,7 +489,10 @@ impl KindleSync {
         let file_stem = full_path.file_stem().unwrap_or_default().to_string_lossy();
         if let Some(parent) = full_path.parent() {
             let sdr_path = parent.join(format!("{}.sdr", file_stem));
-            if sdr_path.is_dir() && sdr_path.extension().and_then(|e| e.to_str()) == Some("sdr") {
+            if sdr_path.is_dir()
+                && !sdr_path.is_symlink()
+                && sdr_path.extension().and_then(|e| e.to_str()) == Some("sdr")
+            {
                 let _ = std::fs::remove_dir_all(&sdr_path);
             }
         }
@@ -682,6 +686,20 @@ impl KindleSync {
                 }
             }
         }
+
+        // Flush dirty OS page cache to physical storage before reporting completion,
+        // preventing truncated files and Kindle .bad_file markers on USB disconnect.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            if let Ok(root_file) = std::fs::File::open(device_root) {
+                let _ = unsafe { libc::syncfs(root_file.as_raw_fd()) };
+            } else {
+                unsafe { libc::sync() };
+            }
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        unsafe { libc::sync() };
 
         // Final settle delay to ensure all FAT directory transactions are safely buffered
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1203,6 +1221,11 @@ mod tests {
         let res = KindleSync::delete_book_file_safe(Some(&docs), &outside_book);
         assert!(res.is_err());
         assert!(outside_book.exists()); // must not be deleted
+
+        // 4. Fail-closed: non-existent file path outside root must return error
+        let non_existent = outside_dir.join("NonExistent.kfx");
+        let res_missing = KindleSync::delete_book_file_safe(Some(&docs), &non_existent);
+        assert!(res_missing.is_err(), "Missing file with allowed_root must fail closed");
     }
 
     #[test]

@@ -171,21 +171,40 @@ impl WordWiseBuilder {
         let dict = super::dictionary::LemmaDictionary::new();
         let initial_count = self.glosses.len();
 
-        let mut temp_book = crate::ir::BookIR {
-            metadata: book.metadata.clone(),
-            resources: book.resources.clone(),
-            sections: book.sections.clone(),
-            ..Default::default()
+        let mut temp_sections;
+        let sections: &[crate::ir::Section] = if let Some(cover_res_id) = book.resolve_cover_resource_id() {
+            let first_is_cover = book.sections.first().map(|s| {
+                s.blocks.iter().any(|b| match b {
+                    crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                    _ => false,
+                })
+            }).unwrap_or(false);
+
+            if !first_is_cover {
+                temp_sections = book.sections.clone();
+                let cover_section = crate::ir::Section {
+                    id: "cover".to_string(),
+                    title: "Cover".to_string(),
+                    blocks: vec![crate::ir::Block::Image {
+                        id: "cover_img_block".to_string(),
+                        resource_id: cover_res_id,
+                        alt: Some("Cover".to_string()),
+                        width: None,
+                        height: None,
+                    }],
+                };
+                temp_sections.insert(0, cover_section);
+                &temp_sections
+            } else {
+                &book.sections
+            }
+        } else {
+            &book.sections
         };
-        temp_book.fragment_large_sections(
-            crate::ir::DEFAULT_MAX_SECTION_CHARS,
-            crate::ir::DEFAULT_MAX_SECTION_BLOCKS,
-        );
-        temp_book.ensure_cover_section();
 
         let mut pid = 0usize;
 
-        for section in &temp_book.sections {
+        for section in sections {
             // Section root element occupies 1 PID position in Yellowjacket position_id_map ($265)
             pid += 1;
 
@@ -295,12 +314,12 @@ impl WordWiseBuilder {
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
 
-             CREATE TABLE metadata (
+             CREATE TABLE IF NOT EXISTS metadata (
                  key TEXT,
                  value TEXT
              );
 
-             CREATE TABLE glosses (
+             CREATE TABLE IF NOT EXISTS glosses (
                  start INTEGER PRIMARY KEY,
                  end INTEGER,
                  difficulty INTEGER,

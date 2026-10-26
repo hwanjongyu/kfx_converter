@@ -78,19 +78,34 @@ impl<'a> KfxPackager<'a> {
 
         let book_id = generate_book_id(&seed);
 
-        let mut temp_book = BookIR {
-            metadata: book.metadata.clone(),
-            resources: book.resources.clone(),
-            sections: book.sections.clone(),
-            toc: book.toc.clone(),
-            page_list: book.page_list.clone(),
-            ..Default::default()
-        };
-        temp_book.ensure_cover_section();
-        let sections = temp_book.sections;
+        let mut sections = book.sections.clone();
+        let toc = book.toc.clone();
+        let page_list = book.page_list.clone();
 
-        let toc = temp_book.toc;
-        let page_list = temp_book.page_list;
+        // Ensure dedicated cover section at index 0 without cloning heavy resource maps
+        if let Some(cover_res_id) = book.resolve_cover_resource_id() {
+            let first_is_cover = sections.first().map(|s| {
+                s.blocks.iter().any(|b| match b {
+                    crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                    _ => false,
+                })
+            }).unwrap_or(false);
+
+            if !first_is_cover {
+                let cover_section = Section {
+                    id: "cover".to_string(),
+                    title: "Cover".to_string(),
+                    blocks: vec![crate::ir::Block::Image {
+                        id: "cover_img_block".to_string(),
+                        resource_id: cover_res_id,
+                        alt: Some("Cover".to_string()),
+                        width: None,
+                        height: None,
+                    }],
+                };
+                sections.insert(0, cover_section);
+            }
+        }
 
         Self {
             book,

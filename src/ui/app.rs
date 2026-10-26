@@ -364,7 +364,11 @@ impl KindleStudio {
                         super::state::convert_epub_file(&target_path, &s, &d, None::<fn(f32, &str)>)
                     }).await;
 
+                    let cancel_check = cancel.clone();
                     let _ = this.update(cx, |this, cx| {
+                        if cancel_check.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
                         if let Some(ref mut bp) = this.folder_state.batch_progress {
                             bp.active_tasks = bp.active_tasks.saturating_sub(1);
                             if res.is_ok() {
@@ -1815,6 +1819,7 @@ impl KindleStudio {
                     .cursor_pointer()
                     .child("⚡ Convert")
                     .on_click(move |_ev, _window, cx| {
+                        cx.stop_propagation();
                         view_quick.update(cx, |this, cx| {
                             this.convert_single_epub(p.clone(), false, cx);
                         }).ok();

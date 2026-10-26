@@ -331,14 +331,14 @@ impl<'a> KfxPreflightValidator<'a> {
                             }
                         }
 
-                        // $429 = style reference in storylines -> symbol referencing $157 (style)
-                        429 => {
+                        // $157 = style reference in storylines / elements, $429 = backdrop_style -> symbol referencing $157 (style)
+                        157 | 429 => {
                             if let IonValue::Symbol(target_sym) = fval
                                 && !entity_map.contains_key(&(157, *target_sym)) {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
-                                        field_id: 429,
+                                        field_id: *fid,
                                         field_name: "style".to_string(),
                                         target_sym: *target_sym,
                                         target_name: self.resolve_symbol_name(*target_sym),
@@ -661,6 +661,35 @@ mod tests {
                 assert_eq!(field_id, 165);
             }
             _ => panic!("Expected IllegalField error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_validator_catches_missing_style_fragment() {
+        let mut symbols = LocalSymbols::new();
+        let story_sym = symbols.intern("story_main");
+        let dangling_style_sym = symbols.intern("style_dangling");
+
+        // Storyline entity with field 157 (style) pointing to an unmapped style symbol
+        let mut w_story = IonWriter::new();
+        w_story.write_bvm();
+        w_story.write_value(&IonValue::Struct(vec![
+            (157, IonValue::Symbol(dangling_style_sym)), // field 157 referencing missing style $157
+        ]));
+
+        let entities = vec![
+            KfxEntity { entity_id: story_sym, chunk_type: 259, data: w_story.into_bytes() },
+        ];
+
+        let validator = KfxPreflightValidator::new(&entities, Some(&symbols));
+        let err = validator.validate().unwrap_err();
+        match err {
+            ValidationError::MissingFragment { field_id, target_sym, expected_chunk, .. } => {
+                assert_eq!(field_id, 157);
+                assert_eq!(target_sym, dangling_style_sym);
+                assert_eq!(expected_chunk, 157);
+            }
+            _ => panic!("Expected MissingFragment for style, got {:?}", err),
         }
     }
 }

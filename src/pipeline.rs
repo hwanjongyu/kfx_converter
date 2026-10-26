@@ -100,10 +100,7 @@ impl ConversionPipeline {
             cb(0.1, "Reading and validating EPUB archive...");
         }
         let mut ir = EpubReader::read_from_file(&input_path)?;
-        ir.fragment_large_sections(
-            crate::ir::DEFAULT_MAX_SECTION_CHARS,
-            crate::ir::DEFAULT_MAX_SECTION_BLOCKS,
-        );
+        ir.normalize();
         let book_title = ir.metadata.title.clone();
         let creators = ir.metadata.creators.clone();
         let sections_count = ir.sections.len();

@@ -595,6 +595,14 @@ impl BookIR {
             })
     }
 
+    /// Normalizes the intermediate representation by fragmenting oversized sections
+    /// and ensuring a dedicated cover section exists at index 0 if a cover image is present.
+    /// This guarantees deterministic section ordering and PID alignment across packager and Word Wise.
+    pub fn normalize(&mut self) {
+        self.fragment_large_sections(DEFAULT_MAX_SECTION_CHARS, DEFAULT_MAX_SECTION_BLOCKS);
+        self.ensure_cover_section();
+    }
+
     /// Ensures that if a cover image resource exists, the book has a dedicated cover section at index 0.
     /// This guarantees that section indexing and Yellowjacket PID maps ($265) are deterministic
     /// across both `KfxPackager` and `WordWiseBuilder`.
@@ -669,6 +677,41 @@ mod tests {
         assert_eq!(book.sections[2].id, "sec_1_p3");
         assert_eq!(book.sections[3].id, "sec_1_p4");
         assert_eq!(book.sections[0].blocks.len(), 5);
+    }
+
+    #[test]
+    fn test_ir_normalize_idempotent() {
+        let mut book = BookIR::default();
+        book.resources.insert("cover.jpg".to_string(), ResourceAsset {
+            id: "cover.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            data: vec![0u8; 10],
+        });
+        book.sections.push(Section {
+            id: "sec_1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Content".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }],
+        });
+
+        book.normalize();
+        assert_eq!(book.sections.len(), 2);
+        assert_eq!(book.sections[0].id, "cover");
+        assert_eq!(book.sections[1].id, "sec_1");
+
+        // Calling normalize again must be idempotent and not duplicate the cover section
+        book.normalize();
+        assert_eq!(book.sections.len(), 2);
+        assert_eq!(book.sections[0].id, "cover");
     }
 
     #[test]

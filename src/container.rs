@@ -204,7 +204,8 @@ impl KfxContainer {
         if buf.len() >= 10 && &buf[0..4] == KFX_ENTITY_MAGIC {
             let header_len = (&buf[6..10]).read_u32::<LittleEndian>()? as usize;
             if header_len <= buf.len() {
-                return Ok(buf[header_len..].to_vec());
+                buf.drain(..header_len);
+                return Ok(buf);
             } else {
                 return Err(ContainerError::CorruptedHeader(format!(
                     "ENTY chunk header length ({}) exceeds chunk buffer length ({})",
