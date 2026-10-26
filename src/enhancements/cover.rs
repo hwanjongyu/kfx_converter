@@ -29,6 +29,31 @@ pub enum CoverError {
 pub struct CoverOptimizer;
 
 impl CoverOptimizer {
+    /// Decodes an image with strict safety limits on dimensions and allocations (CWE-400 guard).
+    fn decode_with_safety_limits(data: &[u8]) -> Result<DynamicImage, CoverError> {
+        if let Some((w, h)) = Self::get_image_dimensions(data) {
+            if w > MAX_SAFE_IMAGE_DIMENSION
+                || h > MAX_SAFE_IMAGE_DIMENSION
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
+            {
+                return Err(CoverError::ImageTooLarge(w, h));
+            }
+        } else {
+            return Err(CoverError::Decode(image::ImageError::Decoding(
+                image::error::DecodingError::from_format_hint(image::error::ImageFormatHint::Unknown),
+            )));
+        }
+
+        let mut reader = image::ImageReader::new(Cursor::new(data))
+            .with_guessed_format()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_SAFE_IMAGE_DIMENSION);
+        limits.max_image_height = Some(MAX_SAFE_IMAGE_DIMENSION);
+        limits.max_alloc = Some(128 * 1024 * 1024);
+        reader.limits(limits);
+        Ok(reader.decode()?)
+    }
+
     /// Resizes down high-resolution content images exceeding max_dim (default 2560x2560) to protect
     /// Kindle devices with 512MB RAM from pmond OOM crashes, and re-encodes Progressive JPEGs
     /// (SOF2 marker 0xFFC2) to Baseline JPEG (SOF0) so Kindle's hardware decoder can render them.
@@ -40,16 +65,7 @@ impl CoverOptimizer {
         let is_jpeg = data.starts_with(b"\xff\xd8");
         let is_progressive_jpeg = is_jpeg && data.windows(2).any(|w| w == [0xff, 0xc2]);
 
-        // Pre-flight dimension check to prevent pixel flood decompression bombs (CWE-400)
-        if let Some((w, h)) = Self::get_image_dimensions(data)
-            && (w > MAX_SAFE_IMAGE_DIMENSION
-                || h > MAX_SAFE_IMAGE_DIMENSION
-                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS)
-        {
-            return Err(CoverError::ImageTooLarge(w, h));
-        }
-
-        let img = image::load_from_memory(data)?;
+        let img = Self::decode_with_safety_limits(data)?;
         let (w, h) = (img.width(), img.height());
 
         if w <= max_dim && h <= max_dim && !is_progressive_jpeg {
@@ -84,15 +100,7 @@ impl CoverOptimizer {
             return Err(CoverError::EmptyData);
         }
 
-        if let Some((w, h)) = Self::get_image_dimensions(data)
-            && (w > MAX_SAFE_IMAGE_DIMENSION
-                || h > MAX_SAFE_IMAGE_DIMENSION
-                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS)
-        {
-            return Err(CoverError::ImageTooLarge(w, h));
-        }
-
-        let img = image::load_from_memory(data)?;
+        let img = Self::decode_with_safety_limits(data)?;
         let (w, h) = (img.width(), img.height());
 
         let resized = if w > max_dim || h > max_dim {
@@ -127,16 +135,7 @@ impl CoverOptimizer {
             return Err(CoverError::EmptyData);
         }
 
-        // Pre-flight dimension check to prevent pixel flood decompression bombs (CWE-400)
-        if let Some((w, h)) = Self::get_image_dimensions(data)
-            && (w > MAX_SAFE_IMAGE_DIMENSION
-                || h > MAX_SAFE_IMAGE_DIMENSION
-                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS)
-        {
-            return Err(CoverError::ImageTooLarge(w, h));
-        }
-
-        let img = image::load_from_memory(data)?;
+        let img = Self::decode_with_safety_limits(data)?;
         let rgb_img = Self::to_rgb_with_white_bg(&img);
 
         // Resize down if larger than 440x660

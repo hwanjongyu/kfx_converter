@@ -517,10 +517,15 @@ impl<'a> IonReader<'a> {
 
     /// Decodes a single Ion value at current offset.
     pub fn decode_value(&mut self) -> Result<IonValue, IonError> {
+        self.decode_value_bounded(self.buf.len())
+    }
+
+    /// Decodes a single Ion value strictly bounded within `limit` bytes.
+    fn decode_value_bounded(&mut self, limit: usize) -> Result<IonValue, IonError> {
         if self.depth > Self::MAX_RECURSION_DEPTH {
             return Err(IonError::MalformedIon("Recursion depth limit exceeded".into()));
         }
-        if self.offset >= self.buf.len() {
+        if self.offset >= limit {
             return Err(IonError::UnexpectedEof(self.offset));
         }
 
@@ -548,8 +553,8 @@ impl<'a> IonReader<'a> {
         let payload_end = self
             .offset
             .checked_add(content_len)
-            .filter(|&end| end <= self.buf.len())
-            .ok_or(IonError::UnexpectedEof(self.buf.len()))?;
+            .filter(|&end| end <= limit)
+            .ok_or(IonError::UnexpectedEof(limit))?;
 
         let payload_start = self.offset;
 
@@ -709,10 +714,15 @@ impl<'a> IonReader<'a> {
                 self.depth += 1;
                 let mut items = Vec::new();
                 while self.offset < payload_end {
-                    items.push(self.decode_value()?);
+                    items.push(self.decode_value_bounded(payload_end)?);
                 }
                 self.depth -= 1;
-                self.offset = payload_end;
+                if self.offset != payload_end {
+                    return Err(IonError::MalformedIon(format!(
+                        "Ion container child values length mismatch: offset {} != end {}",
+                        self.offset, payload_end
+                    )));
+                }
                 IonValue::List(items)
             }
             0xD => {
@@ -721,11 +731,16 @@ impl<'a> IonReader<'a> {
                 let mut fields = Vec::new();
                 while self.offset < payload_end {
                     let field_id = decode_varuint(self.buf, &mut self.offset)? as u32;
-                    let field_val = self.decode_value()?;
+                    let field_val = self.decode_value_bounded(payload_end)?;
                     fields.push((field_id, field_val));
                 }
                 self.depth -= 1;
-                self.offset = payload_end;
+                if self.offset != payload_end {
+                    return Err(IonError::MalformedIon(format!(
+                        "Ion struct child values length mismatch: offset {} != end {}",
+                        self.offset, payload_end
+                    )));
+                }
                 IonValue::Struct(fields)
             }
             0xE => {
@@ -740,9 +755,14 @@ impl<'a> IonReader<'a> {
                     annotations.push(annot_id);
                 }
                 self.depth += 1;
-                let wrapped_val = self.decode_value()?;
+                let wrapped_val = self.decode_value_bounded(payload_end)?;
                 self.depth -= 1;
-                self.offset = payload_end;
+                if self.offset != payload_end {
+                    return Err(IonError::MalformedIon(format!(
+                        "Ion annotated child value length mismatch: offset {} != end {}",
+                        self.offset, payload_end
+                    )));
+                }
                 IonValue::Annotated(annotations, Box::new(wrapped_val))
             }
             _ => {
@@ -1112,5 +1132,19 @@ mod tests {
             }
             _ => panic!("Expected IonValue::Struct"),
         }
+    }
+
+    #[test]
+    fn test_ion_container_bounds_rejection() {
+        // Construct a list of declared length 5, but whose first child claims length 10
+        let malformed: [u8; 7] = [
+            0xB5, // List declaring 5 bytes of content
+            0x8A, // String declaring 10 bytes of content (exceeds parent list bounds!)
+            b'a', b'b', b'c', b'd', b'e',
+        ];
+
+        let mut reader = IonReader::new(&malformed);
+        let result = reader.decode_value();
+        assert!(result.is_err(), "Child element exceeding parent container bounds must return Err");
     }
 }

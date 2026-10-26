@@ -167,64 +167,16 @@ impl ConversionPipeline {
                 kll_bytes = Some(bytes);
             }
 
-            // Always deploy companion .sdr directory and .kll database alongside output_path
+            // Always deploy companion .sdr directory and sidecars alongside output_path
             let sdr_path = output_path.with_extension("sdr");
-            if std::fs::create_dir_all(&sdr_path).is_ok() {
-                let safe_asin = KindleSync::sanitize_asin(&asin);
-                let safe_cid = KindleSync::sanitize_asin(&content_id);
-
-                if let Some(ref kll) = kll_bytes {
-                    let kll_path = sdr_path.join(format!("LanguageLayer.en.{}.kll", safe_asin));
-                    let _ = std::fs::write(&kll_path, kll);
-                    // Also write 10-char canonical ASIN alias if safe_asin is 32-hex
-                    if safe_asin.len() >= 9 {
-                        let asin_10 = format!("B{}", &safe_asin[..9]);
-                        if asin_10 != safe_asin {
-                            let _ = std::fs::write(
-                                sdr_path.join(format!("LanguageLayer.en.{}.kll", asin_10)),
-                                kll,
-                            );
-                        }
-                    }
-                    // Also write fallback with content_id for dual-lookup compatibility
-                    if safe_cid != safe_asin && !safe_cid.is_empty() {
-                        let fallback_path =
-                            sdr_path.join(format!("LanguageLayer.en.{}.kll", safe_cid));
-                        let _ = std::fs::write(fallback_path, kll);
-                    }
-                }
-
-                // Write cover thumbnail aliases directly into the .sdr folder
-                if let Some(ref jpeg) = cover_jpeg {
-                    let _ = std::fs::write(sdr_path.join("cover.jpg"), jpeg);
-                    let _ = std::fs::write(
-                        sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", safe_asin)),
-                        jpeg,
-                    );
-                    let _ = std::fs::write(
-                        sdr_path.join(format!("thumbnail_{}_PDOC_portrait.jpg", safe_asin)),
-                        jpeg,
-                    );
-                    let _ = std::fs::write(
-                        sdr_path.join(format!("thumbnail_{}_portrait.jpg", safe_asin)),
-                        jpeg,
-                    );
-                    if safe_cid != safe_asin && !safe_cid.is_empty() {
-                        let _ = std::fs::write(
-                            sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", safe_cid)),
-                            jpeg,
-                        );
-                        let _ = std::fs::write(
-                            sdr_path.join(format!("thumbnail_{}_PDOC_portrait.jpg", safe_cid)),
-                            jpeg,
-                        );
-                        let _ = std::fs::write(
-                            sdr_path.join(format!("thumbnail_{}_portrait.jpg", safe_cid)),
-                            jpeg,
-                        );
-                    }
-                }
-            }
+            let _ = crate::enhancements::SdrDeployer::deploy(
+                &sdr_path,
+                &asin,
+                Some(&content_id),
+                Some(&options.content_type),
+                cover_jpeg.as_deref(),
+                kll_bytes.as_deref(),
+            );
         }
 
         // 5. Automatic Device Sync if enabled or if destination is inside a Kindle drive

@@ -261,7 +261,10 @@ impl KindleSync {
         {
             use std::os::unix::io::AsRawFd;
             if let Ok(file) = std::fs::File::open(root) {
-                unsafe { libc::syncfs(file.as_raw_fd()) };
+                let ret = unsafe { libc::syncfs(file.as_raw_fd()) };
+                if ret != 0 {
+                    return Err(SyncError::Io(std::io::Error::last_os_error()));
+                }
             } else {
                 unsafe { libc::sync() };
             }
@@ -285,7 +288,13 @@ impl KindleSync {
                 } else {
                     &root_str
                 };
-                let _ = Command::new("gio").args(["mount", "-u", mtp_mount]).status();
+                let status = Command::new("gio").args(["mount", "-u", mtp_mount]).status();
+                if let Ok(s) = status && !s.success() {
+                    return Err(SyncError::GioFailed(format!(
+                        "Failed to unmount MTP Kindle device at {:?} (exit code {:?})",
+                        mtp_mount, s.code()
+                    )));
+                }
             } else {
                 let status = Command::new("gio").args(["mount", "-u"]).arg(root).status();
                 if status.is_err() || !status.unwrap().success() {
@@ -301,9 +310,16 @@ impl KindleSync {
                         None
                     });
                     if let Some(dev) = block_dev {
-                        let _ = Command::new("udisksctl").args(["unmount", "-b", &dev]).status();
-                    } else {
-                        let _ = Command::new("umount").arg(root).status();
+                        let udisks_status = Command::new("udisksctl").args(["unmount", "-b", &dev]).status();
+                        if udisks_status.is_err() || !udisks_status.unwrap().success() {
+                            let umount_status = Command::new("umount").arg(root).status();
+                            if let Ok(s) = umount_status && !s.success() {
+                                return Err(SyncError::GioFailed(format!(
+                                    "Failed to cleanly unmount Kindle device at {:?} (device may be busy, exit code {:?})",
+                                    root, s.code()
+                                )));
+                            }
+                        }
                     }
                 }
             }
@@ -623,69 +639,18 @@ impl KindleSync {
                 safe_title
             )));
         }
-        let _ = std::fs::create_dir_all(&sdr_dir);
-
-        if let Some(jpeg) = cover_jpeg {
-            let cde = cde_content_type.unwrap_or("EBOK");
-            let alt_cde = if cde == "EBOK" { "PDOC" } else { "EBOK" };
-            let _ = Self::write_bytes(&sdr_dir.join("cover.jpg"), jpeg);
-            let _ = Self::write_bytes(
-                &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_asin, cde)),
-                jpeg,
-            );
-            let _ = Self::write_bytes(
-                &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_asin, alt_cde)),
-                jpeg,
-            );
-            let _ = Self::write_bytes(
-                &sdr_dir.join(format!("thumbnail_{}_portrait.jpg", safe_asin)),
-                jpeg,
-            );
-            if let Some(cid) = content_id {
-                let safe_cid = Self::sanitize_asin(cid);
-                if safe_cid != safe_asin && !safe_cid.is_empty() {
-                    let _ = Self::write_bytes(
-                        &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_cid, cde)),
-                        jpeg,
-                    );
-                    let _ = Self::write_bytes(
-                        &sdr_dir.join(format!("thumbnail_{}_{}_portrait.jpg", safe_cid, alt_cde)),
-                        jpeg,
-                    );
-                    let _ = Self::write_bytes(
-                        &sdr_dir.join(format!("thumbnail_{}_portrait.jpg", safe_cid)),
-                        jpeg,
-                    );
-                }
-            }
-        }
+        // 3. Deploy companion .sdr folder, Word Wise sidecars, and thumbnails
+        let _ = crate::enhancements::SdrDeployer::deploy(
+            &sdr_dir,
+            &safe_asin,
+            content_id,
+            cde_content_type,
+            cover_jpeg,
+            kll_bytes,
+        );
 
         let purge_ww = kll_bytes.is_none();
         Self::clean_stale_sdr_files(&sdr_dir, Some(&safe_asin), purge_ww);
-
-        // 4. Sync Word Wise Sidecar (<Title>.sdr/LanguageLayer.en.{asin}.kll)
-        if let Some(kll) = kll_bytes {
-            let kll_path = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
-            let _ = Self::write_bytes(&kll_path, kll);
-            // Also write 10-char canonical ASIN alias if safe_asin is 32-hex
-            if safe_asin.len() >= 9 {
-                let asin_10 = format!("B{}", &safe_asin[..9]);
-                if asin_10 != safe_asin {
-                    let _ = Self::write_bytes(
-                        &sdr_dir.join(format!("LanguageLayer.en.{}.kll", asin_10)),
-                        kll,
-                    );
-                }
-            }
-            if let Some(cid) = content_id {
-                let safe_cid = Self::sanitize_asin(cid);
-                if safe_cid != safe_asin && !safe_cid.is_empty() {
-                    let fallback_path =
-                        sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_cid));
-                    let _ = Self::write_bytes(&fallback_path, kll);
-                }
-            }
-        }
 
         // Flush dirty OS page cache to physical storage before reporting completion,
         // preventing truncated files and Kindle .bad_file markers on USB disconnect.

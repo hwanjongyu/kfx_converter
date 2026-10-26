@@ -114,29 +114,33 @@ impl KfxContainer {
             0
         };
 
-        // If ContainerInfo is available at info_offset, check for exact bcIndexTabLength ($414: [0x03, 0x9e])
+        // If ContainerInfo is available at info_offset, decode it structurally to retrieve exact bcIndexTabLength ($414)
         if (info_offset as u64) + (info_length as u64) <= file_len && info_length > 0 {
             file.seek(SeekFrom::Start(info_offset as u64))?;
             let mut ci_bytes = vec![0u8; info_length as usize];
-            if file.read_exact(&mut ci_bytes).is_ok()
-                && let Some(pos) = ci_bytes.windows(2).position(|w| w == [0x03, 0x9e]) {
-                    let val_bytes = &ci_bytes[pos + 2..];
-                    if !val_bytes.is_empty() {
-                        let type_desc = val_bytes[0];
-                        if (type_desc & 0xf0) == 0x20 {
-                            let len = (type_desc & 0x0f) as usize;
-                            if len > 0 && len <= 8 && val_bytes.len() > len {
-                                let mut tab_len: u64 = 0;
-                                for b in &val_bytes[1..1 + len] {
-                                    tab_len = (tab_len << 8) | (*b as u64);
-                                }
-                                if tab_len > 0 && tab_len < index_tab_len as u64 {
-                                    index_tab_len = tab_len as usize;
+            if file.read_exact(&mut ci_bytes).is_ok() {
+                let mut reader = crate::ion::IonReader::new(&ci_bytes);
+                let struct_fields = match reader.decode_value() {
+                    Ok(IonValue::Struct(fields)) => Some(fields),
+                    Ok(IonValue::Annotated(_, val)) => match *val {
+                        IonValue::Struct(fields) => Some(fields),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(fields) = struct_fields {
+                    for (sid, val) in fields {
+                        if sid == 414 { // bcIndexTabLength
+                            if let IonValue::Int(len) = val {
+                                if len > 0 && (len as usize) < index_tab_len {
+                                    index_tab_len = len as usize;
                                 }
                             }
+                            break;
                         }
                     }
                 }
+            }
         }
 
         let chunk_count = index_tab_len / 24;
@@ -509,5 +513,46 @@ mod tests {
 
         // ContainerInfo starts after format_caps
         assert_eq!(ci_offset as usize, format_caps_offset + format_caps.len());
+    }
+
+    #[test]
+    fn test_container_open_structured_info_ignores_embedded_marker() {
+        // Construct a synthetic ContainerInfo Ion payload containing an embedded [0x03, 0x9e, 0x21, 0x01]
+        // in a preceding blob, followed by the true field 414 (bcIndexTabLength = 24).
+        let mut w_ci = IonWriter::new();
+        w_ci.write_bvm();
+        w_ci.write_value(&IonValue::Struct(vec![
+            (999, IonValue::Blob(vec![0x03, 0x9e, 0x21, 0x01])), // False-positive marker
+            (414, IonValue::Int(24)), // True bcIndexTabLength = 24 bytes (1 chunk)
+        ]));
+        let ci_bytes = w_ci.into_bytes();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"CONT");
+        data.write_u16::<LittleEndian>(2).unwrap(); // version
+        let header_len = 18 + 24 + ci_bytes.len() as u32 + 2;
+        data.write_u32::<LittleEndian>(header_len).unwrap();
+        data.write_u32::<LittleEndian>(18 + 24).unwrap(); // ci_offset
+        data.write_u32::<LittleEndian>(ci_bytes.len() as u32).unwrap(); // ci_length
+
+        // bcIndexTab (24 bytes for 1 chunk)
+        let mut chunk_entry = vec![0u8; 24];
+        (&mut chunk_entry[0..4]).copy_from_slice(&852u32.to_le_bytes()); // id
+        (&mut chunk_entry[4..6]).copy_from_slice(&145u16.to_le_bytes()); // type
+        (&mut chunk_entry[8..12]).copy_from_slice(&(header_len as u32).to_le_bytes()); // offset
+        (&mut chunk_entry[12..16]).copy_from_slice(&10u32.to_le_bytes()); // length
+        data.extend_from_slice(&chunk_entry);
+
+        // ContainerInfo
+        data.extend_from_slice(&ci_bytes);
+        data.extend_from_slice(b"[]");
+        // Payload (10 dummy bytes)
+        data.extend_from_slice(b"0123456789");
+
+        let mut tmp_file = tempfile::NamedTempFile::new().unwrap();
+        tmp_file.write_all(&data).unwrap();
+
+        let opened = KfxContainer::open(tmp_file.path()).unwrap();
+        assert_eq!(opened.chunks.len(), 1, "Must parse 1 chunk from field 414 despite preceding [0x03, 0x9e]");
     }
 }
