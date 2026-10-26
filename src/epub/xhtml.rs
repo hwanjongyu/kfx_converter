@@ -7,12 +7,11 @@ use quick_xml::Reader as XmlReader;
 
 use crate::css::CssStylesheet;
 use crate::epub::archive::decode_percent;
+use crate::epub::ruby::RubyState;
 use crate::ir::{Block, TextSpan};
 
-#[inline]
-pub fn is_opening_quote(c: char) -> bool {
-    matches!(c, '“' | '‘' | '"' | '\'' | '«' | '‹' | '「' | '『')
-}
+pub use crate::epub::dropcap::{finish_paragraph_dropcaps, is_opening_quote};
+pub use crate::epub::dropcap::finish_paragraph_dropcaps as finish_paragraph_spans;
 
 pub fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
     parse_xhtml_blocks_with_manifest(xhtml, &HashMap::new())
@@ -107,13 +106,7 @@ pub fn parse_xhtml_with_css(
     let mut current_footnote_text = String::new();
 
     // Ruby (Furigana) state
-    let mut in_ruby = false;
-    let mut in_rt = false;
-    let mut in_rp = false;
-    let mut ruby_bases: Vec<String> = Vec::new();
-    let mut ruby_rts: Vec<String> = Vec::new();
-    let mut current_base = String::new();
-    let mut current_rt = String::new();
+    let mut ruby = RubyState::new();
 
     // Style & Inline state
     let mut bold = false;
@@ -141,112 +134,6 @@ pub fn parse_xhtml_with_css(
     let mut pending_page_break = false;
     let mut ignore_depth = 0usize;
     let mut first_paragraph_seen = false;
-
-    let finish_paragraph_spans = |spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l2: bool| {
-        if spans.is_empty() {
-            return;
-        }
-
-        // Case A: An explicit dropcap span already exists (e.g. <span class="dropcap">“</span>).
-        // If it contains only an opening quotation mark, borrow the first character from the next non-empty span.
-        let explicit_dropcap_idx = spans.iter().position(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
-        if let Some(dc_idx) = explicit_dropcap_idx {
-            let dc_trimmed = spans[dc_idx].text.trim().to_string();
-            let mut dc_chars = dc_trimmed.chars();
-            if let Some(first_ch) = dc_chars.next()
-                && is_opening_quote(first_ch)
-                && dc_chars.next().is_none()
-            {
-                let next_pos = spans[dc_idx + 1..].iter().position(|s| !s.text.trim().is_empty()).map(|p| dc_idx + 1 + p);
-                if let Some(n_idx) = next_pos {
-                    let next_span = &mut spans[n_idx];
-                    let next_trimmed = next_span.text.trim_start();
-                    let mut next_chars = next_trimmed.chars();
-                    if let Some(second_ch) = next_chars.next() {
-                        let ch_len = second_ch.len_utf8();
-                        let remaining = next_trimmed[ch_len..].to_string();
-                        next_span.text = remaining;
-                        spans[dc_idx].text.push(second_ch);
-                        if let Some(ref mut st) = spans[dc_idx].style
-                            && !st.contains("dropcap_2")
-                        {
-                            st.push_str(" dropcap_2");
-                        }
-                    }
-                }
-            }
-            return;
-        }
-
-        // Case B: Automatic dropcap extraction from paragraph styling (e.g. <p class="has-dropcap">)
-        if p_dropcap
-            && let Some(first_idx) = spans.iter().position(|s| !s.text.trim().is_empty())
-        {
-            let trimmed = spans[first_idx].text.trim_start().to_string();
-            let leading_spaces = spans[first_idx].text.len() - trimmed.len();
-            let mut chars = trimmed.chars();
-            if let Some(first_ch) = chars.next() {
-                let is_quote = is_opening_quote(first_ch);
-                let (take_len, is_two_char) = if is_quote {
-                    if let Some(second_ch) = chars.next() {
-                        (first_ch.len_utf8() + second_ch.len_utf8(), true)
-                    } else {
-                        // Check next non-empty span for second character
-                        let next_pos = spans[first_idx + 1..].iter().position(|s| !s.text.trim().is_empty()).map(|p| first_idx + 1 + p);
-                        if let Some(n_idx) = next_pos {
-                            let next_span = &mut spans[n_idx];
-                            let next_trimmed = next_span.text.trim_start();
-                            let mut next_chars = next_trimmed.chars();
-                            if let Some(second_ch) = next_chars.next() {
-                                let ch_len = second_ch.len_utf8();
-                                let remaining = next_trimmed[ch_len..].to_string();
-                                next_span.text = remaining;
-                                spans[first_idx].text.push(second_ch);
-                                (first_ch.len_utf8() + second_ch.len_utf8(), true)
-                            } else {
-                                (first_ch.len_utf8(), false)
-                            }
-                        } else {
-                            (first_ch.len_utf8(), false)
-                        }
-                    }
-                } else {
-                    (first_ch.len_utf8(), false)
-                };
-
-                let first = &mut spans[first_idx];
-                let current_trimmed = first.text.trim_start();
-                let drop_text = format!("{}{}", &first.text[..leading_spaces], &current_trimmed[..take_len.min(current_trimmed.len())]);
-                let rest_text = if take_len <= current_trimmed.len() {
-                    current_trimmed[take_len..].to_string()
-                } else {
-                    String::new()
-                };
-                let orig_style = first.style.take();
-                let drop_tag = match (is_two_char, p_l2) {
-                    (true, true) => "dropcap_l2 dropcap_2",
-                    (false, true) => "dropcap_l2 dropcap",
-                    (true, false) => "dropcap_2",
-                    (false, false) => "dropcap",
-                };
-                let drop_style = match &orig_style {
-                    Some(s) => format!("{} {}", s, drop_tag),
-                    None => drop_tag.to_string(),
-                };
-                first.text = drop_text;
-                first.style = Some(drop_style);
-                if !rest_text.is_empty() {
-                    spans.insert(first_idx + 1, TextSpan {
-                        text: rest_text,
-                        style: orig_style,
-                        anchor_id: None,
-                        href: None,
-                        ruby: None,
-                    });
-                }
-            }
-        }
-    };
 
     // Table state
     let mut table_rows: Vec<Vec<String>> = Vec::new();
@@ -389,28 +276,10 @@ pub fn parse_xhtml_with_css(
                     match local_bytes {
                         b"ruby" => {
                             flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
-                            in_ruby = true;
-                            in_rt = false;
-                            in_rp = false;
-                            ruby_bases.clear();
-                            ruby_rts.clear();
-                            current_base.clear();
-                            current_rt.clear();
+                            ruby.start_ruby();
                         }
-                        b"rb" => {
-                            if !current_base.is_empty() {
-                                ruby_bases.push(std::mem::take(&mut current_base));
-                            }
-                        }
-                        b"rt" | b"rtc" => {
-                            in_rt = true;
-                            if !current_base.is_empty() {
-                                ruby_bases.push(std::mem::take(&mut current_base));
-                            }
-                            current_rt.clear();
-                        }
-                        b"rp" => {
-                            in_rp = true;
+                        b"rb" | b"rt" | b"rtc" | b"rp" => {
+                            ruby.on_start_tag(local_bytes);
                         }
                         b"div" | b"section" | b"article" | b"main" | b"aside" => {
                             if in_p {
@@ -811,17 +680,11 @@ pub fn parse_xhtml_with_css(
             Ok(Event::Text(ref e)) => {
                 if ignore_depth == 0 {
                     let text = e.unescape().unwrap_or_default();
-                    if in_ruby {
-                        if in_rp {
-                            // Discard fallback parentheses (<rp>(</rp>) so they don't render alongside ruby annotations
-                        } else if in_rt {
-                            current_rt.push_str(&text);
-                        } else {
-                            current_base.push_str(&text);
-                            if footnote_depth > 0 {
-                                current_footnote_text.push_str(&text);
-                            }
+                    if ruby.in_ruby {
+                        if !ruby.in_rp && !ruby.in_rt && footnote_depth > 0 {
+                            current_footnote_text.push_str(&text);
                         }
+                        ruby.handle_text(&text);
                     } else {
                         if footnote_depth > 0 {
                             current_footnote_text.push_str(&text);
@@ -867,29 +730,11 @@ pub fn parse_xhtml_with_css(
                         }
                     }
                     match local_bytes {
-                        b"rt" | b"rtc" => {
-                            in_rt = false;
-                            if !current_rt.is_empty() {
-                                ruby_rts.push(std::mem::take(&mut current_rt));
-                            }
-                        }
-                        b"rp" => {
-                            in_rp = false;
-                        }
-                        b"rb" => {
-                            if !current_base.is_empty() {
-                                ruby_bases.push(std::mem::take(&mut current_base));
-                            }
+                        b"rt" | b"rtc" | b"rp" | b"rb" => {
+                            ruby.on_end_tag(local_bytes);
                         }
                         b"ruby" => {
-                            in_ruby = false;
-                            if !current_base.is_empty() {
-                                ruby_bases.push(std::mem::take(&mut current_base));
-                            }
-                            if !current_rt.is_empty() {
-                                ruby_rts.push(std::mem::take(&mut current_rt));
-                            }
-
+                            ruby.on_end_tag(b"ruby");
                             let mut style_parts = Vec::new();
                             if bold { style_parts.push("bold"); }
                             if italic { style_parts.push("italic"); }
@@ -901,59 +746,7 @@ pub fn parse_xhtml_with_css(
                             if let Some(ref s) = current_style { style_parts.push(s.as_str()); }
                             let base_style = if style_parts.is_empty() { None } else { Some(style_parts.join(" ")) };
 
-                            if ruby_bases.len() == ruby_rts.len() {
-                                for (b, r) in ruby_bases.drain(..).zip(ruby_rts.drain(..)) {
-                                    if !b.is_empty() {
-                                        current_spans.push(TextSpan {
-                                            text: b,
-                                            style: base_style.clone(),
-                                            anchor_id: current_anchor.clone(),
-                                            href: current_href.clone(),
-                                            ruby: if r.is_empty() { None } else { Some(r) },
-                                        });
-                                    }
-                                }
-                            } else if ruby_rts.len() == 1 {
-                                let b = ruby_bases.join("");
-                                let r = ruby_rts.pop().unwrap_or_default();
-                                if !b.is_empty() {
-                                    current_spans.push(TextSpan {
-                                        text: b,
-                                        style: base_style.clone(),
-                                        anchor_id: current_anchor.clone(),
-                                        href: current_href.clone(),
-                                        ruby: if r.is_empty() { None } else { Some(r) },
-                                    });
-                                }
-                            } else if ruby_rts.is_empty() {
-                                for b in ruby_bases.drain(..) {
-                                    if !b.is_empty() {
-                                        current_spans.push(TextSpan {
-                                            text: b,
-                                            style: base_style.clone(),
-                                            anchor_id: current_anchor.clone(),
-                                            href: current_href.clone(),
-                                            ruby: None,
-                                        });
-                                    }
-                                }
-                            } else {
-                                let b = ruby_bases.join("");
-                                let r = ruby_rts.join("");
-                                if !b.is_empty() {
-                                    current_spans.push(TextSpan {
-                                        text: b,
-                                        style: base_style.clone(),
-                                        anchor_id: current_anchor.clone(),
-                                        href: current_href.clone(),
-                                        ruby: if r.is_empty() { None } else { Some(r) },
-                                    });
-                                }
-                            }
-                            ruby_bases.clear();
-                            ruby_rts.clear();
-                            current_base.clear();
-                            current_rt.clear();
+                            ruby.emit_spans(base_style, &current_anchor, &current_href, &mut current_spans);
                         }
                         b"p" | b"blockquote" | b"center" | b"div" | b"section" | b"article" | b"main" | b"aside" => {
                             if in_p {
@@ -1137,218 +930,5 @@ pub fn parse_xhtml_with_css(
 
 /// Parses and sanitizes CSS style strings:
 /// - Extracts text-align: left, center, right, justify
-/// - Extracts text-decoration: line-through, underline
-/// - Strips hardcoded pure black colors (#000000, #000, black, rgb(0,0,0)) for dark mode safety
-/// - Extracts font-style (italic/oblique), font-weight (bold/600+), font-size (bucketed
-///   `font_size_*` tokens), and float+large-size drop caps
-/// - Applies CSS last-wins semantics: a later declaration of the same property overrides
-///   earlier ones (so cascaded stylesheet rules followed by inline styles resolve correctly)
-/// - Returns a list of standardized style tokens (e.g. ["align_center", "strike"])
-pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
-    // 1. Last-wins merge of declarations, preserving first-seen order of properties
-    let mut merged: Vec<(std::borrow::Cow<'static, str>, String)> = Vec::new();
-    for declaration in style_str.split(';') {
-        let decl = declaration.trim();
-        if decl.is_empty() {
-            continue;
-        }
-        if let Some((prop, val)) = decl.split_once(':') {
-            let p_trim = prop.trim();
-            if p_trim.is_empty() {
-                continue;
-            }
-            let p_lc = p_trim.to_ascii_lowercase();
-            let p = crate::css::intern_css_property(&p_lc);
-            let v = val.trim().trim_end_matches("!important").trim().to_ascii_lowercase();
-            if let Some(existing) = merged.iter_mut().find(|(k, _)| *k == p) {
-                existing.1 = v;
-            } else {
-                merged.push((p, v));
-            }
-        }
-    }
+pub use crate::epub::css_style::sanitize_css_style;
 
-    let mut tokens = Vec::new();
-    let mut floated = false;
-    let mut size_ratio: Option<f64> = None;
-    let mut has_negative_margin = false;
-    for (p, v) in &merged {
-        {
-            let p = p.as_ref();
-            let v = v.as_str();
-
-            match p {
-                "font-style" => {
-                    if v.contains("italic") || v.contains("oblique") {
-                        tokens.push("italic".to_string());
-                    }
-                }
-                "font-weight" => {
-                    let numeric_bold = v.parse::<u32>().is_ok_and(|w| w >= 600);
-                    if v.contains("bold") || numeric_bold {
-                        tokens.push("bold".to_string());
-                    }
-                }
-                "font-size" => {
-                    size_ratio = crate::css::font_size_ratio(v);
-                }
-                "float" => {
-                    floated = v == "left" || v == "right";
-                }
-                "text-align" => {
-                    if v.contains("center") {
-                        tokens.push("align_center".to_string());
-                    } else if v.contains("right") {
-                        tokens.push("align_right".to_string());
-                    } else if v.contains("justify") {
-                        tokens.push("align_justify".to_string());
-                    } else if v.contains("left") {
-                        tokens.push("align_left".to_string());
-                    }
-                }
-                "text-indent" => {
-                    let trimmed = v.trim();
-                    if trimmed == "0" || trimmed == "0em" || trimmed == "0px" || trimmed == "0%" || trimmed == "0pt" {
-                        tokens.push("indent_none".to_string());
-                    } else if trimmed.starts_with('-') {
-                        tokens.push("hanging_indent".to_string());
-                    }
-                }
-                "margin-left" => {
-                    if v.contains('%') {
-                        let num: f64 = v.trim_end_matches('%').trim().parse().unwrap_or(0.0);
-                        if num >= 5.0 {
-                            tokens.push("indented_block".to_string());
-                        }
-                    } else if v.ends_with("em") {
-                        let num: f64 = v.trim_end_matches("em").trim().parse().unwrap_or(0.0);
-                        if num >= 1.0 {
-                            tokens.push("indented_block".to_string());
-                        }
-                    }
-                }
-                "margin" => {
-                    let parts: Vec<&str> = v.split_whitespace().collect();
-                    let lr_val = if parts.len() == 2 || parts.len() == 3 {
-                        parts.get(1).copied()
-                    } else if parts.len() == 4 {
-                        parts.get(3).copied()
-                    } else {
-                        None
-                    };
-                    if let Some(lr) = lr_val {
-                        if lr.ends_with('%') {
-                            let num: f64 = lr.trim_end_matches('%').trim().parse().unwrap_or(0.0);
-                            if num >= 5.0 {
-                                tokens.push("indented_block".to_string());
-                            }
-                        } else if lr.ends_with("em") {
-                            let num: f64 = lr.trim_end_matches("em").trim().parse().unwrap_or(0.0);
-                            if num >= 1.0 {
-                                tokens.push("indented_block".to_string());
-                            }
-                        }
-                    }
-                    if v.contains('-') {
-                        let bytes = v.as_bytes();
-                        for i in 0..bytes.len() {
-                            if bytes[i] == b'-' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.') {
-                                has_negative_margin = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                "margin-top" | "margin-bottom" => {
-                    if v.contains('-') {
-                        let bytes = v.as_bytes();
-                        for i in 0..bytes.len() {
-                            if bytes[i] == b'-' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.') {
-                                has_negative_margin = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                "text-decoration" | "text-decoration-line" => {
-                    if v.contains("line-through") {
-                        tokens.push("strike".to_string());
-                    }
-                    if v.contains("underline") {
-                        tokens.push("underline".to_string());
-                    }
-                }
-                "vertical-align" => {
-                    if v.contains("super") {
-                        tokens.push("sup".to_string());
-                    } else if v.contains("sub") {
-                        tokens.push("sub".to_string());
-                    }
-                }
-                "color" => {
-                    // Dark mode safety: filter out pure black color values
-                    let is_pure_black = v == "#000000"
-                        || v == "#000"
-                        || v == "black"
-                        || v.replace(' ', "") == "rgb(0,0,0)"
-                        || v.replace(' ', "") == "rgba(0,0,0,1)";
-                    if !is_pure_black {
-                        tokens.push(format!("color_{}", v.replace(['#', ' ', '(', ')', ','], "_")));
-                    }
-                }
-                "page-break-before" | "break-before" => {
-                    if v.contains("page") || v.contains("always") {
-                        tokens.push("page_break_before".to_string());
-                    }
-                }
-                "page-break-after" | "break-after" => {
-                    if v.contains("page") || v.contains("always") {
-                        tokens.push("page_break_after".to_string());
-                    }
-                }
-                "font-variant" | "font-variant-caps" => {
-                    if v.contains("small-caps") {
-                        tokens.push("small_caps".to_string());
-                    }
-                }
-                "text-transform" => {
-                    if v.contains("uppercase") {
-                        tokens.push("uppercase".to_string());
-                    } else if v.contains("lowercase") {
-                        tokens.push("lowercase".to_string());
-                    }
-                }
-                "initial-letter" => {
-                    if v.starts_with('2') {
-                        tokens.push("dropcap_l2".to_string());
-                    }
-                    tokens.push("dropcap".to_string());
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // 2. Post-processing: drop caps & font-size buckets
-    let is_sup_sub = tokens.iter().any(|t| t == "sup" || t == "sub");
-    match size_ratio {
-        // InDesign/Calibre drop caps: floated span with a large initial letter
-        Some(r) if floated && r >= 1.5 => {
-            let is_2_lines = has_negative_margin || (1.5..=3.2).contains(&r);
-            if is_2_lines {
-                tokens.push("dropcap_l2".to_string());
-            }
-            if !tokens.iter().any(|t| t == "dropcap") {
-                tokens.push("dropcap".to_string());
-            }
-        }
-        // sup/sub already shrink the glyphs; avoid double-scaling
-        Some(r) if !is_sup_sub && !tokens.iter().any(|t| t.starts_with("dropcap")) => {
-            if let Some(tok) = crate::css::font_size_token(r) {
-                tokens.push(tok.to_string());
-            }
-        }
-        _ => {}
-    }
-    tokens
-}

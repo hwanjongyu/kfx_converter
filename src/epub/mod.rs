@@ -14,8 +14,11 @@ use crate::css::CssStylesheet;
 use crate::ir::{Block, BookIR, BookMetadata, PageEntry, ResourceAsset, Section, TocItem};
 
 pub mod archive;
+pub mod css_style;
+pub mod dropcap;
 pub mod nav;
 pub mod opf;
+pub mod ruby;
 pub mod xhtml;
 
 pub use archive::*;
