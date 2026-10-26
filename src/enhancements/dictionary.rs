@@ -342,17 +342,31 @@ impl LemmaDictionary {
         for suffix in &["ed", "ing", "ly", "es", "s"] {
             if clean.ends_with(suffix) {
                 let stem = &clean[..clean.len() - suffix.len()];
-                if stem.len() >= min_word_len
-                    && let Some(&res) = vocab.get(stem) {
-                        return Some(res);
-                    }
-                // Try with trailing 'e' (e.g. "ameliorating" -> "ameliorat" -> "ameliorate")
+
+                // English Orthography Guard:
+                // Regular English verbs/adjectives with a short stem (<= 3 letters) ending in a single consonant
+                // NEVER take -ed, -ing, or -ly directly without doubling the consonant (e.g. hop -> hopped).
+                // Words like "lived", "hoped", "cared", "faded" come from base words ending in 'e' (live, hope, care, fade),
+                // so matching a bare 3-letter stem ("liv", "hop", "car", "fad") is an orthographic impossibility and
+                // causes false-positive collisions with unrelated short nouns or Roman numerals.
+                let allow_bare_stem = match *suffix {
+                    "ed" | "ing" | "ly" => stem.len() >= 4,
+                    _ => stem.len() >= min_word_len,
+                };
+
+                // Try with trailing 'e' first (e.g. "ameliorating" -> "ameliorate", "roped" -> "rope")
                 let with_e = format!("{}e", stem);
                 if with_e.len() >= min_word_len
                     && let Some(&res) = vocab.get(with_e.as_str()) {
                         return Some(res);
                     }
-                // Doubled consonant (e.g. "compelled" -> "compel")
+
+                if allow_bare_stem
+                    && let Some(&res) = vocab.get(stem) {
+                        return Some(res);
+                    }
+
+                // Doubled consonant (e.g. "compelled" -> "compel", "hopped" -> "hop")
                 if stem.len() > 2 {
                     let bytes = stem.as_bytes();
                     if bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
@@ -418,6 +432,14 @@ mod tests {
         assert_eq!(dict.lookup("jaundice", 3), Some((1, 1306)));
         assert_eq!(dict.lookup("housewife", 3), Some((5, 7958)));
         assert_eq!(dict.lookup("endocrine", 3), Some((2, 79933)));
+
+        // 8. English orthography guard against spurious 3-letter suffix stripping
+        // e.g. "lived" must NOT stem to Roman numeral "liv", "faded" to "fad", "hoped" to "hop"
+        assert_eq!(dict.lookup("lived", 3), None);
+        assert_eq!(dict.lookup("Lived", 3), None);
+        assert_eq!(dict.lookup("faded", 3), None);
+        assert_eq!(dict.lookup("hoped", 3), None);
+        assert_eq!(dict.lookup("cared", 3), None);
     }
 
     #[test]

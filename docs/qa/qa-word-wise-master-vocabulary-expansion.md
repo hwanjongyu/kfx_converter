@@ -14,7 +14,10 @@
 - **Curation Overrides & Priority Integration:**
   - Registered `("endocrine", 2, 79933)` in `BUILTIN_VOCABULARY` in `src/enhancements/dictionary.rs`.
   - Upgraded `parse_builtin_and_ground_truth_vocab()` initial HashMap allocation capacity to 55,000 entries.
-- **Verification Suite:**
+- **Morphological Orthography Guard:**
+  - Implemented length and spelling constraints preventing `-ed`, `-ing`, `-ly` from producing bare $\le 3$-letter stems (`lived` -> `liv`, `faded` -> `fad`, `hoped` -> `hop`).
+  - Filtered 27 lowercase Roman numeral tokens (`liv`, `lxv`, `lxx`, `ccc`, etc.) from `wordwise_dict.bin`.
+  - Added unit test assertions ensuring `lookup("lived")`, `lookup("Lived")`, `lookup("faded")`, `lookup("cared")`, and `lookup("hoped")` return `None`.
   - Updated `test_lemma_dictionary_lookups` to verify `endocrine` lookup returns `(2, 79933)` and direct inflected lookup `ameliorating` returns `(1, 97036)`.
   - Updated `test_ground_truth_vocabulary_scale_and_difficulties` to assert `>= 50_000` loaded entries and verify `endocrinology` resolution.
 

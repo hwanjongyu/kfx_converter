@@ -37,10 +37,15 @@ Root-cause investigation revealed:
     - `sense_id`: `u32` little-endian
 - Target output: `src/enhancements/wordwise_dict.bin` (~768 KB).
 
-### 2.2 Curated Overrides Preservation
+### 2.2 Curated Overrides & Morphological Guards
 - `BUILTIN_VOCABULARY` in `src/enhancements/dictionary.rs` continues to take precedence over the binary dictionary:
   - Preserves manual calibration (`jaundiced` -> 1, `housewife` -> 5).
-  - Explicitly adds `("endocrine", 2, 128374)` to ensure high-priority visibility.
+  - Explicitly adds `("endocrine", 2, 79933)` to ensure high-priority visibility.
+- **English Orthography Guard in Suffix Stemming:**
+  - Prevents erroneous stripping of `-ed`, `-ing`, `-ly` when the resulting stem is $\le 3$ characters without doubled consonants.
+  - Fixes collision where common words like `lived` were stripped to 3-letter stem `liv` (colliding with Roman numeral LIV=54).
+  - Prioritizes `stem + 'e'` (e.g. `lived` -> `live`, `faded` -> `fade`) and rejects bare 3-letter stems for `-ed`/`-ing`/`-ly`.
+  - Excludes 27 spurious lowercase Roman numerals (`liv`, `lxv`, `lxx`, `ccc`, etc.) during binary database packing.
 
 ### 2.3 Verification & Testing
 - Unit test verifying `endocrine` lookup returns `(2, 128374)`.
