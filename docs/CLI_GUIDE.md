@@ -98,17 +98,32 @@ Valid KFX Container:
 ## 3. Device Sync Troubleshooting
 
 ### Linux USB Mass Storage (UMS)
+Kindle Paperwhite (up to 11th Gen), Oasis, Voyage, and Basic models typically mount as USB Mass Storage.
 Ensure the Kindle partition is mounted with write permissions:
 ```bash
 ls -ld /media/$USER/Kindle/documents
 ```
-If not mounted, mount manually or via your desktop environment's file manager.
+If not mounted automatically, mount manually or via your desktop environment's file manager.
 
-### Linux MTP (Kindle Scribe & Modern FireOS Devices)
-Kindle Scribe uses the Media Transfer Protocol (MTP) rather than UMS.
-- The converter detects GVFS mounts at `/run/user/$UID/gvfs/mtp:host=*`.
+### Linux Desktop MTP (Kindle Scribe, Colorsoft & Modern Devices)
+Kindle Scribe and Colorsoft use the Media Transfer Protocol (MTP) rather than UMS.
+- The converter automatically discovers GNOME GVFS mounts at `/run/user/$UID/gvfs/mtp:host=*`.
 - Ensure GVFS MTP tools are installed (`gvfs-backends` on Debian/Ubuntu).
 - The converter executes `gio copy` with a 60-second watchdog timer to avoid MTP deadlocks.
+
+### Headless Linux, WSL & Docker Environments
+In headless servers or containers lacking GNOME desktop daemons, GVFS mounts are unavailable. `kfx-converter` handles this transparently:
+1. **USB Hardware Probe**: The CLI inspects `/sys/bus/usb/devices/` for connected Amazon Kindle hardware (Vendor ID `1949`) and emits diagnostic guidance if the device is plugged in but not mounted.
+2. **User-Space FUSE Mount (`jmtpfs`)**:
+   ```bash
+   mkdir -p ~/kindle
+   jmtpfs ~/kindle
+   kfx-conv book.epub -w -s
+   ```
+3. **Environment Variable Override**: You can explicitly point to any mounted Kindle directory:
+   ```bash
+   KINDLE_ROOT=/mnt/kindle kfx-conv book.epub -w -s
+   ```
  
 ---
 

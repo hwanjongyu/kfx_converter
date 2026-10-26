@@ -37,10 +37,15 @@ flowchart TD
     L --> M[Kindle Hardware]
 ```
 
-### 2.1 Ingest Engine (`src/epub.rs`)
-- **Decompression Bomb Protection**: Enforces pre-flight inspection of entry counts, uncompressed byte ceilings, and compression ratios.
-- **DOM Streaming**: Utilizes `quick-xml` event parsing to process XHTML documents in a streaming fashion, extracting paragraphs, headings, lists, tables, and images.
-- **OPF & Metadata Resolution**: Extracts Dublin Core metadata, spine ordering, and binary asset payloads (JPEG, PNG).
+### 2.1 Ingest Engine (`src/epub/`)
+- **Subsystem Modularization**: Decomposed into domain-focused submodules:
+  - `archive.rs`: Enforces zip decompression bomb guards, cumulative byte limits (1 GB ceiling), and path traversal sanitation.
+  - `opf.rs`: Parses Dublin Core metadata, spine reading order, and manifest asset catalog.
+  - `nav.rs`: Extracts hierarchical Table of Contents and sequential `page-list` from NCX and EPUB 3 Navigation documents.
+  - `xhtml.rs`: Drives streaming `quick-xml` event processing for block and span assembly.
+  - `css_style.rs`: Handles CSS declaration parsing, last-wins merging, font size scaling, and dark-mode safety filters.
+  - `dropcap.rs`: Implements quote-aware dropcap extraction (`is_opening_quote`) and span borrowing.
+  - `ruby.rs`: Manages East Asian Furigana annotation layout (`RubyState`).
 
 ### 2.2 Intermediate Representation & Section Fragmentation (`src/ir.rs`)
 - **`BookIR` Structure**: Standardizes metadata, ordered sections, plain text spans, and raw asset buffers.
@@ -52,21 +57,16 @@ flowchart TD
 - **Ion Type Descriptors**: Directly emits nulls, booleans, integers, decimals, strings, symbols, lists, and structs with compact length headers.
 - **Annotated Values**: Emits annotations (e.g., Ion Symbol 3 for `$ion_symbol_table`) for entity payloads and metadata.
 
-### 2.4 Yellowjacket Packaging Engine (`src/packager.rs`)
-- **Symbol Allocation Strategy**:
-  - Global Yellowjacket Symbols: Reserved in the range `$0..851` matching Amazon's built-in table.
-  - Document-Local Symbols: Managed dynamically by `LocalSymbols`, strictly starting at SID `852` and serialized into an embedded `$ion_symbol_table` chunk.
-- **Entity Assembly**:
-  - **`$145` (`content`)**: Serialized section text, inline styles, and image references.
-  - **`$259` (`storyline`)**: Structural layout and block sequencing.
-  - **`$260` (`section`)**: Section metadata and rendering templates.
-  - **`$490` (`book_metadata`)**: Title, authors, language, identifiers, and cover links.
-  - **`$538` (`document_data`)**: Global reading parameters and baseline styling.
-  - **`$585` (`content_features`)**: Enabled typography and engine capabilities.
-  - **`$593` (`format_capabilities`)**: Placed into the container header to instruct Kindle OS which rendering features are required.
-- **Navigation & Location Calibration**:
-  - Emits `$609` (`section_position_id_map`) and `$621` (`yj.location_pid_map`).
-  - Emits `$550` (`location_map`) calibrated to Amazon's standard metric of 350 characters per reading location.
+### 2.4 Yellowjacket Packaging Engine (`src/packager/`)
+- **Subsystem Modularization**:
+  - `mod.rs`: Top-level `KfxPackager` API facade orchestrating entity pipelines and integration testing.
+  - `symbols.rs`: Manages `LocalSymbols` registry, starting document SIDs at `852` while respecting the Amazon standard range `$0..851`.
+  - `metadata.rs`: Constructs `$490` (`book_metadata`), `$538` (`document_data`), `$585` (`content_features`), and `$593` (`format_capabilities`).
+  - `storylines.rs`: Generates `$145` (`content`), `$259` (`storyline`), and `$260` (`section`) chunks.
+  - `resources.rs`: Generates external resource definitions (`$164`) and couples raw asset payloads (`$417`).
+  - `navigation.rs`: Assembles `$389` (`book_navigation`), `$391` (`nav_container`), TOC hierarchy, landmarks, and page lists.
+  - `locators.rs`: Calibrates Kindle reading metrics, emitting `$609` (section position ID map), `$264` (position map), `$265` (PID map), `$550` (350 chars/location map), and `$621` (`yj.location_pid_map`).
+  - `styles.rs`: Compiles the `$157` (`style`) entity dictionary and font-size cascades.
 
 ### 2.5 Container Packaging (`src/container.rs`)
 - **Container Layout**:
@@ -95,7 +95,9 @@ flowchart TD
 ### 2.6 Sidecar Generators & Device Sync (`src/enhancements/`, `src/sync.rs`)
 - **Word Wise Sidecar (`.kll`)**: Compiles SQLite databases containing lemma glosses, difficulty scores, and reading positions. Uses a curated CEFR B2-C2 academic dictionary to ensure offline standalone operation.
 - **Cover Optimization**: Converts cover graphics into baseline non-progressive JPEG thumbnails conforming to Kindle hardware display constraints.
-- **Kindle Synchronization**:
-  - Detects USB Mass Storage mount points (`/media/*`, `/run/media/*`).
-  - Detects Linux GVFS MTP mount points (`/run/user/$UID/gvfs/mtp:*`) and drives non-blocking transfers via `gio copy` with watchdog timers.
+- **Universal Kindle Synchronization**:
+  - Automatically resolves model identity (Paperwhite, Oasis, Voyage, Basic, Scribe, Colorsoft) from serial prefix or version metadata.
+  - Detects standard USB Mass Storage mount points (`/media/*`, `/run/media/*`).
+  - Detects desktop Linux GVFS MTP mount points (`/run/user/$UID/gvfs/mtp:*`) driving non-blocking transfers via `gio copy` with watchdog timers.
+  - Supports headless Linux servers and Docker containers via sysfs USB hardware probing (`/sys/bus/usb/devices/` searching for Amazon Vendor ID `1949`), user-space FUSE fallback paths, and `KINDLE_ROOT` / `KINDLE_MOUNT_PATH` environment overrides.
   - Performs companion `.sdr` directory housekeeping, cleaning stale `.bad_file` markers and orphaned sidecars.

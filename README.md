@@ -1,6 +1,7 @@
 # kfx-converter
 
 [![Rust 2024](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org/)
+[![CI](https://github.com/hwanjongyu/kfx_converter/actions/workflows/ci.yml/badge.svg)](https://github.com/hwanjongyu/kfx_converter/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero-Dependency](https://img.shields.io/badge/runtime%20deps-zero%20Python%2FC-brightgreen.svg)]()
 
@@ -34,7 +35,8 @@ The major catch, however, is that producing valid KFX files typically relies on 
 - **Reading Enhancements**:
   - **Word Wise Sidecars (`.kll`)**: Automatically builds Amazon LanguageLayer SQLite databases with a curated built-in CEFR B2–C2 academic lemma dictionary.
   - **Cover Thumbnails**: Generates baseline JPEG thumbnails matching Kindle display requirements.
-- **Kindle Hardware Synchronization**: Automated device detection and sideloading for both USB Mass Storage (UMS) and Linux GVFS MTP (`/run/user/$UID/gvfs/mtp:*`) with automated `.sdr` directory maintenance.
+- **Universal Kindle Synchronization**: Automated device detection and sideloading supporting all Kindle generations (Paperwhite, Oasis, Voyage, Basic, Scribe, Colorsoft) across USB Mass Storage (UMS), Linux GVFS MTP (`/run/user/$UID/gvfs/mtp:*`), and headless sysfs probing with `KINDLE_ROOT` overrides.
+- **Automated Multi-Platform CI/CD**: Strict GitHub Actions pipeline testing Linux and macOS runners with zero-warning lint gates (`-D warnings`).
 - **Dual Frontends**: Fast CLI tool (`kfx-conv`) and modern GPU-accelerated desktop UI (`kfx-studio` powered by GPUI).
 
 ---
@@ -76,20 +78,41 @@ flowchart TD
 converter_epub2kfx/
 ├── Cargo.toml                 # Package configuration and feature flags
 ├── build.rs                   # Build script
+├── .github/workflows/ci.yml   # Multi-platform (Linux & macOS) CI/CD pipeline
 ├── src/
 │   ├── lib.rs                 # Core library definitions and re-exports
 │   ├── main.rs                # CLI entry point (`kfx-conv`)
 │   ├── symbols.rs             # 852-entry Yellowjacket symbol table and enum
 │   ├── ion.rs                 # Binary Amazon Ion serializer and ENTY wrapper
 │   ├── container.rs           # CONT header and bcIndexTab chunk reader/writer
-│   ├── epub.rs                # Streaming EPUB/ZIP reader and quick-xml parser
+│   ├── css.rs                 # CSS parser, font ratio, and element style cache
+│   ├── epub/                  # Modular streaming EPUB ingestion subsystem
+│   │   ├── mod.rs             # EpubReader public facade and comprehensive tests
+│   │   ├── archive.rs         # Zip decompression safety limits and bomb protection
+│   │   ├── css_style.rs       # CSS declaration sanitizer and font-size buckets
+│   │   ├── dropcap.rs         # Opening quote detection and drop-cap heuristics
+│   │   ├── nav.rs             # NCX & NAV navigation, TOC and page-list separation
+│   │   ├── opf.rs             # OPF package parsing and manifest resolution
+│   │   ├── ruby.rs            # Furigana state machine (RubyState)
+│   │   └── xhtml.rs           # Quick-XML event handler and block coordinator
 │   ├── ir.rs                  # Book intermediate representation and section fragmenter
-│   ├── packager.rs            # Yellowjacket entity packager and metadata builder
-│   ├── sync.rs                # Kindle device sync (UMS & Linux GVFS MTP)
+│   ├── packager/              # Modular Yellowjacket packaging engine
+│   │   ├── mod.rs             # KfxPackager orchestrator and integration tests
+│   │   ├── locators.rs        # Locator maps ($264, $265, $550, $609, $621)
+│   │   ├── metadata.rs        # Book metadata, capabilities, and cover templates
+│   │   ├── navigation.rs      # TOC, reading orders, and page-list nav containers
+│   │   ├── resources.rs       # External resources and raw binary payloads ($417)
+│   │   ├── storylines.rs      # Section entities, storylines, and auxiliary data
+│   │   ├── styles.rs          # Style dictionary assembly ($157)
+│   │   └── symbols.rs         # Local symbol interning and SID allocation
+│   ├── pipeline.rs            # Unified ConversionPipeline orchestrator
+│   ├── validator.rs           # Preflight Yellowjacket entity and reference validator
+│   ├── sync.rs                # Universal Kindle sync (UMS, GVFS MTP, sysfs, FUSE)
 │   ├── enhancements/
 │   │   ├── mod.rs
 │   │   ├── cover.rs           # Baseline JPEG thumbnail optimizer
 │   │   ├── dictionary.rs      # Built-in CEFR B2-C2 academic lemma database
+│   │   ├── sdr.rs             # Unified .sdr sidecar deployment
 │   │   └── word_wise.rs       # Kindle SQLite Word Wise sidecar generator
 │   └── ui/                    # GPUI Desktop Application (`kfx-studio`)
 │       ├── main.rs            # Desktop GUI binary entry point
