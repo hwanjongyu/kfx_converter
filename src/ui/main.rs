@@ -1,4 +1,4 @@
-//! Kindle Scribe Studio - Native GPUI Desktop Application
+//! Kindle Studio - Native GPUI Desktop Application
 //! Ultra high-performance GPU-accelerated interface for EPUB to KFX conversion and Kindle management.
 
 use gpui::*;
@@ -16,7 +16,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Kindle Scribe Studio (GPUI Native)".into()),
+                    title: Some("Kindle Studio (GPUI Native)".into()),
                     ..Default::default()
                 }),
                 ..Default::default()

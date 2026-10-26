@@ -1,5 +1,6 @@
 //! Local symbols and ID generators for Amazon KFX packaging.
 
+use std::collections::HashMap;
 use sha1::{Digest, Sha1};
 use crate::ion::{IonValue, IonWriter};
 
@@ -12,19 +13,31 @@ pub const FIRST_LOCAL_SYMBOL_ID: u32 = AMAZON_YJ_SYMBOLS_MAX_ID + 1;
 /// and local document symbols begin strictly at SID 852.
 pub struct LocalSymbols {
     pub names: Vec<String>,
+    map: HashMap<String, u32>,
 }
 
 impl LocalSymbols {
     pub fn new() -> Self {
-        Self { names: Vec::new() }
+        Self {
+            names: Vec::new(),
+            map: HashMap::new(),
+        }
     }
 
+    /// Retrieves an existing symbol ID in O(1) time without allocating.
+    pub fn get_id(&self, name: &str) -> Option<u32> {
+        self.map.get(name).copied()
+    }
+
+    /// Interns a symbol string in O(1) time, returning its local symbol ID (SID >= 852).
     pub fn intern(&mut self, name: &str) -> u32 {
-        if let Some(pos) = self.names.iter().position(|s| s == name) {
-            FIRST_LOCAL_SYMBOL_ID + pos as u32
+        if let Some(&id) = self.map.get(name) {
+            id
         } else {
             let id = FIRST_LOCAL_SYMBOL_ID + self.names.len() as u32;
-            self.names.push(name.to_string());
+            let s = name.to_string();
+            self.map.insert(s.clone(), id);
+            self.names.push(s);
             id
         }
     }
@@ -146,4 +159,34 @@ pub fn generate_book_id(seed: &str) -> String {
         result.push(URL_SAFE_CHARS[((b1 & 0x0F) << 2) & 0x3F] as char);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_local_symbols_intern_hashmap_parity() {
+        let mut symbols = LocalSymbols::new();
+        let id1 = symbols.intern("sym_first");
+        let id2 = symbols.intern("sym_second");
+        let id3 = symbols.intern("sym_third");
+
+        assert_eq!(id1, 852);
+        assert_eq!(id2, 853);
+        assert_eq!(id3, 854);
+
+        // Re-interning returns exact same IDs in O(1)
+        assert_eq!(symbols.intern("sym_first"), 852);
+        assert_eq!(symbols.intern("sym_second"), 853);
+        assert_eq!(symbols.intern("sym_third"), 854);
+
+        // get_id returns same without mutability
+        assert_eq!(symbols.get_id("sym_first"), Some(852));
+        assert_eq!(symbols.get_id("sym_second"), Some(853));
+        assert_eq!(symbols.get_id("sym_nonexistent"), None);
+
+        // Total count matches
+        assert_eq!(symbols.names.len(), 3);
+    }
 }

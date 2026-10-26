@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! Theme & Color Tokens for Kindle Scribe Studio GPUI
+//! Theme & Color Tokens for Kindle Studio GPUI
 
 use gpui::*;
 

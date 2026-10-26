@@ -164,9 +164,6 @@ impl<'a> KfxPackager<'a> {
         self.entities.clear();
         let mut symbols = LocalSymbols::new();
 
-        // 1. Build format capabilities ($593) - emitted into container header, NOT into bcIndexTab entities
-        let format_caps_data = self.build_format_capabilities();
-
         // 2. Build book metadata ($490)
         self.build_book_metadata();
 
@@ -203,6 +200,9 @@ impl<'a> KfxPackager<'a> {
 
         // 12. Build $ion_symbol_table document symbols data
         let doc_sym_data = symbols.to_ion_symbol_table();
+
+        // 13. Build format capabilities ($593) - emitted into container header based on actual post-optimization chunks
+        let format_caps_data = self.build_format_capabilities();
 
         // 9. Pre-flight reference validation to ensure 100% referential integrity
         let validator = crate::validator::KfxPreflightValidator::new(&self.entities, Some(&symbols));
@@ -343,9 +343,10 @@ impl<'a> KfxPackager<'a> {
             ]));
         }
 
-        // 2. yj_jpg_rst_marker_present: Required when JPEG images have restart markers
-        let has_rst_marker = self.book.resources.values().any(|asset| {
-            asset.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+        // 2. yj_jpg_rst_marker_present: Required when emitted JPEG images have restart markers
+        let has_rst_marker = self.entities.iter().any(|e| {
+            e.chunk_type == 417
+                && e.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
         });
         if has_rst_marker {
             feature_list.push(IonValue::Struct(vec![

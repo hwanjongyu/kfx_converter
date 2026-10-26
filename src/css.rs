@@ -13,7 +13,56 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-type StyleTokenCache = HashMap<(String, Option<String>), Vec<String>>;
+pub trait StyleKeyRef {
+    fn tag(&self) -> &str;
+    fn class(&self) -> Option<&str>;
+}
+
+impl std::hash::Hash for dyn StyleKeyRef + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.tag().hash(state);
+        self.class().hash(state);
+    }
+}
+
+impl PartialEq for dyn StyleKeyRef + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag() == other.tag() && self.class() == other.class()
+    }
+}
+
+impl Eq for dyn StyleKeyRef + '_ {}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct OwnedStyleKey(pub String, pub Option<String>);
+
+impl StyleKeyRef for OwnedStyleKey {
+    fn tag(&self) -> &str {
+        &self.0
+    }
+    fn class(&self) -> Option<&str> {
+        self.1.as_deref()
+    }
+}
+
+impl<'a> std::borrow::Borrow<dyn StyleKeyRef + 'a> for OwnedStyleKey {
+    fn borrow(&self) -> &(dyn StyleKeyRef + 'a) {
+        self
+    }
+}
+
+pub struct BorrowedStyleKey<'a>(pub &'a str, pub Option<&'a str>);
+
+impl StyleKeyRef for BorrowedStyleKey<'_> {
+    fn tag(&self) -> &str {
+        self.0
+    }
+    fn class(&self) -> Option<&str> {
+        self.1
+    }
+}
+
+type StyleTokenCache = HashMap<OwnedStyleKey, Vec<String>>;
 
 /// Element-level CSS style cache to avoid redundant cascade evaluations,
 /// regex matching, and string allocations on recurring HTML elements.
@@ -28,7 +77,7 @@ impl ElementStyleCache {
         Self::default()
     }
 
-    /// Resolves or retrieves cached element style tokens for `(tag, class_attr)`.
+    /// Resolves or retrieves cached element style tokens for `(tag, class_attr)` with zero-allocation lookups.
     pub fn get_or_resolve_style<F>(
         &self,
         tag: &str,
@@ -38,16 +87,19 @@ impl ElementStyleCache {
     where
         F: FnOnce(&str, Option<&str>) -> Vec<String>,
     {
-        let key = (tag.to_string(), class_attr.map(|s| s.to_string()));
-        if let Some(cached) = self.style_cache.borrow().get(&key) {
+        let lookup = BorrowedStyleKey(tag, class_attr);
+        if let Some(cached) = self.style_cache.borrow().get(&lookup as &dyn StyleKeyRef) {
             return cached.clone();
         }
         let resolved = resolve(tag, class_attr);
-        self.style_cache.borrow_mut().insert(key, resolved.clone());
+        self.style_cache.borrow_mut().insert(
+            OwnedStyleKey(tag.to_string(), class_attr.map(|s| s.to_string())),
+            resolved.clone(),
+        );
         resolved
     }
 
-    /// Resolves or retrieves cached `::first-letter` style tokens for `(tag, class_attr)`.
+    /// Resolves or retrieves cached `::first-letter` style tokens for `(tag, class_attr)` with zero-allocation lookups.
     pub fn get_or_resolve_first_letter<F>(
         &self,
         tag: &str,
@@ -57,12 +109,15 @@ impl ElementStyleCache {
     where
         F: FnOnce(&str, Option<&str>) -> Vec<String>,
     {
-        let key = (tag.to_string(), class_attr.map(|s| s.to_string()));
-        if let Some(cached) = self.first_letter_cache.borrow().get(&key) {
+        let lookup = BorrowedStyleKey(tag, class_attr);
+        if let Some(cached) = self.first_letter_cache.borrow().get(&lookup as &dyn StyleKeyRef) {
             return cached.clone();
         }
         let resolved = resolve(tag, class_attr);
-        self.first_letter_cache.borrow_mut().insert(key, resolved.clone());
+        self.first_letter_cache.borrow_mut().insert(
+            OwnedStyleKey(tag.to_string(), class_attr.map(|s| s.to_string())),
+            resolved.clone(),
+        );
         resolved
     }
 

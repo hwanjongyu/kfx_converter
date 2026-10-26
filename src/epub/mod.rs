@@ -358,6 +358,7 @@ impl EpubReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     const ORIGINALS_CH1_CSS: &str = r#"
         h1.x03-Chapter-Number { font-size:1.083em; text-align:center; font-weight:bold; }
@@ -1040,13 +1041,29 @@ mod tests {
 
     #[test]
     fn test_epub_reader_read_metadata_from_file() {
-        let path = "/home/drew/github/hwanjongyu/Converter_epub_kfx/sample/Originals - Adam Grant.epub";
-        if !std::path::Path::new(path).exists() {
-            return;
-        }
-        let meta = EpubReader::read_metadata_from_file(path).expect("Failed to read metadata");
+        let sample_path = "/home/drew/github/hwanjongyu/Converter_epub_kfx/sample/Originals - Adam Grant.epub";
+        let (tmp_file, target_path) = if std::path::Path::new(sample_path).exists() {
+            (None, std::path::PathBuf::from(sample_path))
+        } else {
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(tmp.path()).unwrap());
+            zip.start_file("mimetype", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            zip.start_file("META-INF/container.xml", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+            zip.start_file("content.opf", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Originals</dc:title><dc:creator>Adam Grant</dc:creator></metadata><manifest><item id="t" href="t.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>"#).unwrap();
+            zip.start_file("t.xhtml", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Text</p></body></html>"#).unwrap();
+            zip.finish().unwrap();
+            let p = tmp.path().to_path_buf();
+            (Some(tmp), p)
+        };
+
+        let meta = EpubReader::read_metadata_from_file(&target_path).expect("Failed to read metadata");
         assert_eq!(meta.title, "Originals");
         assert!(meta.creators.iter().any(|c| c.contains("Adam Grant")));
+        drop(tmp_file);
     }
 
     #[test]

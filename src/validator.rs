@@ -299,9 +299,7 @@ impl<'a> KfxPreflightValidator<'a> {
                             if referrer.chunk_type == 164 {
                                 match fval {
                                     IonValue::String(raw_path) => {
-                                        let target_sym = self.symbols.and_then(|syms| {
-                                            syms.names.iter().position(|s| s == raw_path).map(|pos| FIRST_LOCAL_SYMBOL_ID + pos as u32)
-                                        });
+                                        let target_sym = self.symbols.and_then(|syms| syms.get_id(raw_path));
                                         if let Some(target_sym) = target_sym
                                             && !entity_map.contains_key(&(417, target_sym)) {
                                                 return Err(ValidationError::MissingFragment {

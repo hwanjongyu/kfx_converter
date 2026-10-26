@@ -1,4 +1,4 @@
-//! Main Application View for Kindle Scribe Studio in GPUI
+//! Main Application View for Kindle Studio in GPUI
 //! Features a unified Dual-Pane Split View connecting local EPUB conversion
 //! directly with the real-time connected Kindle device library.
 
@@ -26,6 +26,7 @@ pub struct KindleStudio {
     explorer_scroll_handle: UniformListScrollHandle,
     explorer_sort_field: EpubSortField,
     explorer_sort_direction: SortDirection,
+    confirm_delete_file: Option<String>,
 }
 
 impl KindleStudio {
@@ -49,6 +50,7 @@ impl KindleStudio {
             explorer_scroll_handle: UniformListScrollHandle::new(),
             explorer_sort_field: EpubSortField::Title,
             explorer_sort_direction: SortDirection::Ascending,
+            confirm_delete_file: None,
         }
     }
 
@@ -606,7 +608,7 @@ impl KindleStudio {
                             .text_xl()
                             .font_weight(FontWeight::BOLD)
                             .text_color(Theme::accent_amber())
-                            .child("⚡ Kindle Scribe Studio"),
+                            .child("⚡ Kindle Studio"),
                     )
                     .child(
                         div()
@@ -2293,6 +2295,7 @@ impl KindleStudio {
         let count_mobi = self.files.iter().filter(|f| f.format == "MOBI").count();
         let count_all = self.files.len();
 
+        let search_lower = self.search_query.to_lowercase();
         let mut filtered_indices: Vec<usize> = self.files
             .iter()
             .enumerate()
@@ -2304,12 +2307,12 @@ impl KindleStudio {
                     Some("MOBI") => f.format == "MOBI",
                     _ => true,
                 };
-                let query_match = if self.search_query.is_empty() {
+                let query_match = if search_lower.is_empty() {
                     true
                 } else {
-                    f.name.to_lowercase().contains(&self.search_query.to_lowercase())
-                        || f.title.to_lowercase().contains(&self.search_query.to_lowercase())
-                        || f.author.to_lowercase().contains(&self.search_query.to_lowercase())
+                    f.name.to_lowercase().contains(&search_lower)
+                        || f.title.to_lowercase().contains(&search_lower)
+                        || f.author.to_lowercase().contains(&search_lower)
                 };
                 fmt_match && query_match
             })
@@ -2321,14 +2324,14 @@ impl KindleStudio {
             let b = &self.files[b_idx];
 
             let cmp = match self.explorer_sort_field {
-                EpubSortField::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                EpubSortField::Title => super::state::case_insensitive_cmp(&a.title, &b.title),
                 EpubSortField::Author => {
                     let a_unknown = a.author.eq_ignore_ascii_case("unknown");
                     let b_unknown = b.author.eq_ignore_ascii_case("unknown");
                     match (a_unknown, b_unknown) {
                         (true, false) => std::cmp::Ordering::Greater,
                         (false, true) => std::cmp::Ordering::Less,
-                        _ => a.author.to_lowercase().cmp(&b.author.to_lowercase()),
+                        _ => super::state::case_insensitive_cmp(&a.author, &b.author),
                     }
                 }
                 EpubSortField::FileSize => a.size_bytes.cmp(&b.size_bytes),
@@ -2646,7 +2649,8 @@ impl KindleStudio {
                                                         .map(|r_idx| {
                                                             let file_idx = indices[r_idx];
                                                             let file = &this.files[file_idx];
-                                                            Self::render_kindle_file_row(file, &view)
+                                                            let is_confirming = this.confirm_delete_file.as_deref() == Some(&file.name);
+                                                            Self::render_kindle_file_row(file, &view, is_confirming)
                                                         })
                                                         .collect()
                                                 }),
@@ -2797,7 +2801,11 @@ impl KindleStudio {
     }
 
     /// Renders a single Kindle file row with strict 48px height for virtualization.
-    fn render_kindle_file_row(file: &KindleFile, view: &WeakEntity<Self>) -> AnyElement {
+    fn render_kindle_file_row(
+        file: &KindleFile,
+        view: &WeakEntity<Self>,
+        is_confirming: bool,
+    ) -> AnyElement {
         let badge_bg = match file.format.as_str() {
             "KFX" => Theme::accent_amber(),
             "AZW3" => Theme::accent_blue(),
@@ -2916,13 +2924,19 @@ impl KindleStudio {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(Theme::bg_card_hover())
+                                    .bg(if is_confirming { Theme::accent_red() } else { Theme::bg_card_hover() })
                                     .text_xs()
-                                    .text_color(Theme::accent_red())
-                                    .child("🗑")
+                                    .text_color(if is_confirming { Theme::bg_root() } else { Theme::accent_red() })
+                                    .child(if is_confirming { "Confirm?" } else { "🗑" })
                                     .on_click(move |_ev, _window, cx| {
                                         view_del.update(cx, |this, cx| {
-                                            this.delete_file(&f_del, cx);
+                                            if this.confirm_delete_file.as_deref() == Some(&f_del) {
+                                                this.confirm_delete_file = None;
+                                                this.delete_file(&f_del, cx);
+                                            } else {
+                                                this.confirm_delete_file = Some(f_del.clone());
+                                                cx.notify();
+                                            }
                                         }).ok();
                                     }),
                             ),

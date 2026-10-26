@@ -1,4 +1,4 @@
-//! Cover Image Optimizer for Kindle Scribe & Paperwhite
+//! Cover Image Optimizer for All Kindle Devices (Paperwhite, Oasis, Scribe, Basic, Colorsoft, Voyage)
 //!
 //! Transcodes cover images to Kindle OS baseline JPEG format (RGB, no progressive scan,
 //! standard thumbnail dimensions max 440x660) to guarantee lockscreen cover compatibility.
