@@ -119,7 +119,7 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("discrepancy", 2, 31709), ("dispassionate", 2, 1271), ("divergent", 2, 105127),
     ("duplicity", 2, 7595), ("eclectic", 2, 28943), ("efficacy", 2, 37057),
     ("effrontery", 2, 24292), ("elicit", 2, 39242), ("embellish", 2, 19030),
-    ("emulate", 2, 31446), ("enigma", 2, 11524), ("ephemeral", 2, 3367),
+    ("emulate", 2, 31446), ("endocrine", 2, 79933), ("enigma", 2, 11524), ("ephemeral", 2, 3367),
     ("epiphany", 2, 13505), ("epitome", 2, 22340), ("equanimity", 2, 39967),
     ("eradicate", 2, 35729), ("esoteric", 2, 22280), ("eulogy", 2, 5636),
     ("euphemism", 2, 2964), ("exemplary", 2, 42821), ("fastidious", 2, 26919),
@@ -257,14 +257,14 @@ static STOPWORDS_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
 static VOCAB_MAP: OnceLock<HashMap<&'static str, (u8, u32)>> = OnceLock::new();
 
 fn parse_builtin_and_ground_truth_vocab() -> HashMap<&'static str, (u8, u32)> {
-    let mut map = HashMap::with_capacity(22_000);
+    let mut map = HashMap::with_capacity(55_000);
 
     // 1. Load curated baseline overrides
     for &(w, d, s) in BUILTIN_VOCABULARY {
         map.insert(w, (d, s));
     }
 
-    // 2. Parse Amazon Ground Truth binary dataset (20,000+ lemmas with native sense IDs)
+    // 2. Parse Amazon Ground Truth binary dataset (52,000+ lemmas with native sense IDs)
     if WORDWISE_DICT_BYTES.len() >= 8 && &WORDWISE_DICT_BYTES[0..4] == b"WWK1" {
         let count = u32::from_le_bytes(WORDWISE_DICT_BYTES[4..8].try_into().unwrap()) as usize;
         let mut offset = 8;
@@ -388,9 +388,9 @@ mod tests {
         let res = dict.lookup("ameliorate", 3);
         assert_eq!(res, Some((1, 35386)));
 
-        // 2. Inflected form (-ing with added 'e')
+        // 2. Inflected form in master lexicon
         let res2 = dict.lookup("ameliorating", 3);
-        assert_eq!(res2, Some((1, 35386)));
+        assert_eq!(res2, Some((1, 97036)));
 
         // 3. Stopword filtered (including curly apostrophe normalization)
         assert_eq!(dict.lookup("the", 3), None);
@@ -413,23 +413,31 @@ mod tests {
         let res5 = dict.lookup("ameliorate's", 3);
         assert_eq!(res5, Some((1, 35386)));
 
-        // 7. Verify curated difficulty calibrations for jaundiced and housewife
+        // 7. Verify curated difficulty calibrations for jaundiced, housewife, and endocrine
         assert_eq!(dict.lookup("jaundiced", 3), Some((1, 19346)));
         assert_eq!(dict.lookup("jaundice", 3), Some((1, 1306)));
         assert_eq!(dict.lookup("housewife", 3), Some((5, 7958)));
+        assert_eq!(dict.lookup("endocrine", 3), Some((2, 79933)));
     }
 
     #[test]
     fn test_ground_truth_vocabulary_scale_and_difficulties() {
         let dict = LemmaDictionary::new();
 
-        // Ensure 20,000+ entries loaded
+        // Ensure 50,000+ entries loaded
         assert!(
-            dict.len() >= 20_000,
-            "Expected at least 20,000 ground truth lemmas, got {}",
+            dict.len() >= 50_000,
+            "Expected at least 50,000 ground truth lemmas, got {}",
             dict.len()
         );
         assert!(!dict.is_empty());
+
+        // Test scientific/biological coverage from expanded master dictionary
+        let endo = dict.lookup("endocrine", 3);
+        assert_eq!(endo, Some((2, 79933)));
+
+        let endo_logy = dict.lookup("endocrinology", 3);
+        assert_eq!(endo_logy, Some((2, 80436)));
 
         // Test lookups across all 5 difficulty levels from ground truth dataset
         let diff1 = dict.lookup("abstruse", 3);
