@@ -171,25 +171,7 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                 }
             }
             Ok(Event::Text(ref e)) => {
-                let decoded = match e.unescape() {
-                    Ok(s) => s.to_string(),
-                    Err(_) => {
-                        let raw = String::from_utf8_lossy(e.as_ref()).to_string();
-                        raw.replace("&amp;", "&")
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&quot;", "\"")
-                            .replace("&apos;", "'")
-                            .replace("&mdash;", "—")
-                            .replace("&ndash;", "–")
-                            .replace("&hellip;", "…")
-                            .replace("&lsquo;", "‘")
-                            .replace("&rsquo;", "’")
-                            .replace("&ldquo;", "“")
-                            .replace("&rdquo;", "”")
-                            .replace("&nbsp;", " ")
-                    }
-                };
+                let decoded = crate::epub::unescape_xml_or_html(e);
                 current_text.push_str(&decoded);
             }
             Ok(Event::End(_)) => {

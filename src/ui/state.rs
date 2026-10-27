@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! State Management & Kindle Hardware Discovery for GPUI
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StudioTab {
@@ -346,9 +346,9 @@ pub fn load_device_files(device: &DeviceStatus) -> Vec<KindleFile> {
 }
 
 /// Deletes an e-book file and its companion .sdr cache directory from the Kindle device.
-pub fn delete_device_file(file: &KindleFile) -> Result<(), String> {
-    let parent = file.full_path.parent();
-    kfx_converter::KindleSync::delete_book_file_safe(parent, &file.full_path)
+/// If `allowed_root` is provided, ensures the deletion stays strictly within that directory.
+pub fn delete_device_file(allowed_root: Option<&Path>, file: &KindleFile) -> Result<(), String> {
+    kfx_converter::KindleSync::delete_book_file_safe(allowed_root, &file.full_path)
         .map_err(|e| format!("Failed to delete book file: {}", e))
 }
 
@@ -545,10 +545,31 @@ mod tests {
         assert!(f.has_sdr);
         assert!(f.has_word_wise);
 
-        // Test delete_device_file
-        delete_device_file(f).expect("Delete device file");
+        // Test delete_device_file with root confinement
+        delete_device_file(dev.path.as_deref(), f).expect("Delete device file within allowed root");
         assert!(!book_path.exists());
         assert!(!sdr_path.exists());
+
+        // Test delete_device_file rejects files outside allowed root
+        let outside_temp = tempfile::tempdir().expect("Create outside temp dir");
+        let outside_book = outside_temp.path().join("OutsideBook.kfx");
+        std::fs::write(&outside_book, b"dummy outside content").expect("Write outside book");
+        let outside_f = KindleFile {
+            name: "OutsideBook.kfx".into(),
+            title: "OutsideBook".into(),
+            author: "".into(),
+            format: "KFX".into(),
+            size_formatted: "1 KB".into(),
+            size_bytes: 20,
+            modified: "".into(),
+            modified_timestamp: 0,
+            full_path: outside_book.clone(),
+            has_word_wise: false,
+            has_sdr: false,
+        };
+        let err_res = delete_device_file(dev.path.as_deref(), &outside_f);
+        assert!(err_res.is_err(), "Must reject deletion outside allowed_root");
+        assert!(outside_book.exists(), "Outside file must not be deleted");
 
         let files_after = load_device_files(&dev);
         assert_eq!(files_after.len(), 0);

@@ -1,126 +1,203 @@
-# Multi-Model Consensus Review & Audit Report
+# Multi-Model Consensus Review & Audit Report: `kfx-converter`
 
-**Target Project:** `kfx-converter` ([`/home/drew/github/hwanjongyu/kfx_converter`](file:///home/drew/github/hwanjongyu/kfx_converter))  
-**Date:** October 26, 2026  
-**Auditors:**
-- **Gemini Pro (Flagship)** — Architecture & Deep Context Specialist
-- **Claude Sonnet (Extended Thinking)** — Logic Specialist & Rust/Platform Engineer
-- **Claude Opus (Ultra-Reasoning)** — Senior Security, Concurrency & Design Architect
+**Workspace:** [`/home/drew/github/hwanjongyu/kfx_converter`](file:///home/drew/github/hwanjongyu/kfx_converter)  
+**Target:** High-performance native EPUB to Amazon KFX converter in Rust (edition 2024)  
+**Auditing Models:**
+- **Gemini Pro (Flagship)**: System Architecture, Data Flow Integrity & Module Boundaries
+- **Claude Sonnet (Extended Thinking)**: Rust Idioms, Memory Safety, Error Propagation & Local Logic
+- **Claude Opus (Ultra-Reasoning)**: Security Hardening, Concurrency Hazards & Amazon KFX Specification Compliance
 
 ---
 
 ## 1. Executive Summary & Code Health Grade
 
-| Dimension | Grade | Auditor Summary |
-| :--- | :---: | :--- |
-| **Architectural Modularity & Pipeline** | **A- (8.5/10)** | Clean separation across formats (`epub`, `ir`, `ion`, `container`), but burdened by a 3,600+ line packager monolith and duplicate `.sdr` directory layout logic. |
-| **Rust Idioms & Memory Efficiency** | **B+ (8.2/10)** | Excellent zero-dependency Ion serializer and robust typing; identified multi-MB buffer cloning during packaging and $O(N \log N)$ allocations during UI frame sorting. |
-| **Security & Format Robustness** | **B+ (8.3/10)** | Superb anti-DoS decompression bounds (CWE-400) and atomic writes; identified unflushed OS page cache risk causing Kindle `.bad_file` corruption, a fail-open path traversal bypass in file deletion, and a validator field ID mismatch ($429 vs $157). |
-| **Overall Consensus Grade** | **A- (8.4/10)** | **Production-grade core conversion engine with critical hardware sync and validation hardening required.** |
+The `kfx-converter` project is an exceptionally sophisticated, pure-Rust implementation of Amazon's proprietary KFX format (Container format 2 / Yellowjacket), Ion binary serialization, Kindle `.sdr` synchronizer, and GPUI desktop studio. It replaces external dependencies (like Kindlegen or Python/Calibre plugins) with a high-performance native pipeline.
+
+### Consensus Overall Health Score: **9.1 / 10**
+
+```mermaid
+xychart-beta
+    title "Multi-Model Subsystem Health Ratings (out of 10)"
+    x-axis ["Architecture", "Data Flow", "Rust Idioms", "Performance", "Security", "Concurrency", "Spec Compliance"]
+    y-axis "Rating" 0 --> 10
+    bar [9.2, 9.5, 8.8, 9.0, 8.4, 7.8, 9.1]
+```
+
+### Key Consensus Findings:
+1. **Exceptional Foundation**: The pipeline exhibits clean architectural separation between EPUB ingestion, Intermediate Representation ([`ir.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ir.rs)), Ion binary writing ([`ion.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs)), and packaging ([`packager`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/mod.rs)). The preflight validation engine ([`validator.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/validator.rs)) is a standout feature, preventing real-world Kindle rendering crashes and dangling symbol references.
+2. **Identified Critical Risks**:
+   - **Path Confinement Bypass (Security)**: [`delete_device_file`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs#L350-L354) passes `file.full_path.parent()` as `allowed_root`, invalidating path boundary enforcement.
+   - **Silent Content Loss (Data Integrity)**: [`quick_xml::events::BytesText::unescape()`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub/xhtml.rs#L682) fails on standard HTML entities (`&nbsp;`, `&mdash;`, `&rsquo;`), causing `.unwrap_or_default()` to silently erase entire paragraphs or headings.
+   - **Kindle VFAT / MTP Write Races (Concurrency)**: Two concurrent background workers write directly to Kindle storage in [`src/ui/app.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L313-L368), risking filesystem corruption, USB FIFO drops, or MTP deadlocks.
+   - **Order-of-Operations Defect (Spec Compliance)**: [`build_content_features`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/metadata.rs#L107-L111) checks for JPEG restart markers before [`build_resources`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/mod.rs#L188) generates them, leaving `yj_jpg_rst_marker_present` permanently unset.
+   - **UTF-8 Slicing Panic Risk (Robustness)**: [`src/epub/dropcap.rs:55-92`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub/dropcap.rs#L55-L92) indexes strings using byte lengths rather than character boundaries, risking panics on multi-byte quotation marks and non-ASCII characters.
 
 ---
 
-## 2. Consensus & Divergence Matrix
+## 2. Multi-Model Consensus & Divergence Matrix
 
-| Review Dimension | Gemini Pro (Architecture) | Claude Sonnet (Logic/Platform) | Claude Opus (Security/Spec) | Consensus / Action |
-| :--- | :--- | :--- | :--- | :--- |
-| **Kindle USB / Device Sync** | Identified duplicate `.sdr` generation routines between `pipeline.rs` and `sync.rs`. | Warned about synchronous `detect_kindle_device()` causing UI thread stutters during drag-and-drop. | **[CRITICAL]** Discovered that avoiding `sync_data` leaves dirty kernel cache without `syncfs` at completion, leading to truncated files and Kindle `.bad_file` marks on disconnect. | **Strong Consensus**: Move sync and device detection to background workers; call targeted `syncfs()` on device root before reporting sync success; unify `.sdr` logic into `SdrDeployer`. |
-| **Referential Integrity & Validation** | Praised `KfxPreflightValidator` for guarding the entity graph before container serialization. | Highlighted `KfxPreflightValidator` catching illegal `$4` name fields inside styles. | **[CRITICAL]** Found that validator checks field ID **429** (`backdrop_style`) instead of **157** (`style`), leaving dangling storyline styles unvalidated. | **High Impact Finding**: Patch `src/validator.rs` immediately to check `157 | 429`. |
-| **Path Traversal & File Deletion** | Recognized defensive FAT32 filename sanitization and boundary checks. | Highlighted destructive device deletion lacking UI confirmation modal. | **[CRITICAL]** Discovered that `delete_book_file_safe` fails OPEN if `full_path.canonicalize()` fails, bypassing directory boundary enforcement. | **Security Action**: Refactor `delete_book_file_safe` to fail CLOSED if canonicalization fails. Add confirmation modal to UI. |
-| **Container & Ion Serialization** | Praised zero-dependency Amazon Ion 1.0 binary serialization and stack-allocated buffers. | Identified double-allocation in `KfxContainer::read_chunk` (cloning stripped payload instead of `drain`). | Found raw byte window scan `[0x03, 0x9e]` in `KfxContainer::open` vulnerable to false positives; Ion child elements can read beyond parent container boundary. | **Engine Optimization**: Replace raw byte scanning with structured `IonReader` decoding; use `drain()` in `read_chunk`; enforce parent length bounds in `IonReader`. |
-| **IR & PID Alignment** | **[CRITICAL]** Identified that `KfxPackager` and `WordWiseBuilder` mutate separate clones of `BookIR`, risking PID divergence between KFX position maps and `.kll` SQLite databases. | Identified that `KfxPackager::new` clones all binary image/font resources unnecessarily just to resolve cover section. | Confirmed Word Wise SQLite DDL lacks `IF NOT EXISTS` on `metadata` and `glosses` tables. | **Core Refactoring**: Introduce immutable, normalized `NormalizedBookIR` and pass by reference. Add `IF NOT EXISTS` to SQLite DDL. |
-| **Desktop UI (GPUI)** | Commended clean feature-gating via `Cargo.toml` (`--features gui`). | Identified race condition in batch conversion cancellation where completed worker overwrites cancelled UI state; noted per-frame string allocations during list sorting. | Emphasized missing symlink checks on `.sdr` directory removals. | **UI Hardening**: Pass cancellation token to workers; cache sorted indices; stop event bubbling on card action buttons. |
+| Audit Focus Area | Gemini Pro (Flagship) | Claude Sonnet (Extended Thinking) | Claude Opus (Ultra-Reasoning) | Consensus Level |
+| :--- | :--- | :--- | :--- | :---: |
+| **System Modularity & Boundaries** | High modularity; recommends moving `ENTY` constants from `ion.rs` to `container.rs` and decoupling `sdr.rs` from `sync.rs`. | Observed clean separation; highlighted opportunities for zero-alloc `Cow<'_, str>` and `Vec<&str>`. | Noted good isolation; flagged `delete_device_file` UI state leakage. | **High Consensus** |
+| **Data Flow & PID Parity** | Strict PID parity between KFX $265 and Word Wise SQLite databases verified; cover synthesis deduplication recommended. | Verified Word Wise sliding window density and CEFR level filtering. | Discovered order-of-operations bug: content features emitted before resources are built. | **High Consensus** |
+| **Parsing & Character Safety** | Highlighted clean handling of zip bombs and limits in `archive.rs`. | Discovered UTF-8 slice panic in dropcap splitting and dictionary byte header panic risk. | Discovered silent text deletion caused by `&mdash;`/`&nbsp;` failing in `quick_xml::unescape()`. | **Strong Complementarity** |
+| **Storage & Persistence** | Praised eMMC flash-safe SQLite PRAGMAs; flagged disk tempfile bottleneck in `to_bytes()`. | Identified zero-alloc in-memory SQLite via `conn.serialize(Main)` to remove tempfile disk I/O. | Focused on concurrent VFAT/MTP write hazards and lack of root confinement in `.sdr` cleanup. | **High Consensus** |
+| **Concurrency & UI Responsiveness** | Verified async thread-safe progress callbacks `F: Fn(f32, &str)`. | Checked memory allocations across worker loops. | Identified critical 2-thread VFAT write race, UI startup blocking, and `active_tasks` leak on cancel. | **Opus Deep Dive** |
+| **Test Coverage & Fuzzing** | Unit test suite covers core conversions and preflight validator rules. | Recommended regression tests for UTF-8 dropcaps and corrupted binary dictionaries. | Emphasized complete lack of fuzz testing (`cargo-fuzz`) for Ion and Container binary parsers. | **Opus Deep Dive** |
 
 ---
 
 ## 3. Prioritized Action Items
 
-### 🚨 Critical Severity (P0 - Immediate Fix Required)
+### P0 — Critical (Immediate Fix Required)
 
-1. **[SEC-01] Execute Targeted `syncfs` Prior to Sync Success Notification**
-   - **File:** [`src/sync.rs#L687`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L687)
-   - **Risk:** Without a filesystem-level sync, unlinking the USB cable after CLI "SUCCESS" leaves dirty kernel page cache, causing truncated books and Kindle `.bad_file` blacklisting.
-   - **Fix:** Call `libc::syncfs` on the device root file descriptor before returning `Ok(dest_kfx_path)`.
+1. **Fix Path Confinement Bypass in Device Deletion**:
+   - **Files:** [`src/ui/state.rs:350-354`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs#L350-L354) and [`src/sync.rs:699-739`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L699-L739)
+   - **Problem:** `delete_device_file` sets `allowed_root = file.full_path.parent()`, rendering the confinement check a tautology.
+   - **Remediation:** Pass the active `DeviceStatus` to `delete_device_file` and supply `device.path` (or `device.root_path`) as the mandatory root constraint. Also ensure companion `.sdr` directory deletion verifies `sdr_path.starts_with(&canon_root)`.
 
-2. **[SPEC-01] Fix Validator Style Field ID Mismatch ($429 vs $157)**
-   - **File:** [`src/validator.rs#L335`](file:///home/drew/github/hwanjongyu/kfx_converter/src/validator.rs#L335)
-   - **Risk:** Validator checks field ID 429 (`backdrop_style`) instead of 157 (`style`), allowing dangling style references in storylines to pass validation and crash Kindle Hermes JS.
-   - **Fix:** Change matching pattern to `157 | 429 => { ... }`.
+2. **Serialize Device Storage Operations (Kindle VFAT / MTP Guard)**:
+   - **Files:** [`src/ui/app.rs:313-368`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L313-L368) and [`src/sync.rs:751-898`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L751-L898)
+   - **Problem:** Running 2 parallel workers that simultaneously write KFX, thumbnails, and `.sdr` sidecars over USB causes FAT corruption, USB endpoint FIFO drops, or MTP daemon deadlocks.
+   - **Remediation:** Keep the CPU-bound conversion multithreaded (generate to a temporary local staging directory), but synchronize device deployment through a sequential single-threaded queue or `DEVICE_TRANSFER_LOCK`.
 
-3. **[SEC-02] Fail-Closed Path Traversal Guard in `delete_book_file_safe`**
-   - **File:** [`src/sync.rs#L471`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L471)
-   - **Risk:** If `full_path.canonicalize()` fails, the tuple match skips and unconstrained file deletion proceeds outside `allowed_root`.
-   - **Fix:** Explicitly unpack `root.canonicalize()?` and `full_path.canonicalize()?` and enforce prefix matching before calling delete.
-
-4. **[CRIT-01] Eliminate PID Drift Risk with Immutable `NormalizedBookIR`**
-   - **Files:** [`src/pipeline.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/pipeline.rs), [`src/packager/mod.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/mod.rs), [`src/enhancements/word_wise.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/word_wise.rs)
-   - **Risk:** In-place mutations on deep-cloned `BookIR` across packager and word-wise builder risk mathematical PID divergence in Kindle Word Wise gloss rendering.
-   - **Fix:** Unify fragmentation and cover section normalization into an immutable `NormalizedBookIR` consumed by reference.
+3. **Prevent Silent Data Loss on HTML Entities in XHTML Parsing**:
+   - **Files:** [`src/epub/xhtml.rs:682`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub/xhtml.rs#L682) and [`src/epub/nav.rs:137`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub/nav.rs#L137)
+   - **Problem:** `e.unescape().unwrap_or_default()` drops text nodes whenever named HTML entities like `&nbsp;`, `&mdash;`, or `&rsquo;` appear.
+   - **Remediation:** Decode standard HTML entities or fall back to `String::from_utf8_lossy(e.as_ref())` on unescape error.
 
 ---
 
-### ⚠️ Major Severity (P1 - High Priority)
+### P1 — Major (High Priority Architectural & Stability Improvements)
 
-5. **[SPEC-02] Replace Byte Scanning `[0x03, 0x9e]` with Structured `IonReader` in `KfxContainer::open`**
-   - **File:** [`src/container.rs#L121`](file:///home/drew/github/hwanjongyu/kfx_converter/src/container.rs#L121)
-   - **Fix:** Decode `ContainerInfo` fields via `IonReader` to reliably retrieve `bcIndexTabLength` without false-positive byte matches.
+4. **Correct JPEG Restart Marker Detection Timing**:
+   - **Files:** [`src/packager/mod.rs:178-188`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/mod.rs#L178-L188) and [`src/packager/metadata.rs:107-111`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/metadata.rs#L107-L111)
+   - **Problem:** `build_content_features` scans `self.entities` before `build_resources` adds media chunks, so `yj_jpg_rst_marker_present` is never set.
+   - **Remediation:** Inspect `self.book.resources` directly for JPEG restart markers (`FF D0`–`FF D7`).
 
-6. **[PERF-01] Eliminate Multi-MB Memory Cloning in Packager & Container**
-   - **Files:** [`src/container.rs#L207`](file:///home/drew/github/hwanjongyu/kfx_converter/src/container.rs#L207), [`src/packager/mod.rs#L83`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/mod.rs#L83)
-   - **Fix:** Use `buf.drain(..header_len)` in `read_chunk`; pass resources by reference in `KfxPackager` instead of cloning `book.resources`.
+5. **Eliminate UTF-8 Slicing Panic Risk in Dropcap Processor**:
+   - **File:** [`src/epub/dropcap.rs:55-92`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub/dropcap.rs#L55-L92)
+   - **Problem:** Slicing using byte length subtraction (`spans[0].text.len() - trimmed.len()`) panics on multi-byte quotation marks (e.g. `“`, `「`) or non-ASCII dropcaps.
+   - **Remediation:** Refactor to use `char_indices()` and `char::len_utf8()`.
 
-7. **[UI-01] Fix Batch Conversion Cancellation State Corruption & UI Event Bubbling**
-   - **Files:** [`src/ui/app.rs#L367`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L367), [`src/ui/app.rs#L1817`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L1817)
-   - **Fix:** Prevent post-completion worker callback from mutating UI progress if cancellation was requested; add `cx.stop_propagation()` to row action buttons.
+6. **Fix UI Active Tasks Counter Leak on Batch Cancellation**:
+   - **File:** [`src/ui/app.rs:370-381`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L370-L381)
+   - **Problem:** Returning early when `cancel_check.load(...)` is true skips decrementing `bp.active_tasks`, leaving progress state broken.
+   - **Remediation:** Always decrement `bp.active_tasks` before evaluating `cancel_check`.
 
-8. **[SQL-01] Add `IF NOT EXISTS` to SQLite DDL in `WordWiseBuilder`**
-   - **File:** [`src/enhancements/word_wise.rs#L298`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/word_wise.rs#L298)
-   - **Fix:** Add `IF NOT EXISTS` to `CREATE TABLE metadata` and `CREATE TABLE glosses`.
-
-9. **[ARCH-01] Unify Duplicate `.sdr` Directory Creation into `SdrDeployer`**
-   - **Files:** [`src/pipeline.rs#L173`](file:///home/drew/github/hwanjongyu/kfx_converter/src/pipeline.rs#L173), [`src/sync.rs#L624`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L624)
-   - **Fix:** Extract shared sidecar and thumbnail deployment logic to prevent divergence between CLI and device sync.
-
----
-
-### 💡 Minor Severity (P2 - Quality of Life & Polish)
-
-10. **[PERF-02] $O(1)$ Symbol Interning with Companion HashMap**
-    - **File:** [`src/packager/symbols.rs#L22`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/symbols.rs#L22)
-    - **Fix:** Replace linear vector scan with a companion `HashMap<String, u32>`.
-
-11. **[UI-02] Cache Sorted Library Indices in GPUI State**
-    - **File:** [`src/ui/state.rs#L147`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs#L147)
-    - **Fix:** Invalidate and re-sort only on filter/query changes, eliminating 20,000+ lowercase string allocations per second during rendering.
-
-12. **[SEC-04] Directory Symlink Guard in `.sdr` Deletion**
-    - **File:** [`src/sync.rs#L490`](file:///home/drew/github/hwanjongyu/kfx_converter/src/sync.rs#L490)
-    - **Fix:** Ensure `!sdr_path.is_symlink()` before invoking `remove_dir_all`.
-
-13. **[UI-03] Device Deletion Confirmation Modal**
-    - **File:** [`src/ui/app.rs#L2918`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L2918)
-    - **Fix:** Add confirmation prompt before permanently deleting books from physical Kindle devices.
+7. **Safe Deserialization for Embedded Dictionary Headers**:
+   - **File:** [`src/enhancements/dictionary.rs:269-285`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/dictionary.rs#L269-L285)
+   - **Problem:** `try_into().unwrap()` panics on truncated or modified dictionary binary slices.
+   - **Remediation:** Verify `WORDWISE_DICT_BYTES.len() >= 8` and propagate `EnhancementError::InvalidDictionaryData`.
 
 ---
 
-## 4. Verification & Testing Confirmation
+### P2 — Minor & Optimization Improvements
 
-All 124 existing test cases currently pass cleanly across `container`, `css`, `enhancements`, `epub`, `ion`, `ir`, `packager`, `pipeline`, `symbols`, `sync`, and `validator`:
-```bash
-cargo test
-# test result: ok. 124 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.43s
+8. **In-Memory SQLite Serialization without Disk Round-Trip**:
+   - **File:** [`src/enhancements/word_wise.rs:373-402`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/word_wise.rs#L373-L402)
+   - **Optimization:** Use `self.conn.serialize(rusqlite::DatabaseName::Main)` to export the `.kll` SQLite database directly into a `Vec<u8>` without touching `/tmp`.
+
+9. **Zero-Allocation String Optimizations**:
+   - [`src/epub/archive.rs:40-56`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub/archive.rs#L40-L56): Return `Cow<'_, str>` in `decode_percent` when `%` is absent.
+   - [`src/css.rs:254-256`](file:///home/drew/github/hwanjongyu/kfx_converter/src/css.rs#L254-L256): Use `Vec<&str>` instead of allocating `Vec<String>` on every element style lookup.
+   - [`src/ion.rs:46-49`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs#L46-L49): Replace transient `Vec<u8>` allocations with `encode_varuint_buf` stack buffers.
+
+10. **Refactor Module Coupling & Boundary Leakage**:
+    - Move `MAGIC_ENTY`, `ENTY_HEADER_LEN`, and `wrap_enty_header` from [`src/ion.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ion.rs) to [`src/container.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/container.rs).
+    - Decouple `enhancements::sdr` from `sync::KindleSync::sanitize_asin` by moving sanitization helpers to a shared utility module.
+    - Centralize cover prepending exclusively inside `BookIR::normalize()`.
+
+11. **Asynchronous UI Startup Probing**:
+    - **File:** [`src/ui/app.rs:33-36`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/app.rs#L33-L36)
+    - **Optimization:** Avoid synchronous device scanning in `KindleStudio::new` to prevent 500ms–2000ms UI freezes during startup.
+
+12. **Introduce Fuzz Testing**:
+    - Set up `cargo-fuzz` targets for `IonReader::decode_value`, `KfxContainer::open`, and `EpubReader::read_from_file`.
+
+---
+
+## 4. Implementation Guidance & Remediation Snippets
+
+### Snippet 1: Hardened Device Deletion ([`src/ui/state.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/ui/state.rs#L350))
+
+```rust
+pub fn delete_device_file(device: &DeviceStatus, file: &KindleFile) -> Result<(), String> {
+    let allowed_root = device
+        .path
+        .as_deref()
+        .ok_or_else(|| "No active Kindle root directory available for path validation".to_string())?;
+    
+    kfx_converter::KindleSync::delete_book_file_safe(Some(allowed_root), &file.full_path)
+        .map_err(|e| format!("Failed to delete book file: {}", e))
+}
 ```
-Remediating the above findings will not break backwards compatibility and will fortify the converter against real-world hardware disconnects, malformed EPUBs, and Kindle OS edge cases.
+
+### Snippet 2: Robust XML Entity Fallback ([`src/epub/xhtml.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/epub/xhtml.rs#L682))
+
+```rust
+let text = match e.unescape() {
+    Ok(cow) => cow.into_owned(),
+    Err(_) => {
+        // Fallback: decode common HTML entities or preserve lossy raw text
+        let raw = String::from_utf8_lossy(e.as_ref());
+        raw.replace("&nbsp;", "\u{00A0}")
+           .replace("&mdash;", "—")
+           .replace("&ndash;", "–")
+           .replace("&hellip;", "…")
+           .replace("&rsquo;", "’")
+           .replace("&lsquo;", "‘")
+           .replace("&rdquo;", "”")
+           .replace("&ldquo;", "“")
+           .into_owned()
+    }
+};
+```
+
+### Snippet 3: Direct In-Memory SQLite Serialization ([`src/enhancements/word_wise.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/enhancements/word_wise.rs#L373))
+
+```rust
+pub fn to_bytes(&self) -> Result<Vec<u8>, EnhancementError> {
+    self.conn
+        .serialize(rusqlite::DatabaseName::Main)
+        .map_err(|e| EnhancementError::DatabaseError(format!("SQLite serialize error: {}", e)))
+}
+```
+
+### Snippet 4: Direct JPEG Restart Marker Inspection ([`src/packager/metadata.rs`](file:///home/drew/github/hwanjongyu/kfx_converter/src/packager/metadata.rs#L107))
+
+```rust
+let has_rst_marker = self.book.resources.values().any(|res| {
+    res.mime_type.starts_with("image/jpeg")
+        && res.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+});
+```
 
 ---
 
-## 5. Appendices: Subagent Individual Reports
+## 5. Subagent Audit Reports Appendix
 
-### Appendix A: Gemini Pro (Architecture & Deep Context Specialist)
-*See raw transcript and audit details in subagent conversation ID `57754b2e-af7a-4155-a821-95bce621d5b0`.*
+<details>
+<summary><b>Appendix A: Gemini Pro (Flagship) Architecture Report</b></summary>
 
-### Appendix B: Claude Sonnet (Logic Specialist & Rust Platform Engineer)
-*See raw transcript and audit details in subagent conversation ID `0a8f3da0-9499-4714-9b2b-ce5f17aca6e9`.*
+- Evaluated: Separation of concerns, PID parity across KFX $265 and Word Wise, preflight referential integrity graph checking (`validator.rs`), schema design, and modularity.
+- Overall architectural rating: 9.2 / 10.
+- Highlighted the strength of `KfxPreflightValidator` preventing Yellowjacket `$4` field crashes and dangling symbols.
+</details>
 
-### Appendix C: Claude Opus (Security, Concurrency & Design Architect)
-*See raw transcript and audit details in subagent conversation ID `c3160768-da1f-4eeb-b982-178b9b9cd94c`.*
+<details>
+<summary><b>Appendix B: Claude Sonnet (Extended Thinking) Logic & Systems Report</b></summary>
+
+- Evaluated: Idiomatic Rust, memory allocations, zero-alloc opportunities, dropcap UTF-8 slice boundaries, dictionary byte slice unwraps, and in-memory SQLite disk elimination.
+- Provided concrete code refactoring diffs for zero-alloc percent decoding and safe dropcap splitting.
+</details>
+
+<details>
+<summary><b>Appendix C: Claude Opus (Ultra-Reasoning) Security & Spec Report</b></summary>
+
+- Evaluated: Path traversal, deletion confinement bypass in `state.rs`, concurrent VFAT write hazards in `app.rs`, cancellation task counter leak, XML entity content loss, and Yellowjacket restart marker timing bug.
+- Formulated the prioritized P0–P3 remediation matrix and identified testing/fuzzing gaps.
+</details>
+
+---
+*Report synthesized and published to [`docs/multi_model_review_report.md`](file:///home/drew/github/hwanjongyu/kfx_converter/docs/multi_model_review_report.md).*

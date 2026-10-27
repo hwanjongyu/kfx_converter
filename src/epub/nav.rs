@@ -134,7 +134,7 @@ pub fn parse_ncx(
                 }
             }
             Ok(Event::Text(ref e)) if in_text => {
-                let txt = e.unescape().unwrap_or_default().trim().to_string();
+                let txt = crate::epub::unescape_xml_or_html(e).trim().to_string();
                 if !txt.is_empty() {
                     current_title = txt;
                 }
@@ -281,7 +281,7 @@ pub fn parse_nav_xhtml(
                 }
             }
             Ok(Event::Text(ref e)) if in_a => {
-                let txt = e.unescape().unwrap_or_default().trim().to_string();
+                let txt = crate::epub::unescape_xml_or_html(e).trim().to_string();
                 if !txt.is_empty() {
                     if !current_text.is_empty() {
                         current_text.push(' ');

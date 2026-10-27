@@ -26,6 +26,109 @@ pub use nav::*;
 pub use opf::*;
 pub use xhtml::*;
 
+/// Decodes XML and HTML named and numeric entities safely.
+///
+/// If `quick_xml::events::BytesText::unescape` encounters an unrecognized HTML entity
+/// (such as `&nbsp;`, `&mdash;`, `&ndash;`, `&hellip;`, `&rsquo;`), it returns an error.
+/// Rather than dropping the text node via `unwrap_or_default()`, this function falls back
+/// to decoding known HTML entities from the raw byte stream, preventing silent content loss.
+pub fn unescape_xml_or_html(e: &quick_xml::events::BytesText) -> String {
+    match e.unescape() {
+        Ok(s) => s.into_owned(),
+        Err(_) => {
+            let raw = String::from_utf8_lossy(e.as_ref());
+            decode_html_entities(&raw)
+        }
+    }
+}
+
+pub fn decode_html_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut replaced = s
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–")
+        .replace("&hellip;", "…")
+        .replace("&lsquo;", "‘")
+        .replace("&rsquo;", "’")
+        .replace("&ldquo;", "“")
+        .replace("&rdquo;", "”")
+        .replace("&nbsp;", "\u{00A0}")
+        .replace("&copy;", "©")
+        .replace("&reg;", "®")
+        .replace("&trade;", "™")
+        .replace("&bull;", "•")
+        .replace("&pound;", "£")
+        .replace("&euro;", "€")
+        .replace("&yen;", "¥")
+        .replace("&sect;", "§")
+        .replace("&deg;", "°")
+        .replace("&times;", "×")
+        .replace("&divide;", "÷")
+        .replace("&shy;", "");
+
+    if replaced.contains("&#") {
+        let mut out = String::with_capacity(replaced.len());
+        let mut chars = replaced.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '&' && chars.peek() == Some(&'#') {
+                chars.next(); // consume '#'
+                let is_hex = chars.peek() == Some(&'x') || chars.peek() == Some(&'X');
+                if is_hex {
+                    chars.next(); // consume 'x'/'X'
+                }
+                let mut num_str = String::new();
+                while let Some(&nc) = chars.peek() {
+                    if (is_hex && nc.is_ascii_hexdigit()) || (!is_hex && nc.is_ascii_digit()) {
+                        num_str.push(nc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if chars.peek() == Some(&';') {
+                    chars.next(); // consume ';'
+                    let parsed = if is_hex {
+                        u32::from_str_radix(&num_str, 16).ok()
+                    } else {
+                        num_str.parse::<u32>().ok()
+                    };
+                    if let Some(ch) = parsed.and_then(char::from_u32) {
+                        out.push(ch);
+                        continue;
+                    } else {
+                        out.push('&');
+                        out.push('#');
+                        if is_hex {
+                            out.push('x');
+                        }
+                        out.push_str(&num_str);
+                        out.push(';');
+                        continue;
+                    }
+                } else {
+                    out.push('&');
+                    out.push('#');
+                    if is_hex {
+                        out.push('x');
+                    }
+                    out.push_str(&num_str);
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+        replaced = out;
+    }
+    replaced
+}
+
 #[derive(Error, Debug)]
 pub enum EpubError {
     #[error("I/O error: {0}")]
@@ -1273,6 +1376,42 @@ mod tests {
             assert_eq!(spans[1].text, "t was the worst of times.");
         } else {
             panic!("Expected paragraph");
+        }
+    }
+
+    #[test]
+    fn test_xhtml_entity_unescape_preserves_html_entities() {
+        let manifest = HashMap::new();
+        let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+    <p>Chapter 1&nbsp;&mdash;&nbsp;The Beginning</p>
+    <p>It&rsquo;s an honor to meet you &hellip; truly &ldquo;remarkable&rdquo;.</p>
+    <p>Price: &#160;&pound;100 &#x26; tax &#8212; included.</p>
+</body>
+</html>"#;
+        let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
+        assert_eq!(blocks.len(), 3, "All 3 paragraphs must be preserved, none dropped by HTML entities");
+
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            let combined: String = spans.iter().map(|s| s.text.as_str()).collect();
+            assert!(combined.contains("Chapter 1\u{00A0}—\u{00A0}The Beginning"));
+        } else {
+            panic!("Expected paragraph 0");
+        }
+
+        if let Block::Paragraph { spans, .. } = &blocks[1] {
+            let combined: String = spans.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(combined, "It’s an honor to meet you … truly “remarkable”.");
+        } else {
+            panic!("Expected paragraph 1");
+        }
+
+        if let Block::Paragraph { spans, .. } = &blocks[2] {
+            let combined: String = spans.iter().map(|s| s.text.as_str()).collect();
+            assert!(combined.contains("Price: \u{00A0}£100 & tax — included."));
+        } else {
+            panic!("Expected paragraph 2");
         }
     }
 }

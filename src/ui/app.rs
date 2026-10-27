@@ -123,6 +123,7 @@ impl KindleStudio {
         if let Some(pos) = self.files.iter().position(|f| f.name == file_name) {
             let file = self.files[pos].clone();
             let file_name_owned = file_name.to_string();
+            let allowed_root = self.device.path.clone().or_else(|| self.device.root_path.clone());
             self.status_message = Some((format!("Deleting '{}'...", file_name), false));
             cx.notify();
 
@@ -130,7 +131,7 @@ impl KindleStudio {
                 let (del_res, new_device) = cx
                     .background_executor()
                     .spawn(async move {
-                        let res = super::state::delete_device_file(&file);
+                        let res = super::state::delete_device_file(allowed_root.as_deref(), &file);
                         let dev = detect_kindle_device();
                         (res, dev)
                     })
@@ -368,11 +369,13 @@ impl KindleStudio {
 
                     let cancel_check = cancel.clone();
                     let _ = this.update(cx, |this, cx| {
+                        if let Some(ref mut bp) = this.folder_state.batch_progress {
+                            bp.active_tasks = bp.active_tasks.saturating_sub(1);
+                        }
                         if cancel_check.load(std::sync::atomic::Ordering::SeqCst) {
                             return;
                         }
                         if let Some(ref mut bp) = this.folder_state.batch_progress {
-                            bp.active_tasks = bp.active_tasks.saturating_sub(1);
                             if res.is_ok() {
                                 bp.completed_tasks += 1;
                             } else {

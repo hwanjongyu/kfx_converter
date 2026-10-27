@@ -679,7 +679,7 @@ pub fn parse_xhtml_with_css(
             }
             Ok(Event::Text(ref e)) => {
                 if ignore_depth == 0 {
-                    let text = e.unescape().unwrap_or_default();
+                    let text = crate::epub::unescape_xml_or_html(e);
                     if ruby.in_ruby {
                         if !ruby.in_rp && !ruby.in_rt && footnote_depth > 0 {
                             current_footnote_text.push_str(&text);

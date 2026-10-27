@@ -55,6 +55,11 @@ pub struct KindleBookFile {
 
 pub struct KindleSync;
 
+/// Global mutual exclusion lock ensuring all write and deletion operations targeting
+/// Kindle storage (VFAT FAT table allocations, companion .sdr writes, and MTP commands)
+/// are strictly serialized to prevent filesystem corruption, USB FIFO stalls, and MTP deadlocks.
+static DEVICE_SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl KindleSync {
     /// Sanitizes an e-book title to be completely safe for FAT32 / VFAT storage
     /// and prevents directory traversal attacks (CWE-22 / CWE-73).
@@ -697,6 +702,8 @@ impl KindleSync {
     /// - If `allowed_root` is provided, ensures `full_path` is strictly contained within `allowed_root`.
     /// - Verifies `.sdr` directory extension before recursive removal to prevent path traversal.
     pub fn delete_book_file_safe(allowed_root: Option<&Path>, full_path: &Path) -> Result<(), std::io::Error> {
+        let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let ext = full_path
             .extension()
             .and_then(|e| e.to_str())
@@ -735,6 +742,16 @@ impl KindleSync {
                 && !sdr_path.is_symlink()
                 && sdr_path.extension().and_then(|e| e.to_str()) == Some("sdr")
             {
+                if let Some(root) = allowed_root {
+                    if let (Ok(canon_root), Ok(canon_sdr)) = (root.canonicalize(), sdr_path.canonicalize()) {
+                        if !canon_sdr.starts_with(&canon_root) {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                format!("SDR path {:?} is outside allowed directory {:?}", sdr_path, root),
+                            ));
+                        }
+                    }
+                }
                 let _ = std::fs::remove_dir_all(&sdr_path);
             }
         }
@@ -758,6 +775,8 @@ impl KindleSync {
         cover_jpeg: Option<&[u8]>,
         kll_bytes: Option<&[u8]>,
     ) -> Result<PathBuf, SyncError> {
+        let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let docs_dir = device_root.join("documents");
         if !docs_dir.exists() {
             return Err(SyncError::DeviceNotFound(docs_dir));
