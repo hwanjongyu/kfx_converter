@@ -1414,5 +1414,41 @@ mod tests {
             panic!("Expected paragraph 2");
         }
     }
+
+    #[test]
+    fn test_epub_dropcap_cjk_and_multibyte_quotes_no_panic() {
+        let manifest = HashMap::new();
+        let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+    <p class="has-dropcap">「人間」失格の物語。</p>
+    <p class="has-dropcap">“Élégance” et style.</p>
+    <p class="has-dropcap">   “It was the best of times.</p>
+</body>
+</html>"#;
+        let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
+        assert_eq!(blocks.len(), 3);
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            assert_eq!(spans[0].text, "「人");
+            assert!(spans[0].style.as_deref().unwrap().contains("dropcap_2"));
+            assert_eq!(spans[1].text, "間」失格の物語。");
+        } else {
+            panic!("Expected paragraph 0");
+        }
+        if let Block::Paragraph { spans, .. } = &blocks[1] {
+            assert_eq!(spans[0].text, "“É");
+            assert!(spans[0].style.as_deref().unwrap().contains("dropcap_2"));
+            assert_eq!(spans[1].text, "légance” et style.");
+        } else {
+            panic!("Expected paragraph 1");
+        }
+        if let Block::Paragraph { spans, .. } = &blocks[2] {
+            assert_eq!(spans[0].text, "   “I");
+            assert!(spans[0].style.as_deref().unwrap().contains("dropcap_2"));
+            assert_eq!(spans[1].text, "t was the best of times.");
+        } else {
+            panic!("Expected paragraph 2");
+        }
+    }
 }
 

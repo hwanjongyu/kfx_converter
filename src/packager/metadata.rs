@@ -104,7 +104,10 @@ impl<'a> KfxPackager<'a> {
         }
 
         // 2. yj_jpg_rst_marker_present: Required when emitted JPEG images have restart markers
-        let has_rst_marker = self.entities.iter().any(|e| {
+        let has_rst_marker = self.book.resources.values().any(|res| {
+            res.mime_type.starts_with("image/jpeg")
+                && res.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+        }) || self.entities.iter().any(|e| {
             e.chunk_type == 417
                 && e.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
         });

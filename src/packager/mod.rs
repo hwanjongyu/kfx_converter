@@ -1589,5 +1589,51 @@ mod tests {
         assert!(symbols_in_story.contains(&sm_sym), "Storyline must contain child font_size_sm symbol (879)");
         assert!(!symbols_in_story.contains(&xl_sym), "Storyline must NOT contain parent font_size_xl symbol (881)");
     }
+
+    #[test]
+    fn test_packager_emits_yj_jpg_rst_marker_content_feature() {
+        let mut book = BookIR::default();
+        book.metadata.title = "RST Test".to_string();
+        // Insert a JPEG containing a restart marker (0xFF 0xD0)
+        book.resources.insert(
+            "rst_img".to_string(),
+            crate::ir::ResourceAsset {
+                id: "rst_img".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xD0, 0x01, 0x02],
+            },
+        );
+        book.sections.push(Section {
+            id: "sec_1".to_string(),
+            title: "Sec 1".to_string(),
+            blocks: vec![Block::Image {
+                id: "img_1".to_string(),
+                resource_id: "rst_img".to_string(),
+                alt: None,
+                width: None,
+                height: None,
+            }],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let size = packager.package(&mut buffer).expect("Packaging failed");
+        assert!(size > 0);
+
+        let content_features_ent = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == 585)
+            .expect("Content features entity $585 must exist");
+
+        let has_rst_flag = content_features_ent
+            .data
+            .windows(b"yj_jpg_rst_marker_present".len())
+            .any(|w| w == b"yj_jpg_rst_marker_present");
+        assert!(
+            has_rst_flag,
+            "Content features entity $585 must declare 'yj_jpg_rst_marker_present' when restart markers exist in resources"
+        );
+    }
 }
 

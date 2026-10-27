@@ -266,28 +266,32 @@ fn parse_builtin_and_ground_truth_vocab() -> HashMap<&'static str, (u8, u32)> {
 
     // 2. Parse Amazon Ground Truth binary dataset (52,000+ lemmas with native sense IDs)
     if WORDWISE_DICT_BYTES.len() >= 8 && &WORDWISE_DICT_BYTES[0..4] == b"WWK1" {
-        let count = u32::from_le_bytes(WORDWISE_DICT_BYTES[4..8].try_into().unwrap()) as usize;
-        let mut offset = 8;
-        for _ in 0..count {
-            if offset >= WORDWISE_DICT_BYTES.len() {
-                break;
-            }
-            let len = WORDWISE_DICT_BYTES[offset] as usize;
-            offset += 1;
-            if offset + len + 5 > WORDWISE_DICT_BYTES.len() {
-                break;
-            }
-            if let Ok(lemma) = std::str::from_utf8(&WORDWISE_DICT_BYTES[offset..offset + len]) {
-                offset += len;
-                let diff = WORDWISE_DICT_BYTES[offset];
+        if let Some(count_bytes) = WORDWISE_DICT_BYTES.get(4..8).and_then(|s| s.try_into().ok()) {
+            let count = u32::from_le_bytes(count_bytes) as usize;
+            let mut offset = 8;
+            for _ in 0..count {
+                if offset >= WORDWISE_DICT_BYTES.len() {
+                    break;
+                }
+                let len = WORDWISE_DICT_BYTES[offset] as usize;
                 offset += 1;
-                let sense_id = u32::from_le_bytes(
-                    WORDWISE_DICT_BYTES[offset..offset + 4].try_into().unwrap(),
-                );
-                offset += 4;
-                map.entry(lemma).or_insert((diff, sense_id));
-            } else {
-                offset += len + 5;
+                if offset + len + 5 > WORDWISE_DICT_BYTES.len() {
+                    break;
+                }
+                if let Ok(lemma) = std::str::from_utf8(&WORDWISE_DICT_BYTES[offset..offset + len]) {
+                    offset += len;
+                    let diff = WORDWISE_DICT_BYTES[offset];
+                    offset += 1;
+                    if let Some(sense_bytes) = WORDWISE_DICT_BYTES.get(offset..offset + 4).and_then(|s| s.try_into().ok()) {
+                        let sense_id = u32::from_le_bytes(sense_bytes);
+                        offset += 4;
+                        map.entry(lemma).or_insert((diff, sense_id));
+                    } else {
+                        break;
+                    }
+                } else {
+                    offset += len + 5;
+                }
             }
         }
     }
