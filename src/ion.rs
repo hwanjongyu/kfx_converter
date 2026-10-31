@@ -617,7 +617,10 @@ impl<'a> IonReader<'a> {
                     b.copy_from_slice(&self.buf[payload_start..payload_end]);
                     f64::from_be_bytes(b)
                 } else {
-                    0.0
+                    return Err(IonError::MalformedIon(format!(
+                        "Invalid Ion float length: {}",
+                        content_len
+                    )));
                 };
                 self.offset = payload_end;
                 IonValue::Float(f_val)
@@ -1146,5 +1149,15 @@ mod tests {
         let mut reader = IonReader::new(&malformed);
         let result = reader.decode_value();
         assert!(result.is_err(), "Child element exceeding parent container bounds must return Err");
+    }
+
+    #[test]
+    fn test_ion_invalid_float_length_rejected() {
+        // Ion Type 4 (Float) declaring length 3 (invalid, must be 0, 4, or 8)
+        let malformed = [0x43, 0x01, 0x02, 0x03];
+        let mut reader = IonReader::new(&malformed);
+        let result = reader.decode_value();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), IonError::MalformedIon(msg) if msg.contains("Invalid Ion float length")));
     }
 }

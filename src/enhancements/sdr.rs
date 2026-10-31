@@ -76,8 +76,9 @@ impl SdrDeployer {
             }
 
             let mut ids = vec![safe_asin.clone()];
-            if safe_asin.len() >= 9 {
-                let asin_10 = format!("B{}", &safe_asin[..9]);
+            let prefix: String = safe_asin.chars().take(9).collect();
+            if prefix.len() == 9 {
+                let asin_10 = format!("B{}", prefix);
                 if asin_10 != safe_asin {
                     ids.push(asin_10);
                 }

@@ -29,6 +29,9 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 ### 1. Word Wise & Linguistic Enhancements
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
+| **Kindle Master Vocabulary (52k+ Lemmas)** | [spec-word-wise-master-vocabulary-expansion.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-word-wise-master-vocabulary-expansion.md) | [qa-word-wise-master-vocabulary-expansion.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-word-wise-master-vocabulary-expansion.md) | **PASS** |
+| **Word Wise Priority Window Pacing** | [spec-word-wise-priority-pacing.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-word-wise-priority-pacing.md) | [qa-word-wise-priority-pacing.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-word-wise-priority-pacing.md) | **PASS** |
+| **Multi-Language Tag Alias Deployment** | [spec-fix-word-wise-language-tag.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-word-wise-language-tag.md) | [qa-fix-word-wise-language-tag.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-word-wise-language-tag.md) | **PASS** |
 | **Amazon Ground Truth Vocabulary (20k Lemmas)** | [spec-amazon-ground-truth-word-wise-dictionary.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-amazon-ground-truth-word-wise-dictionary.md) | [qa-amazon-ground-truth-word-wise-dictionary.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-amazon-ground-truth-word-wise-dictionary.md) | **PASS** |
 | **Word Wise E-Ink In-line Rendering & Visibility** | [spec-fix-word-wise-visibility.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-word-wise-visibility.md) | [qa-fix-word-wise-visibility.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-word-wise-visibility.md) | **PASS** |
 | **Word Wise Sidecar Deployment & Pairing** | [spec-fix-word-wise-deployment.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-word-wise-deployment.md) | [qa-fix-word-wise-deployment.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-word-wise-deployment.md) | **PASS** |
@@ -82,6 +85,8 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 | Category | Spec | QA Log | Core Issues Resolved |
 | :--- | :--- | :--- | :--- |
 | **Multi-Model Engineering Audit Remediation** | [spec-fix-multi-model-audit.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-multi-model-audit.md) | [qa-fix-multi-model-audit.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-multi-model-audit.md) | Address all consensus findings from the tri-model audit. |
+| **P1 Optimizations** | [spec-fix-p1-optimizations.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p1-optimizations.md) | [qa-fix-p1-optimizations.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p1-optimizations.md) | Zero-clone section iteration, sync latency reduction, Word Wise PID alignment, FAT32 EROFS detection. |
+| **P2 Hardening** | [spec-fix-p2-hardening.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p2-hardening.md) | [qa-fix-p2-hardening.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p2-hardening.md) | Unicode prefix slicing, checked container math, single stat syscall, strict float checks, validator recursion guard. |
 | **P0 Blocker** | [spec-fix-p0-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p0-issues.md) | [qa-fix-p0-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p0-issues.md) | Uncompressed BVM, symbol collision in local scope, trailing null bytes. |
 | **P1 Critical** | [spec-fix-p1-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p1-issues.md) | [qa-fix-p1-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p1-issues.md) | Format capabilities envelope order, missing PID maps, cover aspect distortion. |
 | **P2 Major** | [spec-fix-p2-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p2-issues.md) | [qa-fix-p2-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p2-issues.md) | Stale `.sdr` artifacts cleanup, GIO copy non-blocking timeouts, hyphenation flags. |
@@ -116,11 +121,14 @@ docs/
 │   ├── spec-fix-navigation-crash.md
 │   ├── spec-fix-p0-issues.md
 │   ├── spec-fix-p1-issues.md
+│   ├── spec-fix-p1-optimizations.md
+│   ├── spec-fix-p2-hardening.md
 │   ├── spec-fix-p2-issues.md
 │   ├── spec-fix-p3-issues.md
 │   ├── spec-fix-sleep-cover-and-kfx-compliance.md
 │   ├── spec-fix-toc-page-list-filtering.md
 │   ├── spec-fix-word-wise-deployment.md
+│   ├── spec-fix-word-wise-language-tag.md
 │   ├── spec-fix-word-wise-visibility.md
 │   ├── spec-gui-ux-polish.md
 │   ├── spec-gui-virtualized-list-performance.md
@@ -129,7 +137,9 @@ docs/
 │   ├── spec-kindle-paperwhite-sync-fix.md
 │   ├── spec-permanent-guards-image-usb.md
 │   ├── spec-preflight-reference-validator.md
-│   └── spec-preserve-epub-file-boundaries.md
+│   ├── spec-preserve-epub-file-boundaries.md
+│   ├── spec-word-wise-master-vocabulary-expansion.md
+│   └── spec-word-wise-priority-pacing.md
 │
 └── qa/                                           # QA Test Logs & Verification Reports (Phase 2)
     ├── qa-advanced-styling-and-dropcap-fidelity.md
@@ -150,11 +160,14 @@ docs/
     ├── qa-fix-navigation-crash.md
     ├── qa-fix-p0-issues.md
     ├── qa-fix-p1-issues.md
+    ├── qa-fix-p1-optimizations.md
+    ├── qa-fix-p2-hardening.md
     ├── qa-fix-p2-issues.md
     ├── qa-fix-p3-issues.md
     ├── qa-fix-sleep-cover-and-kfx-compliance.md
     ├── qa-fix-toc-page-list-filtering.md
     ├── qa-fix-word-wise-deployment.md
+    ├── qa-fix-word-wise-language-tag.md
     ├── qa-fix-word-wise-visibility.md
     ├── qa-gui-ux-polish.md
     ├── qa-gui-virtualized-list-performance.md
@@ -163,5 +176,7 @@ docs/
     ├── qa-kindle-paperwhite-sync-fix.md
     ├── qa-permanent-guards-image-usb.md
     ├── qa-preflight-reference-validator.md
-    └── qa-preserve-epub-file-boundaries.md
+    ├── qa-preserve-epub-file-boundaries.md
+    ├── qa-word-wise-master-vocabulary-expansion.md
+    └── qa-word-wise-priority-pacing.md
 ```

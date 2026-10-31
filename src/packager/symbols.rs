@@ -124,7 +124,8 @@ pub fn resolve_asin(identifier: &str, content_id: &str) -> String {
         cleaned.to_uppercase()
     } else {
         // Deterministic 10-character Amazon ASIN: 'B' followed by first 9 hex digits of content_id
-        format!("B{}", &content_id[..9])
+        let prefix: String = content_id.chars().take(9).collect();
+        format!("B{}", prefix)
     }
 }
 

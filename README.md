@@ -33,11 +33,11 @@ The major catch, however, is that producing valid KFX files typically relies on 
 - **Full Locator & Position Mapping**: Emits Amazon Kindle internal locator suites including `$609` (section position ID map), `$264` (position map), `$265` (position ID map), `$550` (350 chars/location map), and `$621` (`yj.location_pid_map`).
 - **Kindle OS Crash Mitigation (Chapter Fragmentation)**: Automatically splits oversized sections exceeding calibrated thresholds (3,500 characters or 15 blocks) with full TOC/Page-List remapping to prevent reader engines from hitting Kindle's 240MB `pmond` memory ceiling.
 - **Reading Enhancements**:
-  - **Word Wise Sidecars (`.kll`)**: Automatically builds Amazon LanguageLayer SQLite databases with a curated built-in CEFR B2–C2 academic lemma dictionary.
+  - **Word Wise Sidecars (`.kll`)**: Automatically builds Amazon LanguageLayer SQLite databases with an expanded 52,000+ Kindle master lemma dictionary.
   - **Cover Thumbnails**: Generates baseline JPEG thumbnails matching Kindle display requirements.
 - **Universal Kindle Synchronization**: Automated device detection and sideloading supporting all Kindle generations (Paperwhite, Oasis, Voyage, Basic, Scribe, Colorsoft) across USB Mass Storage (UMS), Linux GVFS MTP (`/run/user/$UID/gvfs/mtp:*`), and headless sysfs probing with `KINDLE_ROOT` overrides.
 - **Automated Multi-Platform CI/CD**: Strict GitHub Actions pipeline testing Linux and macOS runners with zero-warning lint gates (`-D warnings`).
-- **Dual Frontends**: Fast CLI tool (`kfx-conv`) and modern GPU-accelerated desktop UI (`kfx-studio` powered by GPUI).
+- **Dual Frontends**: Fast CLI tool (`kfx-conv`) and modern GPU-accelerated desktop UI (`kfx-studio` powered by GPUI with embedded Windows PE metadata and UAC manifest).
 
 ---
 
@@ -75,7 +75,7 @@ flowchart TD
 ## 📦 Project Structure
 
 ```
-converter_epub2kfx/
+kfx_converter/
 ├── Cargo.toml                 # Package configuration and feature flags
 ├── build.rs                   # Build script
 ├── .github/workflows/ci.yml   # Multi-platform (Linux & macOS) CI/CD pipeline

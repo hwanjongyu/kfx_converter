@@ -73,6 +73,12 @@ pub enum ValidationError {
         field_name: String,
         reason: String,
     },
+
+    #[error("Validator recursion depth limit exceeded ({depth} > {max})")]
+    RecursionLimitExceeded {
+        depth: usize,
+        max: usize,
+    },
 }
 
 /// Summary report produced by a successful pre-flight reference validation.
@@ -90,6 +96,8 @@ pub struct KfxPreflightValidator<'a> {
 }
 
 impl<'a> KfxPreflightValidator<'a> {
+    pub const MAX_VALIDATOR_DEPTH: usize = 64;
+
     pub fn new(entities: &'a [KfxEntity], symbols: Option<&'a LocalSymbols>) -> Self {
         Self { entities, symbols }
     }
@@ -143,7 +151,7 @@ impl<'a> KfxPreflightValidator<'a> {
             })?;
 
             for val in &root_values {
-                self.walk_value(val, ent, &entity_map, &defined_eids, &mut ref_count)?;
+                self.walk_value(val, ent, &entity_map, &defined_eids, &mut ref_count, 0)?;
             }
         }
 
@@ -164,14 +172,22 @@ impl<'a> KfxPreflightValidator<'a> {
         entity_map: &HashMap<(u32, u32), &KfxEntity>,
         defined_eids: &HashSet<u32>,
         ref_count: &mut usize,
+        depth: usize,
     ) -> Result<(), ValidationError> {
+        if depth > Self::MAX_VALIDATOR_DEPTH {
+            return Err(ValidationError::RecursionLimitExceeded {
+                depth,
+                max: Self::MAX_VALIDATOR_DEPTH,
+            });
+        }
+
         match val {
             IonValue::Annotated(_annots, inner) => {
-                self.walk_value(inner, referrer, entity_map, defined_eids, ref_count)?;
+                self.walk_value(inner, referrer, entity_map, defined_eids, ref_count, depth + 1)?;
             }
             IonValue::List(items) => {
                 for item in items {
-                    self.walk_value(item, referrer, entity_map, defined_eids, ref_count)?;
+                    self.walk_value(item, referrer, entity_map, defined_eids, ref_count, depth + 1)?;
                 }
             }
             IonValue::Struct(fields) => {
@@ -416,7 +432,7 @@ impl<'a> KfxPreflightValidator<'a> {
                     }
 
                     // Recurse into child value
-                    self.walk_value(fval, referrer, entity_map, defined_eids, ref_count)?;
+                    self.walk_value(fval, referrer, entity_map, defined_eids, ref_count, depth + 1)?;
                 }
             }
             _ => {}
@@ -689,5 +705,26 @@ mod tests {
             }
             _ => panic!("Expected MissingFragment for style, got {:?}", err),
         }
+    }
+
+    #[test]
+    fn test_validator_recursion_depth_limit() {
+        // Build a deeply nested Ion structure (70 levels deep, within IonReader's 128 limit but exceeding validator's 64 limit)
+        let mut cur = IonValue::Int(42);
+        for _ in 0..70 {
+            cur = IonValue::List(vec![cur]);
+        }
+
+        let mut w = IonWriter::new();
+        w.write_bvm();
+        w.write_value(&cur);
+
+        let entities = vec![
+            KfxEntity { entity_id: 1000, chunk_type: 259, data: w.into_bytes() },
+        ];
+
+        let validator = KfxPreflightValidator::new(&entities, None);
+        let err = validator.validate().unwrap_err();
+        assert!(matches!(err, ValidationError::RecursionLimitExceeded { depth: 65, max: 64 }));
     }
 }

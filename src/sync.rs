@@ -595,7 +595,8 @@ impl KindleSync {
                         if valid_exts.contains(&ext.as_str()) {
                             let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                             let format = ext.to_uppercase();
-                            let (size_bytes, size_formatted) = match std::fs::metadata(&path) {
+                            let meta_res = std::fs::metadata(&path);
+                            let (size_bytes, size_formatted) = match &meta_res {
                                 Ok(meta) => {
                                     let bytes = meta.len();
                                     let s = if bytes >= 1024 * 1024 {
@@ -608,8 +609,8 @@ impl KindleSync {
                                 Err(_) => (0, "0 KB".into()),
                             };
 
-                            let (modified_timestamp, modified) = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-                                Ok(time) => {
+                            let (modified_timestamp, modified) = match meta_res.as_ref().ok().and_then(|m| m.modified().ok()) {
+                                Some(time) => {
                                     let ts = time
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_secs())
@@ -626,7 +627,7 @@ impl KindleSync {
                                     };
                                     (ts, s)
                                 }
-                                Err(_) => (0, "Unknown".into()),
+                                None => (0, "Unknown".into()),
                             };
 
                             let (title, author) = if let Ok(rel) = path.strip_prefix(doc_path) {
@@ -961,8 +962,9 @@ impl KindleSync {
                         let _ = std::fs::remove_file(&path);
                     } else if let Some(asin) = current_asin {
                         let asin_lower = asin.to_lowercase();
-                        let asin_10 = if asin_lower.len() >= 9 {
-                            format!("b{}", &asin_lower[..9])
+                        let prefix: String = asin_lower.chars().take(9).collect();
+                        let asin_10 = if prefix.len() == 9 {
+                            format!("b{}", prefix)
                         } else {
                             asin_lower.clone()
                         };

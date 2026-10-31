@@ -13,8 +13,8 @@ Thank you for your interest in contributing to `kfx-converter`! We welcome bug r
 
 ```bash
 # Clone the repository
-git clone https://github.com/drew-developer/converter_epub2kfx.git
-cd converter_epub2kfx
+git clone https://github.com/hwanjongyu/kfx_converter.git
+cd kfx_converter
 
 # Verify build
 cargo check
@@ -28,11 +28,11 @@ cargo test
 - **`src/symbols.rs`**: Amazon Yellowjacket standard symbol table and enum definitions.
 - **`src/ion.rs`**: Pure-Rust Amazon Ion 1.0 binary serialization.
 - **`src/container.rs`**: KFX container binary format (`CONT` / `ENTY`).
-- **`src/epub.rs`**: EPUB parsing and DOM event extraction via `quick-xml`.
-- **`src/ir.rs`**: Intermediate representation (`BookIR`) and chapter fragmentation algorithms.
-- **`src/packager.rs`**: Yellowjacket entity assembly, location maps, and metadata generation.
+- **`src/epub/`**: Modular EPUB parsing, CSS sanitization, and streaming DOM event extraction.
+- **`src/ir.rs`**: Intermediate representation (`BookIR`) and section fragmentation algorithms.
+- **`src/packager/`**: Modular Yellowjacket entity assembly, location maps, and metadata generation.
 - **`src/enhancements/`**: Word Wise sidecar generator and cover image optimizer.
-- **`src/sync.rs`**: Kindle device detection and synchronization.
+- **`src/sync.rs`**: Universal Kindle device detection and synchronization.
 - **`src/ui/`**: GPUI-based desktop user interface (`kfx-studio`).
 
 ---

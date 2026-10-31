@@ -270,17 +270,26 @@ impl KfxContainer {
             ));
         }
         let index_tab_offset: u32 = 18;
-        let index_tab_length: u32 = entity_table_entries.len() as u32;
+        let index_tab_length: u32 = u32::try_from(entity_table_entries.len())
+            .map_err(|_| ContainerError::CorruptedHeader("index_tab_length overflow".into()))?;
 
         let doc_sym_bytes = doc_symbols_data.unwrap_or(&[]);
-        let doc_sym_offset = index_tab_offset + index_tab_length;
-        let doc_sym_length = doc_sym_bytes.len() as u32;
+        let doc_sym_offset = index_tab_offset
+            .checked_add(index_tab_length)
+            .ok_or_else(|| ContainerError::CorruptedHeader("Container doc_sym_offset overflow".into()))?;
+        let doc_sym_length = u32::try_from(doc_sym_bytes.len())
+            .map_err(|_| ContainerError::CorruptedHeader("doc_sym_length overflow".into()))?;
 
         let format_caps_bytes = format_caps_data.unwrap_or(&[]);
-        let format_caps_offset = doc_sym_offset + doc_sym_length;
-        let format_caps_length = format_caps_bytes.len() as u32;
+        let format_caps_offset = doc_sym_offset
+            .checked_add(doc_sym_length)
+            .ok_or_else(|| ContainerError::CorruptedHeader("Container format_caps_offset overflow".into()))?;
+        let format_caps_length = u32::try_from(format_caps_bytes.len())
+            .map_err(|_| ContainerError::CorruptedHeader("format_caps_length overflow".into()))?;
 
-        let ci_offset = format_caps_offset + format_caps_length;
+        let ci_offset = format_caps_offset
+            .checked_add(format_caps_length)
+            .ok_or_else(|| ContainerError::CorruptedHeader("Container ci_offset overflow".into()))?;
 
         // Build ContainerInfo Ion structure
         let sym_bc_cont_id = symbol_id("bcContId").unwrap_or(409);
@@ -319,10 +328,14 @@ impl KfxContainer {
         ci_writer.write_bvm();
         ci_writer.write_value(&ci_fields);
         let ci_bytes = ci_writer.into_bytes();
-        let ci_length = ci_bytes.len() as u32;
+        let ci_length = u32::try_from(ci_bytes.len())
+            .map_err(|_| ContainerError::CorruptedHeader("ci_length overflow".into()))?;
 
         let kfxgen_info = b"[]";
-        let header_length = ci_offset + ci_length + kfxgen_info.len() as u32;
+        let header_length = ci_offset
+            .checked_add(ci_length)
+            .and_then(|v| v.checked_add(kfxgen_info.len() as u32))
+            .ok_or_else(|| ContainerError::CorruptedHeader("Container header_length overflow".into()))?;
 
         // Write Fixed 18-byte CONT Header (<4sHIII)
         writer.write_all(KFX_MAGIC)?;

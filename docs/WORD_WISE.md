@@ -250,8 +250,8 @@ flowchart LR
     WW_BUILDER --> KLL_DB[(LanguageLayer.en.ASIN.kll)]
 ```
 
-### 8.1 20,000+ Ground Truth Vocabulary (`wordwise_dict.bin`)
-Rather than relying on small heuristic word lists, `kfx-converter` bundles **20,666 verified Amazon ground truth lemmas** extracted directly from commercial Kindle editions.
+### 8.1 52,000+ Ground Truth Vocabulary (`wordwise_dict.bin`)
+Rather than relying on small heuristic word lists, `kfx-converter` bundles **52,000+ verified Amazon ground truth lemmas and inflections** extracted directly from Kindle system master dictionaries (`kll.en.en.klld`).
 - **Embedded Size**: Stored in a compact, binary-packed format (`WWK1`) occupying only **283.8 KB**.
 - **Zero Heap Allocations**: At initialization, static string slices reference read-only memory directly via `OnceLock`.
 
