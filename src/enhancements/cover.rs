@@ -65,6 +65,13 @@ impl CoverOptimizer {
         let is_jpeg = data.starts_with(b"\xff\xd8");
         let is_progressive_jpeg = is_jpeg && data.windows(2).any(|w| w == [0xff, 0xc2]);
 
+        // Fast-path: query header dimensions without full raster pixel decode
+        if let Some((w, h)) = Self::get_image_dimensions(data) {
+            if w <= max_dim && h <= max_dim && !is_progressive_jpeg {
+                return Ok(data.to_vec());
+            }
+        }
+
         let img = Self::decode_with_safety_limits(data)?;
         let (w, h) = (img.width(), img.height());
 

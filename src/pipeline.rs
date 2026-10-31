@@ -152,7 +152,7 @@ impl ConversionPipeline {
             if let Some(ref cb) = progress {
                 cb(0.75, "Generating Word Wise lemma sidecar database...");
             }
-            let book_revision = content_id[..8].to_lowercase();
+            let book_revision = content_id.chars().take(8).collect::<String>().to_lowercase();
             let mut ww_builder = WordWiseBuilder::new(
                 &asin,
                 &container_id,
@@ -166,18 +166,19 @@ impl ConversionPipeline {
             if let Ok(bytes) = ww_builder.to_bytes() {
                 kll_bytes = Some(bytes);
             }
-
-            // Always deploy companion .sdr directory and sidecars alongside output_path
-            let sdr_path = output_path.with_extension("sdr");
-            let _ = crate::enhancements::SdrDeployer::deploy(
-                &sdr_path,
-                &asin,
-                Some(&content_id),
-                Some(&options.content_type),
-                cover_jpeg.as_deref(),
-                kll_bytes.as_deref(),
-            );
         }
+
+        // 4b. Always deploy companion .sdr directory and sidecars alongside output_path
+        let sdr_path = output_path.with_extension("sdr");
+        let _ = crate::enhancements::SdrDeployer::deploy(
+            &sdr_path,
+            &asin,
+            Some(&content_id),
+            Some(&options.content_type),
+            Some(&ir.metadata.language),
+            cover_jpeg.as_deref(),
+            kll_bytes.as_deref(),
+        );
 
         // 5. Automatic Device Sync if enabled or if destination is inside a Kindle drive
         let mut synced_to_device = false;
@@ -219,6 +220,7 @@ impl ConversionPipeline {
                 &asin,
                 Some(&content_id),
                 Some(&options.content_type),
+                Some(&ir.metadata.language),
                 cover_jpeg.as_deref(),
                 kll_bytes.as_deref(),
             ) {

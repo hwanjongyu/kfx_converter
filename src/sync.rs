@@ -485,6 +485,8 @@ impl KindleSync {
 
     /// Safely flushes dirty filesystem caches and unmounts the connected Kindle device.
     pub fn eject_device(root: &Path) -> Result<(), SyncError> {
+        let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // 1. Flush file system write cache to prevent eMMC data loss.
         // On Linux, use syncfs on the device root file descriptor to flush only the Kindle
         // filesystem instead of forcing a global host-wide sync across all drives.
@@ -772,6 +774,7 @@ impl KindleSync {
         asin: &str,
         content_id: Option<&str>,
         cde_content_type: Option<&str>,
+        book_language: Option<&str>,
         cover_jpeg: Option<&[u8]>,
         kll_bytes: Option<&[u8]>,
     ) -> Result<PathBuf, SyncError> {
@@ -890,6 +893,7 @@ impl KindleSync {
             &safe_asin,
             content_id,
             cde_content_type,
+            book_language,
             cover_jpeg,
             kll_bytes,
         );
@@ -1154,6 +1158,7 @@ mod tests {
             "B00TESTASIN",
             Some("1234567890ABCDEF1234567890ABCDEF"),
             Some("EBOK"),
+            Some("en"),
             None,
             None,
         );
@@ -1181,6 +1186,7 @@ mod tests {
             "B00TEST1234",
             Some("ABCDEF1234567890ABCDEF1234567890"),
             Some("EBOK"),
+            Some("en-US"),
             Some(&fake_jpeg),
             None,
         );

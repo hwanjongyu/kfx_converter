@@ -51,18 +51,36 @@ impl<'a> KfxPackager<'a> {
             // Kindle OS lockscreen ("Display Cover") and extractors require standard baseline JPEG.
             // For general content images, downscale oversized images (> 2560x2560) to protect 512MB Kindle OS.
             let (payload_data, format_sym, mime_type) = if is_cover_res {
-                let opt_cover = crate::enhancements::CoverOptimizer::optimize_cover_image(
+                let opt_cover = match crate::enhancements::CoverOptimizer::optimize_cover_image(
                     &asset.data,
                     crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
-                )
-                .unwrap_or_else(|_| asset.data.clone());
+                ) {
+                    Ok(data) => data,
+                    Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
+                        eprintln!(
+                            "Warning: Cover image dimensions ({}x{}) exceed safe limits; skipping payload.",
+                            w, h
+                        );
+                        Vec::new()
+                    }
+                    Err(_) => asset.data.clone(),
+                };
                 (opt_cover, sym_jpg, "image/jpeg".to_string())
             } else if asset.mime_type.starts_with("image/") {
-                let opt_content = crate::enhancements::CoverOptimizer::optimize_content_image(
+                let opt_content = match crate::enhancements::CoverOptimizer::optimize_content_image(
                     &asset.data,
                     crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
-                )
-                .unwrap_or_else(|_| asset.data.clone());
+                ) {
+                    Ok(data) => data,
+                    Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
+                        eprintln!(
+                            "Warning: Image resource '{}' dimensions ({}x{}) exceed safe limits; skipping payload.",
+                            res_id, w, h
+                        );
+                        Vec::new()
+                    }
+                    Err(_) => asset.data.clone(),
+                };
                 let is_png = asset.mime_type.contains("png") && opt_content.starts_with(b"\x89PNG");
                 let f_sym = if is_png { sym_png } else { sym_jpg };
                 let m_type = if is_png { "image/png".to_string() } else { "image/jpeg".to_string() };

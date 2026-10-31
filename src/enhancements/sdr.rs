@@ -21,10 +21,18 @@ impl SdrDeployer {
         }
     }
 
-    /// Safely writes bytes to a file inside the `.sdr` directory, handling pre-existing read-only permissions.
+    /// Safely writes bytes to a file inside the `.sdr` directory, handling pre-existing read-only permissions
+    /// and performing atomic file persistence via a staged temporary file to prevent corruption on USB disconnect.
     fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Self::prepare_for_overwrite(path);
-        std::fs::write(path, bytes)
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp_file = tempfile::Builder::new()
+            .prefix(".sdr_tmp.")
+            .tempfile_in(parent)?;
+        std::io::Write::write_all(&mut tmp_file, bytes)?;
+        std::io::Write::flush(&mut tmp_file)?;
+        tmp_file.persist(path).map_err(|e| e.error)?;
+        Ok(())
     }
 
     /// Deploys all companion sidecar files into the target `.sdr` directory.
@@ -33,6 +41,7 @@ impl SdrDeployer {
         asin: &str,
         content_id: Option<&str>,
         cde_content_type: Option<&str>,
+        book_language: Option<&str>,
         cover_jpeg: Option<&[u8]>,
         kll_bytes: Option<&[u8]>,
     ) -> std::io::Result<()> {
@@ -41,27 +50,50 @@ impl SdrDeployer {
         let safe_asin = crate::sync::KindleSync::sanitize_asin(asin);
         let safe_cid = content_id.map(crate::sync::KindleSync::sanitize_asin);
 
-        // 1. Deploy Word Wise sidecar (.kll) and ASIN aliases
+        // 1. Deploy Word Wise sidecar (.kll) and multi-language / ASIN aliases
         if let Some(kll) = kll_bytes {
-            let primary_kll = sdr_dir.join(format!("LanguageLayer.en.{}.kll", safe_asin));
-            Self::write_file(&primary_kll, kll)?;
+            let mut lang_tags: Vec<String> = vec!["en".to_string(), "EN".to_string()];
+            if let Some(raw_lang) = book_language {
+                let clean = raw_lang.trim();
+                if !clean.is_empty() {
+                    let upper = clean.to_ascii_uppercase();
+                    let lower = clean.to_ascii_lowercase();
+                    let parts: Vec<&str> = clean.split(['-', '_']).collect();
+                    let bcp47 = if parts.len() == 2 {
+                        format!("{}-{}", parts[0].to_ascii_lowercase(), parts[1].to_ascii_uppercase())
+                    } else {
+                        clean.to_string()
+                    };
+                    let primary_upper = parts[0].to_ascii_uppercase();
+                    let primary_lower = parts[0].to_ascii_lowercase();
 
-            // 10-char canonical ASIN alias (B...) if safe_asin is 32-hex
-            if safe_asin.len() >= 9 {
-                let asin_10 = format!("B{}", &safe_asin[..9]);
-                if asin_10 != safe_asin {
-                    let alias_kll = sdr_dir.join(format!("LanguageLayer.en.{}.kll", asin_10));
-                    let _ = Self::write_file(&alias_kll, kll);
+                    for tag in [clean.to_string(), upper, lower, bcp47, primary_upper, primary_lower] {
+                        if !lang_tags.contains(&tag) {
+                            lang_tags.push(tag);
+                        }
+                    }
                 }
             }
 
-            // Fallback content ID sidecar for dual-lookup compatibility
+            let mut ids = vec![safe_asin.clone()];
+            if safe_asin.len() >= 9 {
+                let asin_10 = format!("B{}", &safe_asin[..9]);
+                if asin_10 != safe_asin {
+                    ids.push(asin_10);
+                }
+            }
             if let Some(ref cid) = safe_cid
                 && cid != &safe_asin
                 && !cid.is_empty()
             {
-                let cid_kll = sdr_dir.join(format!("LanguageLayer.en.{}.kll", cid));
-                let _ = Self::write_file(&cid_kll, kll);
+                ids.push(cid.clone());
+            }
+
+            for id in &ids {
+                for tag in &lang_tags {
+                    let kll_path = sdr_dir.join(format!("LanguageLayer.{}.{}.kll", tag, id));
+                    let _ = Self::write_file(&kll_path, kll);
+                }
             }
         }
 
@@ -119,15 +151,19 @@ mod tests {
             asin,
             Some(content_id),
             Some("EBOK"),
+            Some("EN-CA"),
             Some(cover_data),
             Some(kll_data),
         )
         .unwrap();
 
-        // 1. Verify primary and alias .kll files
+        // 1. Verify primary, EN-CA, and alias .kll files
         assert!(sdr_path.join(format!("LanguageLayer.en.{}.kll", asin)).is_file());
+        assert!(sdr_path.join(format!("LanguageLayer.EN-CA.{}.kll", asin)).is_file());
+        assert!(sdr_path.join(format!("LanguageLayer.EN-CA.B{}.kll", &asin[..9])).is_file());
         assert!(sdr_path.join(format!("LanguageLayer.en.B{}.kll", &asin[..9])).is_file());
         assert!(sdr_path.join(format!("LanguageLayer.en.{}.kll", content_id)).is_file());
+        assert!(sdr_path.join(format!("LanguageLayer.EN-CA.{}.kll", content_id)).is_file());
 
         // 2. Verify cover.jpg and thumbnails
         assert!(sdr_path.join("cover.jpg").is_file());
