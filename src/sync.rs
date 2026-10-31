@@ -786,6 +786,21 @@ impl KindleSync {
         }
 
         // Pre-flight check: ensure storage is not mounted read-only from previous unclean unmounts
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            if let Ok(c_path) = CString::new(docs_dir.as_os_str().as_bytes()) {
+                let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+                if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0
+                    && (stat.f_flag & libc::ST_RDONLY as libc::c_ulong) != 0
+                {
+                    return Err(SyncError::SecurityViolation(
+                        "Kindle storage is mounted read-only (EROFS, likely due to an unclean USB disconnect). Please reconnect the Kindle USB cable.".to_string(),
+                    ));
+                }
+            }
+        }
         if let Ok(metadata) = docs_dir.metadata()
             && metadata.permissions().readonly() {
                 return Err(SyncError::SecurityViolation(
@@ -815,7 +830,6 @@ impl KindleSync {
         // 1. Copy KFX file if source and destination differ
         if kfx_source != dest_kfx_path {
             Self::copy_file(kfx_source, &dest_kfx_path)?;
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         // 2. Sync Cover Thumbnail across system/thumbnails, .system/thumbnails, and amazon-cover-bug
@@ -876,7 +890,6 @@ impl KindleSync {
                     }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         // 3. Ensure companion .sdr folder exists, write covers/thumbnails, and sanitize stale files
@@ -1088,8 +1101,6 @@ impl KindleSync {
             drop(f);
             Self::prepare_destination_for_overwrite(dst);
             std::fs::rename(&part_dst, dst)?;
-            // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
-            std::thread::sleep(std::time::Duration::from_millis(150));
         }
         Ok(())
     }

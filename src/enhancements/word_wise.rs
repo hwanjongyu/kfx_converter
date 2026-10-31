@@ -293,12 +293,23 @@ impl WordWiseBuilder {
         let mut pid = 0usize;
         let mut raw_candidates = Vec::new();
 
-        for section in sections {
+        for (idx, section) in sections.iter().enumerate() {
             // Section root element occupies 1 PID position in Yellowjacket position_id_map ($265)
             pid += 1;
 
+            let is_cover = (idx == 0)
+                && (section.id.to_lowercase().contains("cover")
+                    || (section.blocks.iter().any(|b| matches!(b, crate::ir::Block::Image { .. }))
+                        && section.blocks.iter().all(|b| match b {
+                            crate::ir::Block::Image { .. } => true,
+                            crate::ir::Block::Paragraph { spans, .. } => spans.iter().all(|s| s.text.trim().is_empty()),
+                            _ => false,
+                        })));
+
             if section.blocks.is_empty() {
-                pid += 1;
+                if !is_cover {
+                    pid += 1; // Fallback empty text block placeholder
+                }
                 continue;
             }
 

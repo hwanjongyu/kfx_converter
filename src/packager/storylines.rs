@@ -44,14 +44,15 @@ impl<'a> KfxPackager<'a> {
         let sym_key = symbol_id("key").unwrap_or(492);
         let sym_val = symbol_id("value").unwrap_or(307);
 
-        let num_sections = self.sections.len();
+        let sections = std::mem::take(&mut self.sections);
+        let num_sections = sections.len();
         let mut section_data = Vec::with_capacity(num_sections);
         let mut text_acc = TextAccumulator::new();
         let mut used_styles = std::collections::HashSet::new();
         used_styles.insert(styles.p);
 
         for idx in 0..num_sections {
-            let sec = self.sections[idx].clone();
+            let sec = &sections[idx];
             let raw_name = if sec.id.is_empty() {
                 format!("sec_{}", idx + 1)
             } else {
@@ -531,6 +532,7 @@ impl<'a> KfxPackager<'a> {
             });
         }
 
+        self.sections = sections;
         (section_data, used_styles)
     }
 }
