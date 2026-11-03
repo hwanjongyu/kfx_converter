@@ -145,6 +145,7 @@ impl KindleSync {
 
     /// Checks if a device or directory name corresponds to a Kindle device.
     #[inline]
+    #[allow(dead_code)]
     fn is_kindle_name(name: &str) -> bool {
         let n = name.to_lowercase();
         n.contains("kindle")
@@ -485,6 +486,7 @@ impl KindleSync {
 
     /// Safely flushes dirty filesystem caches and unmounts the connected Kindle device.
     pub fn eject_device(root: &Path) -> Result<(), SyncError> {
+        let _ = root;
         let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         // 1. Flush file system write cache to prevent eMMC data loss.
