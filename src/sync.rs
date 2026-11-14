@@ -747,15 +747,14 @@ impl KindleSync {
                 && !sdr_path.is_symlink()
                 && sdr_path.extension().and_then(|e| e.to_str()) == Some("sdr")
             {
-                if let Some(root) = allowed_root {
-                    if let (Ok(canon_root), Ok(canon_sdr)) = (root.canonicalize(), sdr_path.canonicalize()) {
-                        if !canon_sdr.starts_with(&canon_root) {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::PermissionDenied,
-                                format!("SDR path {:?} is outside allowed directory {:?}", sdr_path, root),
-                            ));
-                        }
-                    }
+                if let Some(root) = allowed_root
+                    && let (Ok(canon_root), Ok(canon_sdr)) = (root.canonicalize(), sdr_path.canonicalize())
+                    && !canon_sdr.starts_with(&canon_root)
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("SDR path {:?} is outside allowed directory {:?}", sdr_path, root),
+                    ));
                 }
                 let _ = std::fs::remove_dir_all(&sdr_path);
             }

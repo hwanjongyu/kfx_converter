@@ -51,8 +51,7 @@ impl<'a> KfxPackager<'a> {
         let mut used_styles = std::collections::HashSet::new();
         used_styles.insert(styles.p);
 
-        for idx in 0..num_sections {
-            let sec = &sections[idx];
+        for (idx, sec) in sections.iter().enumerate() {
             let raw_name = if sec.id.is_empty() {
                 format!("sec_{}", idx + 1)
             } else {

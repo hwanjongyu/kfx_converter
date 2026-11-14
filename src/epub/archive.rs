@@ -46,15 +46,14 @@ pub fn decode_percent(s: &str) -> String {
             && i + 2 < bytes.len()
             && bytes[i + 1].is_ascii_hexdigit()
             && bytes[i + 2].is_ascii_hexdigit()
-        {
-            if let Ok(byte) = u8::from_str_radix(
+            && let Ok(byte) = u8::from_str_radix(
                 std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or_default(),
                 16,
-            ) {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
+            )
+        {
+            result.push(byte);
+            i += 3;
+            continue;
         }
         result.push(bytes[i]);
         i += 1;
