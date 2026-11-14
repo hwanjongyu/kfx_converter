@@ -1,9 +1,9 @@
 //! Style maps and CSS inheritance tokens for KFX packaging.
 
+use super::{KfxPackager, symbols::LocalSymbols};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
 use crate::symbols::symbol_id;
-use super::{symbols::LocalSymbols, KfxPackager};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StyleSymMap {
@@ -50,18 +50,25 @@ pub struct StyleSymMap {
 /// Extracts block-level text styling tokens that must cascade down to child spans
 /// (CSS inheritance emulation). Headings exclude font-size (their own style sets size).
 pub fn inherited_text_tokens(block_style: Option<&str>, include_size: bool) -> String {
-    let Some(st) = block_style else { return String::new() };
+    let Some(st) = block_style else {
+        return String::new();
+    };
     st.split_whitespace()
         .filter(|t| {
-            matches!(*t, "italic" | "bold" | "small_caps" | "uppercase" | "underline")
-                || (include_size && t.starts_with("font_size_"))
+            matches!(
+                *t,
+                "italic" | "bold" | "small_caps" | "uppercase" | "underline"
+            ) || (include_size && t.starts_with("font_size_"))
         })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 impl<'a> KfxPackager<'a> {
-    pub(crate) fn build_styles(&mut self, symbols: &mut LocalSymbols) -> (StyleSymMap, Vec<(u32, IonValue)>) {
+    pub(crate) fn build_styles(
+        &mut self,
+        symbols: &mut LocalSymbols,
+    ) -> (StyleSymMap, Vec<(u32, IonValue)>) {
         let sym_style_name = symbol_id("style_name").unwrap_or(173);
         let sym_font_family = symbol_id("font_family").unwrap_or(11);
         let sym_font_size = symbol_id("font_size").unwrap_or(16);
@@ -333,9 +340,8 @@ impl<'a> KfxPackager<'a> {
         ]);
 
         // 22. cover image style (unadorned, scale_fit handled by page template)
-        let cover_img_val = IonValue::Struct(vec![
-            (sym_style_name, IonValue::Symbol(cover_img_sym)),
-        ]);
+        let cover_img_val =
+            IonValue::Struct(vec![(sym_style_name, IonValue::Symbol(cover_img_sym))]);
 
         // 23. centered h1
         let h1_center_val = IonValue::Struct(vec![

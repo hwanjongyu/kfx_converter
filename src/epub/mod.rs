@@ -146,7 +146,6 @@ pub enum EpubError {
 /// Reads an EPUB archive and constructs a `BookIR`.
 pub struct EpubReader;
 
-
 impl EpubReader {
     /// Fast-path to extract only metadata (title, author, identifier, language) without parsing chapters or assets.
     pub fn read_metadata_from_file<P: AsRef<Path>>(path: P) -> Result<BookMetadata, EpubError> {
@@ -168,7 +167,9 @@ impl EpubReader {
                 .by_name(&opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
             let mut s = String::new();
-            (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s)?;
+            (&mut entry)
+                .take(MAX_METADATA_BYTES)
+                .read_to_string(&mut s)?;
             s
         };
 
@@ -249,7 +250,9 @@ impl EpubReader {
                 .by_name(&opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
             let mut s = String::new();
-            (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s)?;
+            (&mut entry)
+                .take(MAX_METADATA_BYTES)
+                .read_to_string(&mut s)?;
             add_decompressed(s.len())?;
             s
         };
@@ -263,7 +266,11 @@ impl EpubReader {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut s = String::new();
-                    if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
+                    if (&mut entry)
+                        .take(MAX_METADATA_BYTES)
+                        .read_to_string(&mut s)
+                        .is_ok()
+                    {
                         add_decompressed(s.len())?;
                         book_css.add_css(&s);
                     }
@@ -297,7 +304,9 @@ impl EpubReader {
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut data = Vec::with_capacity(entry.size().min(64 * 1024) as usize);
                     let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
-                    if limited.read_to_end(&mut data).is_ok() && (data.len() as u64) <= MAX_EPUB_FILE_SIZE {
+                    if limited.read_to_end(&mut data).is_ok()
+                        && (data.len() as u64) <= MAX_EPUB_FILE_SIZE
+                    {
                         add_decompressed(data.len())?;
                         resources.insert(
                             item.id.clone(),
@@ -333,25 +342,39 @@ impl EpubReader {
                 if let Ok(mut entry) = archive.by_name(&full_path) {
                     let mut xhtml = String::new();
                     let mut limited = (&mut entry).take(MAX_CHAPTER_XHTML_BYTES + 1);
-                    if limited.read_to_string(&mut xhtml).is_ok() && (xhtml.len() as u64) <= MAX_CHAPTER_XHTML_BYTES {
+                    if limited.read_to_string(&mut xhtml).is_ok()
+                        && (xhtml.len() as u64) <= MAX_CHAPTER_XHTML_BYTES
+                    {
                         add_decompressed(xhtml.len())?;
-                        let (blocks, sec_footnotes) = Self::parse_xhtml_with_css(&xhtml, &href_to_id, &book_css);
+                        let (blocks, sec_footnotes) =
+                            Self::parse_xhtml_with_css(&xhtml, &href_to_id, &book_css);
                         for (fn_id, fn_text) in sec_footnotes {
-                            all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
+                            all_footnotes
+                                .insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
                             if !file_name.is_empty() {
-                                all_footnotes.insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
+                                all_footnotes
+                                    .insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
                             }
                             all_footnotes.insert(format!("{}#{}", sec_id, fn_id), fn_text.clone());
                             all_footnotes.entry(fn_id).or_insert(fn_text);
                         }
-                        let detected_title = blocks.iter().find_map(|b| {
-                            if let Block::Heading { spans, .. } = b {
-                                let t = spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ").trim().to_string();
-                                if !t.is_empty() { Some(t) } else { None }
-                            } else {
-                                None
-                            }
-                        }).unwrap_or_else(|| format!("Chapter {}", idx + 1));
+                        let detected_title = blocks
+                            .iter()
+                            .find_map(|b| {
+                                if let Block::Heading { spans, .. } = b {
+                                    let t = spans
+                                        .iter()
+                                        .map(|s| s.text.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                        .trim()
+                                        .to_string();
+                                    if !t.is_empty() { Some(t) } else { None }
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| format!("Chapter {}", idx + 1));
 
                         sections.push(Section {
                             id: sec_id,
@@ -388,9 +411,7 @@ impl EpubReader {
         archive::find_opf_path(archive)
     }
 
-    pub fn parse_opf(
-        opf_xml: &str,
-    ) -> Result<ParsedOpf, EpubError> {
+    pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
         opf::parse_opf(opf_xml)
     }
 
@@ -429,7 +450,10 @@ impl EpubReader {
         xhtml::parse_xhtml_blocks(xhtml)
     }
 
-    pub fn parse_xhtml_blocks_with_manifest(xhtml: &str, href_to_id: &HashMap<String, String>) -> Vec<Block> {
+    pub fn parse_xhtml_blocks_with_manifest(
+        xhtml: &str,
+        href_to_id: &HashMap<String, String>,
+    ) -> Vec<Block> {
         xhtml::parse_xhtml_blocks_with_manifest(xhtml, href_to_id)
     }
 
@@ -488,7 +512,9 @@ mod tests {
 
     fn block_style(b: &Block) -> String {
         match b {
-            Block::Paragraph { style, .. } | Block::Heading { style, .. } => style.clone().unwrap_or_default(),
+            Block::Paragraph { style, .. } | Block::Heading { style, .. } => {
+                style.clone().unwrap_or_default()
+            }
             _ => String::new(),
         }
     }
@@ -501,7 +527,8 @@ mod tests {
     fn test_css_resolution_originals_chapter1_typography() {
         let mut css = CssStylesheet::new();
         css.add_css(ORIGINALS_CH1_CSS);
-        let (blocks, _) = EpubReader::parse_xhtml_with_css(ORIGINALS_CH1_XHTML, &HashMap::new(), &css);
+        let (blocks, _) =
+            EpubReader::parse_xhtml_with_css(ORIGINALS_CH1_XHTML, &HashMap::new(), &css);
         assert_eq!(blocks.len(), 7, "blocks: {:#?}", blocks);
 
         // Chapter number: centered heading
@@ -510,39 +537,65 @@ mod tests {
 
         // Title: centered, xl size, underlined span
         let s = block_style(&blocks[1]);
-        assert!(has_tok(&s, "align_center") && has_tok(&s, "font_size_xl"), "title style: {}", s);
+        assert!(
+            has_tok(&s, "align_center") && has_tok(&s, "font_size_xl"),
+            "title style: {}",
+            s
+        );
 
         // Subtitle: centered, italic, lg
         let s = block_style(&blocks[2]);
-        assert!(has_tok(&s, "align_center") && has_tok(&s, "italic") && has_tok(&s, "font_size_lg"), "subtitle: {}", s);
+        assert!(
+            has_tok(&s, "align_center") && has_tok(&s, "italic") && has_tok(&s, "font_size_lg"),
+            "subtitle: {}",
+            s
+        );
 
         // Epigraph: centered, sm
         let s = block_style(&blocks[3]);
-        assert!(has_tok(&s, "align_center") && has_tok(&s, "font_size_sm"), "epigraph: {}", s);
+        assert!(
+            has_tok(&s, "align_center") && has_tok(&s, "font_size_sm"),
+            "epigraph: {}",
+            s
+        );
         assert!(!has_tok(&s, "italic"));
 
         // Attribution: centered, italic, xs
         let s = block_style(&blocks[4]);
-        assert!(has_tok(&s, "align_center") && has_tok(&s, "italic") && has_tok(&s, "font_size_xs"), "source: {}", s);
+        assert!(
+            has_tok(&s, "align_center") && has_tok(&s, "italic") && has_tok(&s, "font_size_xs"),
+            "source: {}",
+            s
+        );
 
         // Drop cap span "O"
         if let Block::Paragraph { spans, .. } = &blocks[5] {
             assert_eq!(spans[0].text, "O");
             let st = spans[0].style.clone().unwrap_or_default();
             assert!(has_tok(&st, "dropcap"), "dropcap span style: {}", st);
-            assert!(!st.contains("font_size_"), "dropcap must not get a font size bucket: {}", st);
+            assert!(
+                !st.contains("font_size_"),
+                "dropcap must not get a font size bucket: {}",
+                st
+            );
         } else {
             panic!("expected paragraph");
         }
 
         // Body text (0.938em) stays body size, no alignment override
         let s = block_style(&blocks[6]);
-        assert!(!s.contains("font_size_") && !s.contains("align_center"), "body: {}", s);
+        assert!(
+            !s.contains("font_size_") && !s.contains("align_center"),
+            "body: {}",
+            s
+        );
     }
 
     #[test]
     fn test_sanitize_css_style_last_wins_and_font_properties() {
-        let t = EpubReader::sanitize_css_style("text-align:center; font-style:italic; text-align:left; font-style:normal");
+        let t = EpubReader::sanitize_css_style(
+            "text-align:center; font-style:italic; text-align:left; font-style:normal",
+        );
         assert!(t.contains(&"align_left".to_string()));
         assert!(!t.contains(&"align_center".to_string()));
         assert!(!t.contains(&"italic".to_string()));
@@ -552,7 +605,9 @@ mod tests {
         assert!(t.contains(&"sup".to_string()) && !t.iter().any(|x| x.starts_with("font_size_")));
 
         // Drop caps: 2-line vs 3-line detection
-        let t_l2 = EpubReader::sanitize_css_style("float: left; font-size: 3.058em; margin-top: -0.45em; margin-bottom: -0.45em;");
+        let t_l2 = EpubReader::sanitize_css_style(
+            "float: left; font-size: 3.058em; margin-top: -0.45em; margin-bottom: -0.45em;",
+        );
         assert!(t_l2.contains(&"dropcap_l2".to_string()) && t_l2.contains(&"dropcap".to_string()));
 
         let t_l3 = EpubReader::sanitize_css_style("float: left; font-size: 3.8em;");
@@ -571,7 +626,8 @@ mod tests {
 
     #[test]
     fn test_epub_reader_real_originals_chapter1_styles() {
-        let path = "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
+        let path =
+            "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
         if !std::path::Path::new(path).exists() {
             return;
         }
@@ -579,29 +635,57 @@ mod tests {
         let sec = book
             .sections
             .iter()
-            .find(|s| s.blocks.iter().any(|b| b.plain_text().contains("The reasonable man adapts himself")))
+            .find(|s| {
+                s.blocks
+                    .iter()
+                    .any(|b| b.plain_text().contains("The reasonable man adapts himself"))
+            })
             .expect("chapter 1 section");
         let find = |needle: &str| {
-            sec.blocks.iter().find(|b| b.plain_text().contains(needle)).map(block_style).unwrap_or_default()
+            sec.blocks
+                .iter()
+                .find(|b| b.plain_text().contains(needle))
+                .map(block_style)
+                .unwrap_or_default()
         };
         let sub = find("The Risky Business of Going Against the Grain");
-        assert!(has_tok(&sub, "italic") && has_tok(&sub, "align_center"), "subtitle: {}", sub);
+        assert!(
+            has_tok(&sub, "italic") && has_tok(&sub, "align_center"),
+            "subtitle: {}",
+            sub
+        );
         let epi = find("The reasonable man adapts himself");
-        assert!(has_tok(&epi, "align_center") && has_tok(&epi, "font_size_sm"), "epigraph: {}", epi);
+        assert!(
+            has_tok(&epi, "align_center") && has_tok(&epi, "font_size_sm"),
+            "epigraph: {}",
+            epi
+        );
         let src = find("George Bernard Shaw");
-        assert!(has_tok(&src, "italic") && has_tok(&src, "font_size_xs"), "source: {}", src);
+        assert!(
+            has_tok(&src, "italic") && has_tok(&src, "font_size_xs"),
+            "source: {}",
+            src
+        );
 
         // Verify Foreword drop cap "A" has 2-line dropcap style
         let fw_sec = book
             .sections
             .iter()
-            .find(|s| s.blocks.iter().any(|b| b.plain_text().contains("Adam Grant is the perfect person")))
+            .find(|s| {
+                s.blocks
+                    .iter()
+                    .any(|b| b.plain_text().contains("Adam Grant is the perfect person"))
+            })
             .expect("foreword section");
         let fw_p4 = &fw_sec.blocks[3]; // Foreword first body paragraph
         if let Block::Paragraph { spans, .. } = fw_p4 {
             assert_eq!(spans[0].text, "A");
             let st = spans[0].style.as_deref().unwrap_or_default();
-            assert!(st.contains("dropcap_l2"), "Foreword drop cap 'A' must have dropcap_l2: {}", st);
+            assert!(
+                st.contains("dropcap_l2"),
+                "Foreword drop cap 'A' must have dropcap_l2: {}",
+                st
+            );
         } else {
             panic!("Expected paragraph for foreword block 3");
         }
@@ -609,11 +693,46 @@ mod tests {
 
     #[test]
     fn test_resolve_zip_path() {
-        assert_eq!(EpubReader::resolve_zip_path("OEBPS", "ch1.xhtml"), "OEBPS/ch1.xhtml");
-        assert_eq!(EpubReader::resolve_zip_path("OEBPS/text", "../images/cover.jpg"), "OEBPS/images/cover.jpg");
-        assert_eq!(EpubReader::resolve_zip_path("", "content.opf"), "content.opf");
-        assert_eq!(EpubReader::resolve_zip_path("OEBPS", "images\\cover.jpg"), "OEBPS/images/cover.jpg");
-        assert_eq!(EpubReader::resolve_zip_path("", "sub/../content.opf"), "content.opf");
+        assert_eq!(
+            EpubReader::resolve_zip_path("OEBPS", "ch1.xhtml"),
+            "OEBPS/ch1.xhtml"
+        );
+        assert_eq!(
+            EpubReader::resolve_zip_path("OEBPS/text", "../images/cover.jpg"),
+            "OEBPS/images/cover.jpg"
+        );
+        assert_eq!(
+            EpubReader::resolve_zip_path("", "content.opf"),
+            "content.opf"
+        );
+        assert_eq!(
+            EpubReader::resolve_zip_path("OEBPS", "images\\cover.jpg"),
+            "OEBPS/images/cover.jpg"
+        );
+        assert_eq!(
+            EpubReader::resolve_zip_path("", "sub/../content.opf"),
+            "content.opf"
+        );
+        // Path traversal attempts stripped safely
+        assert_eq!(
+            EpubReader::resolve_zip_path("OEBPS", "../../../../etc/shadow"),
+            "etc/shadow"
+        );
+    }
+
+    #[test]
+    fn test_decode_percent_uri_handling() {
+        use crate::epub::archive::decode_percent;
+
+        assert_eq!(
+            decode_percent("OEBPS/images/my%20cover.jpg"),
+            "OEBPS/images/my cover.jpg"
+        );
+        assert_eq!(decode_percent("caf%C3%A9.xhtml"), "café.xhtml");
+        // Malformed percent sequences should not panic
+        assert_eq!(decode_percent("image%"), "image%");
+        assert_eq!(decode_percent("image%1"), "image%1");
+        assert_eq!(decode_percent("image%ZZ"), "image%ZZ");
     }
 
     #[test]
@@ -658,9 +777,15 @@ mod tests {
         // 2. Paragraph with inline styling
         match &blocks[1] {
             Block::Paragraph { spans, .. } => {
-                let bold_span = spans.iter().find(|s| s.style.as_deref() == Some("bold")).unwrap();
+                let bold_span = spans
+                    .iter()
+                    .find(|s| s.style.as_deref() == Some("bold"))
+                    .unwrap();
                 assert_eq!(bold_span.text, "bold words");
-                let italic_span = spans.iter().find(|s| s.style.as_deref() == Some("italic")).unwrap();
+                let italic_span = spans
+                    .iter()
+                    .find(|s| s.style.as_deref() == Some("italic"))
+                    .unwrap();
                 assert_eq!(italic_span.text, "italic text");
                 let link_span = spans.iter().find(|s| s.href.is_some()).unwrap();
                 assert_eq!(link_span.href.as_deref(), Some("target.xhtml#sec1"));
@@ -682,7 +807,9 @@ mod tests {
 
         // 5. Image
         match &blocks[4] {
-            Block::Image { resource_id, alt, .. } => {
+            Block::Image {
+                resource_id, alt, ..
+            } => {
                 assert_eq!(resource_id, "illustration.png");
                 assert_eq!(alt.as_deref(), Some("An illustration"));
             }
@@ -813,13 +940,24 @@ mod tests {
 
     #[test]
     fn test_epub_reader_real_originals_book_toc_and_page_list() {
-        let path = "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
+        let path =
+            "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
         if !std::path::Path::new(path).exists() {
             return;
         }
         let book = EpubReader::read_from_file(path).expect("Failed to read Originals epub");
-        assert_eq!(book.toc.len(), 20, "TOC should contain exactly 20 chapters, got {}", book.toc.len());
-        assert_eq!(book.page_list.len(), 335, "Page list should contain 335 print pages, got {}", book.page_list.len());
+        assert_eq!(
+            book.toc.len(),
+            20,
+            "TOC should contain exactly 20 chapters, got {}",
+            book.toc.len()
+        );
+        assert_eq!(
+            book.page_list.len(),
+            335,
+            "Page list should contain 335 print pages, got {}",
+            book.page_list.len()
+        );
         assert_eq!(book.toc[0].title, "Cover");
         assert_eq!(book.toc[19].title, "Index");
         assert_eq!(book.page_list[0].page_number, "i");
@@ -848,12 +986,28 @@ mod tests {
         let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &HashMap::new());
         assert!(!blocks.is_empty());
         let all_text: Vec<String> = blocks.iter().map(|b| b.plain_text()).collect();
-        assert!(all_text.iter().any(|t| t.contains("Text inside div without p tags")));
+        assert!(
+            all_text
+                .iter()
+                .any(|t| t.contains("Text inside div without p tags"))
+        );
         assert!(all_text.iter().any(|t| t.contains("Text inside section")));
-        assert!(all_text.iter().any(|t| t.contains("Paragraph inside section")));
-        assert!(all_text.iter().any(|t| t.contains("Text after paragraph in section")));
+        assert!(
+            all_text
+                .iter()
+                .any(|t| t.contains("Paragraph inside section"))
+        );
+        assert!(
+            all_text
+                .iter()
+                .any(|t| t.contains("Text after paragraph in section"))
+        );
         assert!(all_text.iter().any(|t| t.contains("Text inside article")));
-        assert!(all_text.iter().any(|t| t.contains("Bare text directly inside body")));
+        assert!(
+            all_text
+                .iter()
+                .any(|t| t.contains("Bare text directly inside body"))
+        );
     }
 
     #[test]
@@ -880,7 +1034,9 @@ mod tests {
         let img_blocks: Vec<_> = blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Image { resource_id, alt, .. } => Some((resource_id.as_str(), alt.as_deref())),
+                Block::Image {
+                    resource_id, alt, ..
+                } => Some((resource_id.as_str(), alt.as_deref())),
                 _ => None,
             })
             .collect();
@@ -896,19 +1052,28 @@ mod tests {
         // Pure black colors must be stripped for Kindle dark mode safety
         let black_style = "color: #000000; text-align: center; text-decoration: line-through;";
         let tokens = EpubReader::sanitize_css_style(black_style);
-        assert!(!tokens.iter().any(|t| t.starts_with("color_")), "Pure black color #000000 should be stripped");
+        assert!(
+            !tokens.iter().any(|t| t.starts_with("color_")),
+            "Pure black color #000000 should be stripped"
+        );
         assert!(tokens.contains(&"align_center".to_string()));
         assert!(tokens.contains(&"strike".to_string()));
 
         let black_name_style = "color: black; text-align: justify;";
         let tokens2 = EpubReader::sanitize_css_style(black_name_style);
-        assert!(!tokens2.iter().any(|t| t.starts_with("color_")), "Pure black color 'black' should be stripped");
+        assert!(
+            !tokens2.iter().any(|t| t.starts_with("color_")),
+            "Pure black color 'black' should be stripped"
+        );
         assert!(tokens2.contains(&"align_justify".to_string()));
 
         // Non-black accent colors must be preserved
         let blue_style = "color: #003366; vertical-align: super;";
         let tokens3 = EpubReader::sanitize_css_style(blue_style);
-        assert!(tokens3.iter().any(|t| t.starts_with("color_")), "Accent color should be preserved");
+        assert!(
+            tokens3.iter().any(|t| t.starts_with("color_")),
+            "Accent color should be preserved"
+        );
         assert!(tokens3.contains(&"sup".to_string()));
     }
 
@@ -971,7 +1136,11 @@ mod tests {
 </body>
 </html>"#;
         let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
-        assert_eq!(blocks.len(), 4, "Expected 4 blocks (p, h2, p, p) with hr/div page breaks absorbed into pending");
+        assert_eq!(
+            blocks.len(),
+            4,
+            "Expected 4 blocks (p, h2, p, p) with hr/div page breaks absorbed into pending"
+        );
 
         // 1. Check small-caps spans in first paragraph
         if let Block::Paragraph { spans, .. } = &blocks[0] {
@@ -989,7 +1158,10 @@ mod tests {
         if let Block::Heading { level, style, .. } = &blocks[1] {
             assert_eq!(*level, 2);
             let s = style.as_ref().expect("Heading style");
-            assert!(s.contains("page_break_before"), "Heading must have page_break_before");
+            assert!(
+                s.contains("page_break_before"),
+                "Heading must have page_break_before"
+            );
             assert!(s.contains("small_caps"), "Heading must have small_caps");
             assert!(blocks[1].has_page_break_before());
         } else {
@@ -999,7 +1171,10 @@ mod tests {
         // 3. Check paragraph with page-break-after
         if let Block::Paragraph { style, .. } = &blocks[2] {
             let s = style.as_ref().expect("Paragraph style");
-            assert!(s.contains("page_break_after"), "Paragraph must have page_break_after");
+            assert!(
+                s.contains("page_break_after"),
+                "Paragraph must have page_break_after"
+            );
             assert!(blocks[2].has_page_break_after());
         } else {
             panic!("Expected paragraph 2");
@@ -1008,7 +1183,10 @@ mod tests {
         // 4. Check paragraph following <hr class="page-break"/>
         if let Block::Paragraph { style, .. } = &blocks[3] {
             let s = style.as_ref().expect("Paragraph style");
-            assert!(s.contains("page_break_before"), "Paragraph must inherit pending page_break_before");
+            assert!(
+                s.contains("page_break_before"),
+                "Paragraph must inherit pending page_break_before"
+            );
             assert!(blocks[3].has_page_break_before());
         } else {
             panic!("Expected paragraph 3");
@@ -1043,7 +1221,10 @@ mod tests {
         if let Block::Paragraph { spans, .. } = &blocks[1] {
             assert_eq!(spans[0].text, "“I");
             assert_eq!(spans[0].style.as_deref(), Some("dropcap_2"));
-            assert_eq!(spans[1].text, "t was the best of times, it was the worst of times.”");
+            assert_eq!(
+                spans[1].text,
+                "t was the best of times, it was the worst of times.”"
+            );
         } else {
             panic!("Expected paragraph 1");
         }
@@ -1052,16 +1233,25 @@ mod tests {
         if let Block::Paragraph { spans, .. } = &blocks[2] {
             assert_eq!(spans[0].text, "T");
             assert_eq!(spans[0].style.as_deref(), Some("dropcap"));
-            assert_eq!(spans[1].text, "here was a boy called Eustace Clarence Scrubb.");
+            assert_eq!(
+                spans[1].text,
+                "here was a boy called Eustace Clarence Scrubb."
+            );
         } else {
             panic!("Expected paragraph 2");
         }
 
         // 4. Stylistic uppercase classes and styles
         if let Block::Paragraph { spans, .. } = &blocks[3] {
-            let caps_span = spans.iter().find(|s| s.text == "Important notice").expect("all-caps span");
+            let caps_span = spans
+                .iter()
+                .find(|s| s.text == "Important notice")
+                .expect("all-caps span");
             assert_eq!(caps_span.style.as_deref(), Some("uppercase"));
-            let upper_span = spans.iter().find(|s| s.text == "loud speech").expect("uppercase style span");
+            let upper_span = spans
+                .iter()
+                .find(|s| s.text == "loud speech")
+                .expect("uppercase style span");
             assert_eq!(upper_span.style.as_deref(), Some("uppercase"));
         } else {
             panic!("Expected paragraph 3");
@@ -1132,7 +1322,11 @@ mod tests {
             assert_eq!(kanji_span.ruby.as_deref(), Some("かんじ"));
 
             // Verify <rp> text "(" and ")" were stripped/ignored
-            assert!(!spans.iter().any(|s| s.text.contains('(') || s.text.contains(')')));
+            assert!(
+                !spans
+                    .iter()
+                    .any(|s| s.text.contains('(') || s.text.contains(')'))
+            );
 
             // Find "東" and "京" spans
             let to_span = spans.iter().find(|s| s.text == "東").expect("東 span");
@@ -1147,26 +1341,39 @@ mod tests {
 
     #[test]
     fn test_epub_reader_read_metadata_from_file() {
-        let sample_path = "/home/drew/github/hwanjongyu/Converter_epub_kfx/sample/Originals - Adam Grant.epub";
+        let sample_path =
+            "/home/drew/github/hwanjongyu/Converter_epub_kfx/sample/Originals - Adam Grant.epub";
         let (tmp_file, target_path) = if std::path::Path::new(sample_path).exists() {
             (None, std::path::PathBuf::from(sample_path))
         } else {
             let tmp = tempfile::NamedTempFile::new().unwrap();
             let mut zip = zip::ZipWriter::new(std::fs::File::create(tmp.path()).unwrap());
-            zip.start_file("mimetype", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+            zip.start_file(
+                "mimetype",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
             zip.write_all(b"application/epub+zip").unwrap();
-            zip.start_file("META-INF/container.xml", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.start_file(
+                "META-INF/container.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
             zip.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
-            zip.start_file("content.opf", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.start_file("content.opf", zip::write::SimpleFileOptions::default())
+                .unwrap();
             zip.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Originals</dc:title><dc:creator>Adam Grant</dc:creator></metadata><manifest><item id="t" href="t.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>"#).unwrap();
-            zip.start_file("t.xhtml", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.start_file("t.xhtml", zip::write::SimpleFileOptions::default())
+                .unwrap();
             zip.write_all(br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Text</p></body></html>"#).unwrap();
             zip.finish().unwrap();
             let p = tmp.path().to_path_buf();
             (Some(tmp), p)
         };
 
-        let meta = EpubReader::read_metadata_from_file(&target_path).expect("Failed to read metadata");
+        let meta =
+            EpubReader::read_metadata_from_file(&target_path).expect("Failed to read metadata");
         assert_eq!(meta.title, "Originals");
         assert!(meta.creators.iter().any(|c| c.contains("Adam Grant")));
         drop(tmp_file);
@@ -1241,8 +1448,15 @@ mod tests {
 </package>"##;
         let (metadata, _, _) = EpubReader::parse_opf(opf).expect("parse_opf should succeed");
         assert_eq!(metadata.title, "War & Peace — Complete Edition");
-        assert_eq!(metadata.description.as_deref(), Some("A classic tale of love & war."));
-        assert!(metadata.creators.contains(&"Leo & Sofia Tolstoy".to_string()));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("A classic tale of love & war.")
+        );
+        assert!(
+            metadata
+                .creators
+                .contains(&"Leo & Sofia Tolstoy".to_string())
+        );
     }
 
     #[test]
@@ -1289,7 +1503,11 @@ mod tests {
             assert_eq!(items.len(), 1);
             let parent_blocks = &items[0];
             // Parent blocks should have the paragraph and the nested Block::List
-            assert_eq!(parent_blocks.len(), 2, "Expected 2 blocks inside parent list item (paragraph + nested list)");
+            assert_eq!(
+                parent_blocks.len(),
+                2,
+                "Expected 2 blocks inside parent list item (paragraph + nested list)"
+            );
             assert!(matches!(&parent_blocks[0], Block::Paragraph { .. }));
             assert!(matches!(&parent_blocks[1], Block::List { .. }));
         } else {
@@ -1311,15 +1529,21 @@ mod tests {
             std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
 
             zip.start_file("META-INF/container.xml", opts).unwrap();
-            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+            std::io::Write::write_all(
+                &mut zip,
+                br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
     <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
-</container>"#).unwrap();
+</container>"#,
+            )
+            .unwrap();
 
             zip.start_file("content.opf", opts).unwrap();
-            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+            std::io::Write::write_all(
+                &mut zip,
+                br#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>Normal Book</dc:title>
@@ -1328,7 +1552,9 @@ mod tests {
     <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
   <spine><itemref idref="c1"/></spine>
-</package>"#).unwrap();
+</package>"#,
+            )
+            .unwrap();
 
             zip.start_file("c1.xhtml", opts).unwrap();
             std::io::Write::write_all(&mut zip, br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Safe content</p></body></html>"#).unwrap();
@@ -1339,7 +1565,10 @@ mod tests {
         let temp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(temp.path(), buf.into_inner()).unwrap();
         let res = EpubReader::read_from_file(temp.path());
-        assert!(res.is_ok(), "Normal archive must pass cumulative decompression checks");
+        assert!(
+            res.is_ok(),
+            "Normal archive must pass cumulative decompression checks"
+        );
     }
 
     #[test]
@@ -1391,7 +1620,11 @@ mod tests {
 </body>
 </html>"#;
         let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
-        assert_eq!(blocks.len(), 3, "All 3 paragraphs must be preserved, none dropped by HTML entities");
+        assert_eq!(
+            blocks.len(),
+            3,
+            "All 3 paragraphs must be preserved, none dropped by HTML entities"
+        );
 
         if let Block::Paragraph { spans, .. } = &blocks[0] {
             let combined: String = spans.iter().map(|s| s.text.as_str()).collect();
@@ -1451,4 +1684,3 @@ mod tests {
         }
     }
 }
-

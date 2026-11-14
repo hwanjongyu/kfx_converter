@@ -3,9 +3,9 @@
 //! Handles scanning documents directories for e-books, verifying companion `.sdr` sidecars,
 //! enforcing whitelist-safe deletion, and purging stale or corrupt files.
 
-use std::path::{Path, PathBuf};
-use super::types::KindleBookFile;
 use super::DEVICE_SYNC_LOCK;
+use super::types::KindleBookFile;
+use std::path::{Path, PathBuf};
 
 /// Scans the Kindle documents directory (including author subfolders up to max_depth 3) for valid e-book files.
 pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
@@ -14,7 +14,13 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
         return files;
     }
 
-    fn scan_dir_recursive(doc_path: &Path, dir: &Path, depth: usize, max_depth: usize, files: &mut Vec<KindleBookFile>) {
+    fn scan_dir_recursive(
+        doc_path: &Path,
+        dir: &Path,
+        depth: usize,
+        max_depth: usize,
+        files: &mut Vec<KindleBookFile>,
+    ) {
         if depth > max_depth {
             return;
         }
@@ -23,7 +29,11 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase();
                     if !name.starts_with('.') && !name.ends_with(".sdr") {
                         scan_dir_recursive(doc_path, &path, depth + 1, max_depth, files);
                     }
@@ -35,7 +45,11 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                         .unwrap_or_default();
 
                     if valid_exts.contains(&ext.as_str()) {
-                        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
                         let format = ext.to_uppercase();
                         let meta_res = std::fs::metadata(&path);
                         let (size_bytes, size_formatted) = match &meta_res {
@@ -51,33 +65,37 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                             Err(_) => (0, "0 KB".into()),
                         };
 
-                        let (modified_timestamp, modified) = match meta_res.as_ref().ok().and_then(|m| m.modified().ok()) {
-                            Some(time) => {
-                                let ts = time
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0);
-                                let duration = time.elapsed().unwrap_or_default();
-                                let s = if duration.as_secs() < 60 {
-                                    "Just now".into()
-                                } else if duration.as_secs() < 3600 {
-                                    format!("{}m ago", duration.as_secs() / 60)
-                                } else if duration.as_secs() < 86400 {
-                                    format!("{}h ago", duration.as_secs() / 3600)
-                                } else {
-                                    format!("{}d ago", duration.as_secs() / 86400)
-                                };
-                                (ts, s)
-                            }
-                            None => (0, "Unknown".into()),
-                        };
+                        let (modified_timestamp, modified) =
+                            match meta_res.as_ref().ok().and_then(|m| m.modified().ok()) {
+                                Some(time) => {
+                                    let ts = time
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0);
+                                    let duration = time.elapsed().unwrap_or_default();
+                                    let s = if duration.as_secs() < 60 {
+                                        "Just now".into()
+                                    } else if duration.as_secs() < 3600 {
+                                        format!("{}m ago", duration.as_secs() / 60)
+                                    } else if duration.as_secs() < 86400 {
+                                        format!("{}h ago", duration.as_secs() / 3600)
+                                    } else {
+                                        format!("{}d ago", duration.as_secs() / 86400)
+                                    };
+                                    (ts, s)
+                                }
+                                None => (0, "Unknown".into()),
+                            };
 
                         let (title, author) = if let Ok(rel) = path.strip_prefix(doc_path) {
                             let components: Vec<_> = rel.iter().collect();
                             if components.len() > 1 {
                                 let first_dir = components[0].to_string_lossy();
-                                if first_dir.eq_ignore_ascii_case("downloads") || first_dir.eq_ignore_ascii_case("system") {
-                                    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                                if first_dir.eq_ignore_ascii_case("downloads")
+                                    || first_dir.eq_ignore_ascii_case("system")
+                                {
+                                    let stem =
+                                        path.file_stem().unwrap_or_default().to_string_lossy();
                                     if let Some((t, a)) = stem.split_once(" - ") {
                                         (t.trim().to_string(), a.trim().to_string())
                                     } else {
@@ -85,7 +103,11 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                                     }
                                 } else {
                                     let author_str = first_dir.to_string();
-                                    let title_str = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                                    let title_str = path
+                                        .file_stem()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string();
                                     (title_str, author_str)
                                 }
                             } else {
@@ -97,7 +119,13 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                                 }
                             }
                         } else {
-                            (path.file_stem().unwrap_or_default().to_string_lossy().to_string(), "Unknown".to_string())
+                            (
+                                path.file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string(),
+                                "Unknown".to_string(),
+                            )
                         };
 
                         let file_stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -105,16 +133,16 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                         let sdr_path = parent.join(format!("{}.sdr", file_stem));
                         let has_sdr = sdr_path.is_dir();
                         let mut has_word_wise = false;
-                        if has_sdr
-                            && let Ok(sdr_entries) = std::fs::read_dir(&sdr_path) {
-                                for sdr_entry in sdr_entries.flatten() {
-                                    let sdr_name = sdr_entry.file_name().to_string_lossy().to_lowercase();
-                                    if sdr_name.ends_with(".kll") {
-                                        has_word_wise = true;
-                                        break;
-                                    }
+                        if has_sdr && let Ok(sdr_entries) = std::fs::read_dir(&sdr_path) {
+                            for sdr_entry in sdr_entries.flatten() {
+                                let sdr_name =
+                                    sdr_entry.file_name().to_string_lossy().to_lowercase();
+                                if sdr_name.ends_with(".kll") {
+                                    has_word_wise = true;
+                                    break;
                                 }
                             }
+                        }
 
                         files.push(KindleBookFile {
                             name,
@@ -146,7 +174,10 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
 /// - Rejects non-ebook files (only allows .kfx, .azw3, .azw, .mobi, .epub, .pdf, .txt, .prc).
 /// - If `allowed_root` is provided, ensures `full_path` is strictly contained within `allowed_root`.
 /// - Verifies `.sdr` directory extension before recursive removal to prevent path traversal.
-pub fn delete_book_file_safe(allowed_root: Option<&Path>, full_path: &Path) -> Result<(), std::io::Error> {
+pub fn delete_book_file_safe(
+    allowed_root: Option<&Path>,
+    full_path: &Path,
+) -> Result<(), std::io::Error> {
     let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let ext = full_path
@@ -168,7 +199,10 @@ pub fn delete_book_file_safe(allowed_root: Option<&Path>, full_path: &Path) -> R
         if !canon_target.starts_with(&canon_root) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                format!("Target path {:?} is outside allowed directory {:?}", full_path, root),
+                format!(
+                    "Target path {:?} is outside allowed directory {:?}",
+                    full_path, root
+                ),
             ));
         }
     }
@@ -188,12 +222,16 @@ pub fn delete_book_file_safe(allowed_root: Option<&Path>, full_path: &Path) -> R
             && sdr_path.extension().and_then(|e| e.to_str()) == Some("sdr")
         {
             if let Some(root) = allowed_root
-                && let (Ok(canon_root), Ok(canon_sdr)) = (root.canonicalize(), sdr_path.canonicalize())
+                && let (Ok(canon_root), Ok(canon_sdr)) =
+                    (root.canonicalize(), sdr_path.canonicalize())
                 && !canon_sdr.starts_with(&canon_root)
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    format!("SDR path {:?} is outside allowed directory {:?}", sdr_path, root),
+                    format!(
+                        "SDR path {:?} is outside allowed directory {:?}",
+                        sdr_path, root
+                    ),
                 ));
             }
             let _ = std::fs::remove_dir_all(&sdr_path);
@@ -208,15 +246,13 @@ pub fn delete_book_file(full_path: &Path) -> Result<(), std::io::Error> {
 }
 
 /// Purges .bad_file markers, incompatible serialized state files, and orphaned enhancement sidecars.
-pub fn clean_stale_sdr_files(
-    sdr_dir: &Path,
-    current_asin: Option<&str>,
-    purge_word_wise: bool,
-) {
+pub fn clean_stale_sdr_files(sdr_dir: &Path, current_asin: Option<&str>, purge_word_wise: bool) {
     if !sdr_dir.is_dir() {
         return;
     }
-    let stale_exts = [".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea", ".yjf", ".yjr", ".part"];
+    let stale_exts = [
+        ".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea", ".yjf", ".yjr", ".part",
+    ];
     if let Ok(entries) = std::fs::read_dir(sdr_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -281,12 +317,18 @@ mod tests {
         let scanned = KindleSync::scan_device_files(doc_root);
         assert_eq!(scanned.len(), 2, "Expected 2 scanned books");
 
-        let kfx_item = scanned.iter().find(|b| b.name == "Novel.kfx").expect("Novel.kfx found");
+        let kfx_item = scanned
+            .iter()
+            .find(|b| b.name == "Novel.kfx")
+            .expect("Novel.kfx found");
         assert_eq!(kfx_item.format, "KFX");
         assert!(kfx_item.has_word_wise);
         assert!(kfx_item.has_sdr);
 
-        let mobi_item = scanned.iter().find(|b| b.name == "Story.mobi").expect("Story.mobi found");
+        let mobi_item = scanned
+            .iter()
+            .find(|b| b.name == "Story.mobi")
+            .expect("Story.mobi found");
         assert_eq!(mobi_item.format, "MOBI");
         assert!(!mobi_item.has_word_wise);
 
@@ -339,7 +381,10 @@ mod tests {
         // 4. Fail-closed: non-existent file path outside root must return error
         let non_existent = outside_dir.join("NonExistent.kfx");
         let res_missing = KindleSync::delete_book_file_safe(Some(&docs), &non_existent);
-        assert!(res_missing.is_err(), "Missing file with allowed_root must fail closed");
+        assert!(
+            res_missing.is_err(),
+            "Missing file with allowed_root must fail closed"
+        );
     }
 
     #[test]

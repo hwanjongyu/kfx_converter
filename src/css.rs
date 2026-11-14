@@ -110,7 +110,11 @@ impl ElementStyleCache {
         F: FnOnce(&str, Option<&str>) -> Vec<String>,
     {
         let lookup = BorrowedStyleKey(tag, class_attr);
-        if let Some(cached) = self.first_letter_cache.borrow().get(&lookup as &dyn StyleKeyRef) {
+        if let Some(cached) = self
+            .first_letter_cache
+            .borrow()
+            .get(&lookup as &dyn StyleKeyRef)
+        {
             return cached.clone();
         }
         let resolved = resolve(tag, class_attr);
@@ -217,7 +221,9 @@ impl CssStylesheet {
             if self.rules.len() >= MAX_CSS_RULES {
                 break;
             }
-            let Some((sel_part, body)) = chunk.rsplit_once('{') else { continue };
+            let Some((sel_part, body)) = chunk.rsplit_once('{') else {
+                continue;
+            };
             // Unwrap @media/@supports prefixes: keep text after the last '{'.
             let sel_part = sel_part.rsplit('{').next().unwrap_or(sel_part).trim();
             if sel_part.is_empty() || sel_part.starts_with('@') {
@@ -229,16 +235,23 @@ impl CssStylesheet {
             }
             for raw_sel in sel_part.split(',') {
                 let s = raw_sel.trim();
-                let (target_sel, is_first_letter) = if let Some(stripped) = s.strip_suffix("::first-letter") {
-                    (stripped.trim(), true)
-                } else if let Some(stripped) = s.strip_suffix(":first-letter") {
-                    (stripped.trim(), true)
-                } else {
-                    (s, false)
-                };
+                let (target_sel, is_first_letter) =
+                    if let Some(stripped) = s.strip_suffix("::first-letter") {
+                        (stripped.trim(), true)
+                    } else if let Some(stripped) = s.strip_suffix(":first-letter") {
+                        (stripped.trim(), true)
+                    } else {
+                        (s, false)
+                    };
                 if let Some((tag, classes)) = parse_simple_selector(target_sel) {
                     let order = self.rules.len();
-                    self.rules.push(CssRule { tag, classes, decls: decls.clone(), order, is_first_letter });
+                    self.rules.push(CssRule {
+                        tag,
+                        classes,
+                        decls: decls.clone(),
+                        order,
+                        is_first_letter,
+                    });
                 }
             }
         }
@@ -252,7 +265,11 @@ impl CssStylesheet {
         }
         let tag_lc = tag.to_ascii_lowercase();
         let classes: Vec<String> = class_attr
-            .map(|c| c.split_whitespace().map(|s| s.to_ascii_lowercase()).collect())
+            .map(|c| {
+                c.split_whitespace()
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut matched: Vec<&CssRule> = self
@@ -285,7 +302,11 @@ impl CssStylesheet {
         }
         let tag_lc = tag.to_ascii_lowercase();
         let classes: Vec<String> = class_attr
-            .map(|c| c.split_whitespace().map(|s| s.to_ascii_lowercase()).collect())
+            .map(|c| {
+                c.split_whitespace()
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut matched: Vec<&CssRule> = self
@@ -351,13 +372,19 @@ fn parse_declarations(body: &str) -> Vec<(Cow<'static, str>, String)> {
 /// Accepts only compound simple selectors: `tag`, `*`, `.a`, `tag.a`, `.a.b`, `tag.a.b`.
 fn parse_simple_selector(sel: &str) -> Option<(Option<String>, Vec<String>)> {
     if sel.is_empty()
-        || sel.chars().any(|c| c.is_whitespace() || matches!(c, '>' | '+' | '~' | ':' | '[' | '#' | '(' ))
+        || sel
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '>' | '+' | '~' | ':' | '[' | '#' | '('))
     {
         return None;
     }
     let mut parts = sel.split('.');
     let tag_part = parts.next()?.to_ascii_lowercase();
-    let tag = if tag_part.is_empty() || tag_part == "*" { None } else { Some(tag_part) };
+    let tag = if tag_part.is_empty() || tag_part == "*" {
+        None
+    } else {
+        Some(tag_part)
+    };
     let classes: Vec<String> = parts.map(|c| c.to_ascii_lowercase()).collect();
     if classes.iter().any(|c| c.is_empty()) {
         return None;
@@ -372,9 +399,13 @@ pub fn extract_inline_style_blocks(xhtml: &str) -> String {
     let mut pos = 0;
     while let Some(rel) = lower[pos..].find("<style") {
         let start = pos + rel;
-        let Some(gt) = lower[start..].find('>') else { break };
+        let Some(gt) = lower[start..].find('>') else {
+            break;
+        };
         let content_start = start + gt + 1;
-        let Some(end_rel) = lower[content_start..].find("</style") else { break };
+        let Some(end_rel) = lower[content_start..].find("</style") else {
+            break;
+        };
         out.push_str(&xhtml[content_start..content_start + end_rel]);
         out.push('\n');
         pos = content_start + end_rel;
@@ -409,7 +440,11 @@ pub fn font_size_ratio(v: &str) -> Option<f64> {
         "px" => num / 16.0,
         _ => return None,
     };
-    if ratio.is_finite() && ratio > 0.0 { Some(ratio) } else { None }
+    if ratio.is_finite() && ratio > 0.0 {
+        Some(ratio)
+    } else {
+        None
+    }
 }
 
 /// Buckets a font-size ratio into a standardized IR token (None = body size).
@@ -464,17 +499,31 @@ mod tests {
         let fl = sheet.first_letter_declarations_for("p", None);
         assert!(fl.contains("font-size:3em"));
         // @media inner rule is kept
-        assert!(sheet.declarations_for("p", Some("x04-Body-Text")).contains("justify"));
+        assert!(
+            sheet
+                .declarations_for("p", Some("x04-Body-Text"))
+                .contains("justify")
+        );
         // Class-only selector matches any tag, case-insensitive
-        assert!(sheet.declarations_for("span", Some("_idGenDropcap-1")).contains("float:left"));
+        assert!(
+            sheet
+                .declarations_for("span", Some("_idGenDropcap-1"))
+                .contains("float:left")
+        );
         // Tag+class must not match a different tag
-        assert!(!sheet.declarations_for("div", Some("x03-Chapter-Subtitle")).contains("italic"));
+        assert!(
+            !sheet
+                .declarations_for("div", Some("x03-Chapter-Subtitle"))
+                .contains("italic")
+        );
     }
 
     #[test]
     fn test_specificity_last_wins_ordering() {
         let mut sheet = CssStylesheet::new();
-        sheet.add_css("p.a { text-align: center; } p { text-align: left; } .a { font-style: normal; }");
+        sheet.add_css(
+            "p.a { text-align: center; } p { text-align: left; } .a { font-style: normal; }",
+        );
         let d = sheet.declarations_for("p", Some("a"));
         // p (0,1) < .a (1,0) < p.a (1,1)
         assert!(d.find("text-align:left").unwrap() < d.find("text-align:center").unwrap());
@@ -496,7 +545,10 @@ mod tests {
     #[test]
     fn test_extract_inline_style_blocks() {
         let x = "<html><head><style type=\"text/css\">p.c{text-align:center}</style></head><body/></html>";
-        assert_eq!(extract_inline_style_blocks(x).trim(), "p.c{text-align:center}");
+        assert_eq!(
+            extract_inline_style_blocks(x).trim(),
+            "p.c{text-align:center}"
+        );
     }
 
     #[test]

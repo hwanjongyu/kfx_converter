@@ -1,23 +1,26 @@
 //! XHTML chapter parser, CSS cascade resolution, ruby furigana, drop caps, and footnotes.
 
+use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event;
 use std::collections::HashMap;
 use std::path::Path;
-use quick_xml::events::Event;
-use quick_xml::Reader as XmlReader;
 
 use crate::css::CssStylesheet;
 use crate::epub::archive::decode_percent;
 use crate::epub::ruby::RubyState;
 use crate::ir::{Block, TextSpan};
 
-pub use crate::epub::dropcap::{finish_paragraph_dropcaps, is_opening_quote};
 pub use crate::epub::dropcap::finish_paragraph_dropcaps as finish_paragraph_spans;
+pub use crate::epub::dropcap::{finish_paragraph_dropcaps, is_opening_quote};
 
 pub fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
     parse_xhtml_blocks_with_manifest(xhtml, &HashMap::new())
 }
 
-pub fn parse_xhtml_blocks_with_manifest(xhtml: &str, href_to_id: &HashMap<String, String>) -> Vec<Block> {
+pub fn parse_xhtml_blocks_with_manifest(
+    xhtml: &str,
+    href_to_id: &HashMap<String, String>,
+) -> Vec<Block> {
     parse_xhtml_with_manifest(xhtml, href_to_id).0
 }
 
@@ -59,14 +62,15 @@ pub fn parse_xhtml_with_css(
             }
         }
         let tag_str = String::from_utf8_lossy(tag);
-        let base_tokens = style_cache.get_or_resolve_style(&tag_str, class_attr.as_deref(), |t, c| {
-            let decls = css.declarations_for(t, c);
-            if decls.is_empty() {
-                Vec::new()
-            } else {
-                sanitize_css_style(&decls)
-            }
-        });
+        let base_tokens =
+            style_cache.get_or_resolve_style(&tag_str, class_attr.as_deref(), |t, c| {
+                let decls = css.declarations_for(t, c);
+                if decls.is_empty() {
+                    Vec::new()
+                } else {
+                    sanitize_css_style(&decls)
+                }
+            });
 
         if let Some(s) = inline_style {
             let mut tokens = base_tokens;
@@ -77,24 +81,25 @@ pub fn parse_xhtml_with_css(
         }
     };
     // Resolves cascaded stylesheet declarations for ::first-letter pseudo-elements.
-    let element_first_letter_tokens = |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
-        let mut class_attr: Option<String> = None;
-        for attr in e.attributes().flatten() {
-            if attr.key.as_ref() == b"class" {
-                class_attr = Some(String::from_utf8_lossy(&attr.value).to_string());
-                break;
+    let element_first_letter_tokens =
+        |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
+            let mut class_attr: Option<String> = None;
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"class" {
+                    class_attr = Some(String::from_utf8_lossy(&attr.value).to_string());
+                    break;
+                }
             }
-        }
-        let tag_str = String::from_utf8_lossy(tag);
-        style_cache.get_or_resolve_first_letter(&tag_str, class_attr.as_deref(), |t, c| {
-            let decls = css.first_letter_declarations_for(t, c);
-            if decls.is_empty() {
-                Vec::new()
-            } else {
-                sanitize_css_style(&decls)
-            }
-        })
-    };
+            let tag_str = String::from_utf8_lossy(tag);
+            style_cache.get_or_resolve_first_letter(&tag_str, class_attr.as_deref(), |t, c| {
+                let decls = css.first_letter_declarations_for(t, c);
+                if decls.is_empty() {
+                    Vec::new()
+                } else {
+                    sanitize_css_style(&decls)
+                }
+            })
+        };
     let mut blocks = Vec::new();
     let mut footnotes = HashMap::new();
     let mut xml_reader = XmlReader::from_str(xhtml);
@@ -160,15 +165,35 @@ pub fn parse_xhtml_with_css(
                               cs: &Option<String>| {
         if !text.is_empty() {
             let mut style_parts = Vec::new();
-            if b { style_parts.push("bold"); }
-            if i { style_parts.push("italic"); }
-            if u { style_parts.push("underline"); }
-            if c { style_parts.push("code"); }
-            if stk { style_parts.push("strike"); }
-            if sp { style_parts.push("sup"); }
-            if sb { style_parts.push("sub"); }
-            if let Some(s) = cs { style_parts.push(s.as_str()); }
-            let style = if style_parts.is_empty() { None } else { Some(style_parts.join(" ")) };
+            if b {
+                style_parts.push("bold");
+            }
+            if i {
+                style_parts.push("italic");
+            }
+            if u {
+                style_parts.push("underline");
+            }
+            if c {
+                style_parts.push("code");
+            }
+            if stk {
+                style_parts.push("strike");
+            }
+            if sp {
+                style_parts.push("sup");
+            }
+            if sb {
+                style_parts.push("sub");
+            }
+            if let Some(s) = cs {
+                style_parts.push(s.as_str());
+            }
+            let style = if style_parts.is_empty() {
+                None
+            } else {
+                Some(style_parts.join(" "))
+            };
 
             spans.push(TextSpan {
                 text: std::mem::take(text),
@@ -180,58 +205,59 @@ pub fn parse_xhtml_with_css(
         }
     };
 
-    let parse_image_block = |e: &quick_xml::events::BytesStart, total_blocks: usize| -> Option<Block> {
-        let mut src = String::new();
-        let mut alt = None;
-        for attr in e.attributes().flatten() {
-            let key = attr.key.as_ref();
-            if key == b"src" || key == b"xlink:href" || key == b"href" {
-                let val = String::from_utf8_lossy(&attr.value).to_string();
-                if src.is_empty() || key == b"src" || key == b"xlink:href" {
-                    src = val;
+    let parse_image_block =
+        |e: &quick_xml::events::BytesStart, total_blocks: usize| -> Option<Block> {
+            let mut src = String::new();
+            let mut alt = None;
+            for attr in e.attributes().flatten() {
+                let key = attr.key.as_ref();
+                if key == b"src" || key == b"xlink:href" || key == b"href" {
+                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                    if src.is_empty() || key == b"src" || key == b"xlink:href" {
+                        src = val;
+                    }
+                } else if key == b"alt" {
+                    alt = Some(String::from_utf8_lossy(&attr.value).to_string());
                 }
-            } else if key == b"alt" {
-                alt = Some(String::from_utf8_lossy(&attr.value).to_string());
             }
-        }
-        if !src.is_empty() {
-            let img_id = format!("img_{}", total_blocks + 1);
-            let mut clean_src = src.as_str();
-            while let Some(stripped) = clean_src
-                .strip_prefix("../")
-                .or_else(|| clean_src.strip_prefix("./"))
-            {
-                clean_src = stripped;
+            if !src.is_empty() {
+                let img_id = format!("img_{}", total_blocks + 1);
+                let mut clean_src = src.as_str();
+                while let Some(stripped) = clean_src
+                    .strip_prefix("../")
+                    .or_else(|| clean_src.strip_prefix("./"))
+                {
+                    clean_src = stripped;
+                }
+                let decoded_src = decode_percent(clean_src);
+                let decoded_raw_src = decode_percent(&src);
+                let file_name = Path::new(&src)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| src.clone());
+                let decoded_file_name = decode_percent(&file_name);
+
+                let res_id = href_to_id
+                    .get(&src)
+                    .or_else(|| href_to_id.get(clean_src))
+                    .or_else(|| href_to_id.get(&decoded_src))
+                    .or_else(|| href_to_id.get(&decoded_raw_src))
+                    .or_else(|| href_to_id.get(&file_name))
+                    .or_else(|| href_to_id.get(&decoded_file_name))
+                    .cloned()
+                    .unwrap_or(file_name);
+
+                Some(Block::Image {
+                    id: img_id,
+                    resource_id: res_id,
+                    alt,
+                    width: None,
+                    height: None,
+                })
+            } else {
+                None
             }
-            let decoded_src = decode_percent(clean_src);
-            let decoded_raw_src = decode_percent(&src);
-            let file_name = Path::new(&src)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| src.clone());
-            let decoded_file_name = decode_percent(&file_name);
-
-            let res_id = href_to_id
-                .get(&src)
-                .or_else(|| href_to_id.get(clean_src))
-                .or_else(|| href_to_id.get(&decoded_src))
-                .or_else(|| href_to_id.get(&decoded_raw_src))
-                .or_else(|| href_to_id.get(&file_name))
-                .or_else(|| href_to_id.get(&decoded_file_name))
-                .cloned()
-                .unwrap_or(file_name);
-
-            Some(Block::Image {
-                id: img_id,
-                resource_id: res_id,
-                alt,
-                width: None,
-                height: None,
-            })
-        } else {
-            None
-        }
-    };
+        };
 
     loop {
         match xml_reader.read_event_into(&mut buf) {
@@ -255,14 +281,20 @@ pub fn parse_xhtml_with_css(
                                 elem_id = Some(String::from_utf8_lossy(&attr.value).to_string());
                             } else if key == b"epub:type" || key == b"role" || key == b"class" {
                                 let val = String::from_utf8_lossy(&attr.value).to_lowercase();
-                                if val.contains("footnote") || val.contains("endnote") || val.contains("notediv") {
+                                if val.contains("footnote")
+                                    || val.contains("endnote")
+                                    || val.contains("notediv")
+                                {
                                     is_footnote_container = true;
                                 }
                             }
                         }
                         if let Some(ref id) = elem_id {
                             let lower_id = id.to_lowercase();
-                            if lower_id.starts_with("fn") || lower_id.starts_with("footnote") || lower_id.starts_with("note") {
+                            if lower_id.starts_with("fn")
+                                || lower_id.starts_with("footnote")
+                                || lower_id.starts_with("note")
+                            {
                                 is_footnote_container = true;
                             }
                         }
@@ -275,7 +307,20 @@ pub fn parse_xhtml_with_css(
 
                     match local_bytes {
                         b"ruby" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             ruby.start_ruby();
                         }
                         b"rb" | b"rt" | b"rtc" | b"rp" => {
@@ -283,9 +328,26 @@ pub fn parse_xhtml_with_css(
                         }
                         b"div" | b"section" | b"article" | b"main" | b"aside" => {
                             if in_p {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                                 if !current_spans.is_empty() {
-                                    finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
+                                    finish_paragraph_spans(
+                                        &mut current_spans,
+                                        p_has_dropcap,
+                                        p_dropcap_l2,
+                                    );
                                     let p_block = Block::Paragraph {
                                         id: format!("p_{}", blocks.len() + 1),
                                         spans: std::mem::take(&mut current_spans),
@@ -319,9 +381,26 @@ pub fn parse_xhtml_with_css(
                         }
                         b"p" | b"blockquote" => {
                             if in_p {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                                 if !current_spans.is_empty() {
-                                    finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
+                                    finish_paragraph_spans(
+                                        &mut current_spans,
+                                        p_has_dropcap,
+                                        p_dropcap_l2,
+                                    );
                                     let p_block = Block::Paragraph {
                                         id: format!("p_{}", blocks.len() + 1),
                                         spans: std::mem::take(&mut current_spans),
@@ -371,7 +450,14 @@ pub fn parse_xhtml_with_css(
                                         p_tokens.push("small_caps".to_string());
                                     }
                                     for cls in val.split_whitespace() {
-                                        if cls == "dropcap" || cls == "drop-cap" || cls == "initial" || cls == "first-letter" || cls == "has-dropcap" || cls == "has-drop-cap" || cls == "dc" {
+                                        if cls == "dropcap"
+                                            || cls == "drop-cap"
+                                            || cls == "initial"
+                                            || cls == "first-letter"
+                                            || cls == "has-dropcap"
+                                            || cls == "has-drop-cap"
+                                            || cls == "dc"
+                                        {
                                             p_has_dropcap = true;
                                         }
                                     }
@@ -390,13 +476,30 @@ pub fn parse_xhtml_with_css(
                                 p_tokens.push("page_break_before".to_string());
                                 pending_page_break = false;
                             }
-                            p_style = if p_tokens.is_empty() { None } else { Some(p_tokens.join(" ")) };
+                            p_style = if p_tokens.is_empty() {
+                                None
+                            } else {
+                                Some(p_tokens.join(" "))
+                            };
                             current_span_text.clear();
                             current_spans.clear();
                         }
                         b"center" => {
                             if in_p {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                             }
                             in_p = true;
                             p_style = Some("align_center".to_string());
@@ -405,9 +508,26 @@ pub fn parse_xhtml_with_css(
                         }
                         b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
                             if in_p {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                                 if !current_spans.is_empty() {
-                                    finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
+                                    finish_paragraph_spans(
+                                        &mut current_spans,
+                                        p_has_dropcap,
+                                        p_dropcap_l2,
+                                    );
                                     let p_block = Block::Paragraph {
                                         id: format!("p_{}", blocks.len() + 1),
                                         spans: std::mem::take(&mut current_spans),
@@ -445,49 +565,167 @@ pub fn parse_xhtml_with_css(
                                 h_tokens.push("page_break_before".to_string());
                                 pending_page_break = false;
                             }
-                            heading_style = if h_tokens.is_empty() { None } else { Some(h_tokens.join(" ")) };
+                            heading_style = if h_tokens.is_empty() {
+                                None
+                            } else {
+                                Some(h_tokens.join(" "))
+                            };
                             current_span_text.clear();
                             current_spans.clear();
                         }
                         b"b" | b"strong" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             bold = true;
                         }
                         b"i" | b"em" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             italic = true;
                         }
                         b"u" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             underline = true;
                         }
                         b"del" | b"s" | b"strike" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             strike = true;
                         }
                         b"sup" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             sup = true;
                         }
                         b"sub" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             sub = true;
                         }
                         b"code" | b"tt" | b"kbd" | b"samp" | b"pre" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             code = true;
                         }
                         b"a" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             let mut is_noteref = false;
                             for attr in e.attributes().flatten() {
                                 if attr.key.as_ref() == b"href" {
-                                    current_href = Some(String::from_utf8_lossy(&attr.value).to_string());
-                                } else if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name" {
-                                    current_anchor = Some(String::from_utf8_lossy(&attr.value).to_string());
-                                } else if attr.key.as_ref() == b"epub:type" || attr.key.as_ref() == b"role" || attr.key.as_ref() == b"class" {
+                                    current_href =
+                                        Some(String::from_utf8_lossy(&attr.value).to_string());
+                                } else if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name"
+                                {
+                                    current_anchor =
+                                        Some(String::from_utf8_lossy(&attr.value).to_string());
+                                } else if attr.key.as_ref() == b"epub:type"
+                                    || attr.key.as_ref() == b"role"
+                                    || attr.key.as_ref() == b"class"
+                                {
                                     let val = String::from_utf8_lossy(&attr.value).to_lowercase();
-                                    if val.contains("noteref") || val.contains("footnote-ref") || val.contains("footnote_ref") || val.contains("fnref") {
+                                    if val.contains("noteref")
+                                        || val.contains("footnote-ref")
+                                        || val.contains("footnote_ref")
+                                        || val.contains("fnref")
+                                    {
                                         is_noteref = true;
                                     }
                                 }
@@ -501,7 +739,20 @@ pub fn parse_xhtml_with_css(
                             }
                         }
                         b"span" | b"abbr" | b"acronym" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             let mut span_tokens = Vec::new();
                             if local_bytes == b"abbr" || local_bytes == b"acronym" {
                                 span_tokens.push("small_caps".to_string());
@@ -515,11 +766,24 @@ pub fn parse_xhtml_with_css(
                                         if cls == "small-caps" || cls == "smallcaps" {
                                             span_tokens.push("small_caps".to_string());
                                             has_known = true;
-                                        } else if cls == "dropcap" || cls == "drop-cap" || cls == "drop_cap" || cls == "initial" || cls == "first-letter" || cls == "initial-letter" || cls == "dc" || cls.contains("dropcap") || cls.contains("drop-cap") {
+                                        } else if cls == "dropcap"
+                                            || cls == "drop-cap"
+                                            || cls == "drop_cap"
+                                            || cls == "initial"
+                                            || cls == "first-letter"
+                                            || cls == "initial-letter"
+                                            || cls == "dc"
+                                            || cls.contains("dropcap")
+                                            || cls.contains("drop-cap")
+                                        {
                                             // `contains` covers InDesign-generated classes such as `_idGenDropcap-1`
                                             span_tokens.push("dropcap".to_string());
                                             has_known = true;
-                                        } else if cls == "uppercase" || cls == "all-caps" || cls == "allcaps" || cls == "caps" {
+                                        } else if cls == "uppercase"
+                                            || cls == "all-caps"
+                                            || cls == "allcaps"
+                                            || cls == "caps"
+                                        {
                                             span_tokens.push("uppercase".to_string());
                                             has_known = true;
                                         }
@@ -529,7 +793,11 @@ pub fn parse_xhtml_with_css(
                                     }
                                 }
                             }
-                            current_style = if span_tokens.is_empty() { None } else { Some(span_tokens.join(" ")) };
+                            current_style = if span_tokens.is_empty() {
+                                None
+                            } else {
+                                Some(span_tokens.join(" "))
+                            };
                         }
                         b"table" => {
                             table_rows.clear();
@@ -543,7 +811,20 @@ pub fn parse_xhtml_with_css(
                         }
                         b"ul" | b"ol" => {
                             if in_li {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                                 if current_spans.iter().any(|s| !s.text.trim().is_empty()) {
                                     current_list_item_blocks.push(Block::Paragraph {
                                         id: format!("li_{}", blocks.len() + 1),
@@ -554,7 +835,11 @@ pub fn parse_xhtml_with_css(
                                     current_spans.clear();
                                 }
                             }
-                            list_stack.push((local_bytes == b"ol", Vec::new(), std::mem::take(&mut current_list_item_blocks)));
+                            list_stack.push((
+                                local_bytes == b"ol",
+                                Vec::new(),
+                                std::mem::take(&mut current_list_item_blocks),
+                            ));
                         }
                         b"li" => {
                             in_li = true;
@@ -565,9 +850,26 @@ pub fn parse_xhtml_with_css(
                         b"img" | b"image" => {
                             if let Some(img_block) = parse_image_block(e, blocks.len()) {
                                 if in_p || in_heading || in_li {
-                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                    flush_current_span(
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        bold,
+                                        italic,
+                                        underline,
+                                        code,
+                                        strike,
+                                        sup,
+                                        sub,
+                                        &current_href,
+                                        &current_anchor,
+                                        &current_style,
+                                    );
                                     if !current_spans.is_empty() {
-                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
+                                        finish_paragraph_spans(
+                                            &mut current_spans,
+                                            p_has_dropcap,
+                                            p_dropcap_l2,
+                                        );
                                         let p_id = format!("p_{}", blocks.len() + 1);
                                         let p_block = Block::Paragraph {
                                             id: p_id,
@@ -610,7 +912,9 @@ pub fn parse_xhtml_with_css(
                                 } else if attr.key.as_ref() == b"style" {
                                     let val = String::from_utf8_lossy(&attr.value);
                                     let tokens = sanitize_css_style(&val);
-                                    if tokens.contains(&"page_break_before".to_string()) || tokens.contains(&"page_break_after".to_string()) {
+                                    if tokens.contains(&"page_break_before".to_string())
+                                        || tokens.contains(&"page_break_after".to_string())
+                                    {
                                         is_page_break = true;
                                     }
                                 }
@@ -635,7 +939,20 @@ pub fn parse_xhtml_with_css(
                                 }
                             }
                             if anchor.is_some() || href.is_some() {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                                 current_spans.push(TextSpan {
                                     text: String::new(),
                                     style: None,
@@ -648,9 +965,26 @@ pub fn parse_xhtml_with_css(
                         b"img" | b"image" => {
                             if let Some(img_block) = parse_image_block(e, blocks.len()) {
                                 if in_p || in_heading || in_li {
-                                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                    flush_current_span(
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        bold,
+                                        italic,
+                                        underline,
+                                        code,
+                                        strike,
+                                        sup,
+                                        sub,
+                                        &current_href,
+                                        &current_anchor,
+                                        &current_style,
+                                    );
                                     if !current_spans.is_empty() {
-                                        finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
+                                        finish_paragraph_spans(
+                                            &mut current_spans,
+                                            p_has_dropcap,
+                                            p_dropcap_l2,
+                                        );
                                         let p_id = format!("p_{}", blocks.len() + 1);
                                         let p_block = Block::Paragraph {
                                             id: p_id,
@@ -706,7 +1040,9 @@ pub fn parse_xhtml_with_css(
                 let local = e.local_name();
                 let local_bytes = local.as_ref();
 
-                if (local_bytes == b"script" || local_bytes == b"style" || local_bytes == b"head") && ignore_depth > 0 {
+                if (local_bytes == b"script" || local_bytes == b"style" || local_bytes == b"head")
+                    && ignore_depth > 0
+                {
                     ignore_depth -= 1;
                 } else if ignore_depth == 0 {
                     if footnote_depth > 0 {
@@ -715,7 +1051,13 @@ pub fn parse_xhtml_with_css(
                             if let Some(fn_id) = current_footnote_id.take() {
                                 let mut cleaned = current_footnote_text.trim().to_string();
                                 while let Some(last_ch) = cleaned.chars().last() {
-                                    if last_ch == '↩' || last_ch == '⮐' || last_ch == '↵' || last_ch == '^' || last_ch == '↑' || last_ch.is_whitespace() {
+                                    if last_ch == '↩'
+                                        || last_ch == '⮐'
+                                        || last_ch == '↵'
+                                        || last_ch == '^'
+                                        || last_ch == '↑'
+                                        || last_ch.is_whitespace()
+                                    {
                                         cleaned.pop();
                                     } else {
                                         break;
@@ -736,23 +1078,66 @@ pub fn parse_xhtml_with_css(
                         b"ruby" => {
                             ruby.on_end_tag(b"ruby");
                             let mut style_parts = Vec::new();
-                            if bold { style_parts.push("bold"); }
-                            if italic { style_parts.push("italic"); }
-                            if underline { style_parts.push("underline"); }
-                            if code { style_parts.push("code"); }
-                            if strike { style_parts.push("strike"); }
-                            if sup { style_parts.push("sup"); }
-                            if sub { style_parts.push("sub"); }
-                            if let Some(ref s) = current_style { style_parts.push(s.as_str()); }
-                            let base_style = if style_parts.is_empty() { None } else { Some(style_parts.join(" ")) };
+                            if bold {
+                                style_parts.push("bold");
+                            }
+                            if italic {
+                                style_parts.push("italic");
+                            }
+                            if underline {
+                                style_parts.push("underline");
+                            }
+                            if code {
+                                style_parts.push("code");
+                            }
+                            if strike {
+                                style_parts.push("strike");
+                            }
+                            if sup {
+                                style_parts.push("sup");
+                            }
+                            if sub {
+                                style_parts.push("sub");
+                            }
+                            if let Some(ref s) = current_style {
+                                style_parts.push(s.as_str());
+                            }
+                            let base_style = if style_parts.is_empty() {
+                                None
+                            } else {
+                                Some(style_parts.join(" "))
+                            };
 
-                            ruby.emit_spans(base_style, &current_anchor, &current_href, &mut current_spans);
+                            ruby.emit_spans(
+                                base_style,
+                                &current_anchor,
+                                &current_href,
+                                &mut current_spans,
+                            );
                         }
-                        b"p" | b"blockquote" | b"center" | b"div" | b"section" | b"article" | b"main" | b"aside" => {
+                        b"p" | b"blockquote" | b"center" | b"div" | b"section" | b"article"
+                        | b"main" | b"aside" => {
                             if in_p {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                                 if !current_spans.is_empty() {
-                                    finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
+                                    finish_paragraph_spans(
+                                        &mut current_spans,
+                                        p_has_dropcap,
+                                        p_dropcap_l2,
+                                    );
                                     let p_block = Block::Paragraph {
                                         id: format!("p_{}", blocks.len() + 1),
                                         spans: std::mem::take(&mut current_spans),
@@ -771,7 +1156,20 @@ pub fn parse_xhtml_with_css(
                         }
                         b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
                             if in_heading {
-                                flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
                                 if !current_spans.is_empty() {
                                     let h_block = Block::Heading {
                                         id: format!("h_{}", blocks.len() + 1),
@@ -789,44 +1187,165 @@ pub fn parse_xhtml_with_css(
                             }
                         }
                         b"b" | b"strong" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             bold = false;
                         }
                         b"i" | b"em" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             italic = false;
                         }
                         b"u" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             underline = false;
                         }
                         b"del" | b"s" | b"strike" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             strike = false;
                         }
                         b"sup" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             sup = false;
                         }
                         b"sub" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             sub = false;
                         }
                         b"code" | b"tt" | b"kbd" | b"samp" | b"pre" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             code = false;
                         }
                         b"a" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             current_href = None;
                             current_anchor = None;
                             if let Some(ref st) = current_style {
                                 let new_st = st.replace("noteref", "").trim().to_string();
-                                current_style = if new_st.is_empty() { None } else { Some(new_st) };
+                                current_style = if new_st.is_empty() {
+                                    None
+                                } else {
+                                    Some(new_st)
+                                };
                             }
                         }
                         b"span" | b"abbr" | b"acronym" => {
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             current_style = None;
                         }
                         b"th" | b"td" => {
@@ -849,7 +1368,20 @@ pub fn parse_xhtml_with_css(
                         }
                         b"li" => {
                             in_li = false;
-                            flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                            flush_current_span(
+                                &mut current_span_text,
+                                &mut current_spans,
+                                bold,
+                                italic,
+                                underline,
+                                code,
+                                strike,
+                                sup,
+                                sub,
+                                &current_href,
+                                &current_anchor,
+                                &current_style,
+                            );
                             if !current_spans.is_empty() {
                                 if current_spans.iter().any(|s| !s.text.trim().is_empty()) {
                                     current_list_item_blocks.push(Block::Paragraph {
@@ -867,19 +1399,20 @@ pub fn parse_xhtml_with_css(
                         }
                         b"ul" | b"ol" => {
                             if let Some((ordered, items, saved_parent_blocks)) = list_stack.pop()
-                                && !items.is_empty() {
-                                    let list_block = Block::List {
-                                        id: format!("list_{}", blocks.len() + 1),
-                                        ordered,
-                                        items,
-                                    };
-                                    if !list_stack.is_empty() {
-                                        current_list_item_blocks = saved_parent_blocks;
-                                        current_list_item_blocks.push(list_block);
-                                    } else {
-                                        blocks.push(list_block);
-                                    }
+                                && !items.is_empty()
+                            {
+                                let list_block = Block::List {
+                                    id: format!("list_{}", blocks.len() + 1),
+                                    ordered,
+                                    items,
+                                };
+                                if !list_stack.is_empty() {
+                                    current_list_item_blocks = saved_parent_blocks;
+                                    current_list_item_blocks.push(list_block);
+                                } else {
+                                    blocks.push(list_block);
                                 }
+                            }
                             in_li = !list_stack.is_empty();
                         }
                         _ => {}
@@ -888,7 +1421,20 @@ pub fn parse_xhtml_with_css(
             }
             Ok(Event::Eof) => {
                 if in_p {
-                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                    flush_current_span(
+                        &mut current_span_text,
+                        &mut current_spans,
+                        bold,
+                        italic,
+                        underline,
+                        code,
+                        strike,
+                        sup,
+                        sub,
+                        &current_href,
+                        &current_anchor,
+                        &current_style,
+                    );
                     if !current_spans.is_empty() {
                         finish_paragraph_spans(&mut current_spans, p_has_dropcap, p_dropcap_l2);
                         let p_block = Block::Paragraph {
@@ -903,7 +1449,20 @@ pub fn parse_xhtml_with_css(
                         }
                     }
                 } else if in_heading {
-                    flush_current_span(&mut current_span_text, &mut current_spans, bold, italic, underline, code, strike, sup, sub, &current_href, &current_anchor, &current_style);
+                    flush_current_span(
+                        &mut current_span_text,
+                        &mut current_spans,
+                        bold,
+                        italic,
+                        underline,
+                        code,
+                        strike,
+                        sup,
+                        sub,
+                        &current_href,
+                        &current_anchor,
+                        &current_style,
+                    );
                     if !current_spans.is_empty() {
                         let h_block = Block::Heading {
                             id: format!("h_{}", blocks.len() + 1),
@@ -931,4 +1490,3 @@ pub fn parse_xhtml_with_css(
 /// Parses and sanitizes CSS style strings:
 /// - Extracts text-align: left, center, right, justify
 pub use crate::epub::css_style::sanitize_css_style;
-

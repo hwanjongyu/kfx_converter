@@ -1,27 +1,29 @@
 //! # KFX Converter
 //! High-performance native EPUB to Amazon KFX converter in Rust.
 
-pub mod symbols;
 pub mod container;
-pub mod ir;
-pub mod ion;
 pub mod css;
-pub mod epub;
-pub mod packager;
 pub mod enhancements;
-pub mod sync;
+pub mod epub;
+pub mod ion;
+pub mod ir;
+pub mod packager;
 pub mod pipeline;
+pub mod symbols;
+pub mod sync;
 pub mod validator;
 
-pub use container::{KfxContainer, ContainerError, ContainerHeader, KfxEntity, ChunkEntry};
-pub use symbols::{symbol_name, symbol_id, KfxSymbol, KFX_SYMBOL_TABLE};
-pub use ir::{BookIR, SpanStyles, BlockStyle, TextFormatFlags, DropCapStyle, TextAlignment, FontSizeBucket};
-pub use ion::{IonWriter, IonReader, IonValue, IonError, encode_varuint, wrap_enty_header};
-pub use epub::{EpubReader, EpubError};
+pub use container::{ChunkEntry, ContainerError, ContainerHeader, KfxContainer, KfxEntity};
+pub use enhancements::{CoverError, CoverOptimizer, WordWiseBuilder, WordWiseGloss};
+pub use epub::{EpubError, EpubReader};
+pub use ion::{IonError, IonReader, IonValue, IonWriter, encode_varuint, wrap_enty_header};
+pub use ir::{
+    BlockStyle, BookIR, DropCapStyle, FontSizeBucket, SpanStyles, TextAlignment, TextFormatFlags,
+};
 pub use packager::{KfxPackager, PackagerError};
-pub use enhancements::{CoverOptimizer, CoverError, WordWiseBuilder, WordWiseGloss};
+pub use pipeline::{ConversionOptions, ConversionPipeline, ConversionReport, PipelineError};
+pub use symbols::{KFX_SYMBOL_TABLE, KfxSymbol, symbol_id, symbol_name};
 pub use sync::{KindleBookFile, KindleSync, SyncError};
-pub use pipeline::{ConversionPipeline, ConversionOptions, ConversionReport, PipelineError};
 pub use validator::{KfxPreflightValidator, ValidationError, ValidationReport};
 
 #[cfg(test)]
@@ -53,9 +55,8 @@ mod tests {
         ];
 
         let mut buffer = Cursor::new(Vec::new());
-        let total_size =
-            KfxContainer::write_to(&entities, "CR!MOCKCONTAINERID123", &mut buffer)
-                .expect("Write failed");
+        let total_size = KfxContainer::write_to(&entities, "CR!MOCKCONTAINERID123", &mut buffer)
+            .expect("Write failed");
         assert!(total_size > 0);
 
         let data = buffer.into_inner();

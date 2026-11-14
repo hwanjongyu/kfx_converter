@@ -2,9 +2,9 @@
 //!
 //! Generates binary-compliant SQLite files (`LanguageLayer.<lang>.<asin>.kll`) for Amazon Kindle e-readers.
 
+use rusqlite::{Connection, Result as SqlResult, params};
 use std::collections::BTreeMap;
 use std::path::Path;
-use rusqlite::{params, Connection, Result as SqlResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WordWiseGloss {
@@ -62,10 +62,7 @@ pub struct WordWiseBuilder {
 impl WordWiseBuilder {
     fn normalize_lang(lang: &str) -> String {
         let trimmed = lang.trim().to_ascii_lowercase();
-        let primary = trimmed
-            .split(['-', '_'])
-            .next()
-            .unwrap_or("en");
+        let primary = trimmed.split(['-', '_']).next().unwrap_or("en");
         if primary.is_empty() {
             "en".to_string()
         } else {
@@ -101,7 +98,11 @@ impl WordWiseBuilder {
 
     /// Returns canonical Kindle Word Wise filename convention.
     pub fn get_kll_filename(asin: &str, target_language: &str) -> String {
-        format!("LanguageLayer.{}.{}.kll", Self::normalize_lang(target_language), asin)
+        format!(
+            "LanguageLayer.{}.{}.kll",
+            Self::normalize_lang(target_language),
+            asin
+        )
     }
 
     /// Adds a gloss hint without pacing constraints (e.g. for testing).
@@ -146,9 +147,10 @@ impl WordWiseBuilder {
             return false;
         }
         if let Some(last) = self.last_gloss_pos
-            && start.saturating_sub(last) < self.pacing.min_distance {
-                return false;
-            }
+            && start.saturating_sub(last) < self.pacing.min_distance
+        {
+            return false;
+        }
         let cutoff = start.saturating_sub(self.pacing.window_size);
         self.window_positions.retain(|&p| p >= cutoff);
         if self.window_positions.len() >= self.pacing.max_glosses_per_window {
@@ -260,13 +262,19 @@ impl WordWiseBuilder {
         let initial_count = self.glosses.len();
 
         let mut temp_sections;
-        let sections: &[crate::ir::Section] = if let Some(cover_res_id) = book.resolve_cover_resource_id() {
-            let first_is_cover = book.sections.first().map(|s| {
-                s.blocks.iter().any(|b| match b {
-                    crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
-                    _ => false,
+        let sections: &[crate::ir::Section] = if let Some(cover_res_id) =
+            book.resolve_cover_resource_id()
+        {
+            let first_is_cover = book
+                .sections
+                .first()
+                .map(|s| {
+                    s.blocks.iter().any(|b| match b {
+                        crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                        _ => false,
+                    })
                 })
-            }).unwrap_or(false);
+                .unwrap_or(false);
 
             if !first_is_cover {
                 temp_sections = book.sections.clone();
@@ -299,10 +307,15 @@ impl WordWiseBuilder {
 
             let is_cover = (idx == 0)
                 && (section.id.to_lowercase().contains("cover")
-                    || (section.blocks.iter().any(|b| matches!(b, crate::ir::Block::Image { .. }))
+                    || (section
+                        .blocks
+                        .iter()
+                        .any(|b| matches!(b, crate::ir::Block::Image { .. }))
                         && section.blocks.iter().all(|b| match b {
                             crate::ir::Block::Image { .. } => true,
-                            crate::ir::Block::Paragraph { spans, .. } => spans.iter().all(|s| s.text.trim().is_empty()),
+                            crate::ir::Block::Paragraph { spans, .. } => {
+                                spans.iter().all(|s| s.text.trim().is_empty())
+                            }
                             _ => false,
                         })));
 
@@ -344,15 +357,16 @@ impl WordWiseBuilder {
                 }
 
                 if let Some(start_c) = word_char_start.take()
-                    && let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
-                        raw_candidates.push(WordWiseGloss {
-                            start: pid + start_c,
-                            end: None,
-                            difficulty,
-                            sense_id,
-                            low_confidence: false,
-                        });
-                    }
+                    && let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3)
+                {
+                    raw_candidates.push(WordWiseGloss {
+                        start: pid + start_c,
+                        end: None,
+                        difficulty,
+                        sense_id,
+                        low_confidence: false,
+                    });
+                }
 
                 let block_len = char_idx.max(1);
                 pid += block_len;
@@ -515,11 +529,9 @@ mod tests {
 
         // Query metadata
         let acr: String = conn
-            .query_row(
-                "SELECT value FROM metadata WHERE key = 'acr'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT value FROM metadata WHERE key = 'acr'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(acr, "CR!EXAMPLEACR12345678901234");
 
@@ -551,7 +563,10 @@ mod tests {
         // Verify to_bytes serialization
         let bytes = builder.to_bytes().expect("to_bytes must succeed");
         assert!(bytes.len() >= 4096, "SQLite database must be at least 4KB");
-        assert!(bytes.starts_with(b"SQLite format 3\0"), "Must be valid SQLite header");
+        assert!(
+            bytes.starts_with(b"SQLite format 3\0"),
+            "Must be valid SQLite header"
+        );
     }
 
     #[test]
@@ -600,19 +615,18 @@ mod tests {
             sections: vec![Section {
                 id: "sec1".to_string(),
                 title: "Chapter 1".to_string(),
-                blocks: vec![
-                    Block::Paragraph {
-                        id: "p1".to_string(),
-                        spans: vec![TextSpan {
-                            text: "The abstruse theory was compelling and difficult to elucidate.".to_string(),
-                            style: None,
-                            anchor_id: None,
-                            href: None,
-                            ruby: None,
-                        }],
+                blocks: vec![Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "The abstruse theory was compelling and difficult to elucidate."
+                            .to_string(),
                         style: None,
-                    },
-                ],
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                }],
             }],
             resources: std::collections::HashMap::new(),
             toc: Vec::new(),
@@ -620,8 +634,8 @@ mod tests {
             footnotes: std::collections::HashMap::new(),
         };
 
-        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
-            .with_pacing(WordWisePacingConfig {
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
+            WordWisePacingConfig {
                 min_difficulty: 1,
                 target_difficulty: 5,
                 min_distance: 10,
@@ -629,10 +643,15 @@ mod tests {
                 window_size: 500,
                 frontmatter_skip_chars: 0,
                 max_total_glosses: 100,
-            });
+            },
+        );
 
         let count = builder.generate_from_book(&ir);
-        assert!(count >= 2, "Expected at least 2 glosses (abstruse, elucidate), got {}", count);
+        assert!(
+            count >= 2,
+            "Expected at least 2 glosses (abstruse, elucidate), got {}",
+            count
+        );
         assert_eq!(builder.gloss_count(), count);
     }
 
@@ -645,19 +664,18 @@ mod tests {
             sections: vec![Section {
                 id: "sec1".to_string(),
                 title: "Chapter 1".to_string(),
-                blocks: vec![
-                    Block::Paragraph {
-                        id: "p1".to_string(),
-                        spans: vec![TextSpan {
-                            text: "The author's abstruse's explanation did not elucidate the dilemma.".to_string(),
-                            style: None,
-                            anchor_id: None,
-                            href: None,
-                            ruby: None,
-                        }],
+                blocks: vec![Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "The author's abstruse's explanation did not elucidate the dilemma."
+                            .to_string(),
                         style: None,
-                    },
-                ],
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                }],
             }],
             resources: std::collections::HashMap::new(),
             toc: Vec::new(),
@@ -665,8 +683,8 @@ mod tests {
             footnotes: std::collections::HashMap::new(),
         };
 
-        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
-            .with_pacing(WordWisePacingConfig {
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
+            WordWisePacingConfig {
                 min_difficulty: 1,
                 target_difficulty: 5,
                 min_distance: 1,
@@ -674,7 +692,8 @@ mod tests {
                 window_size: 500,
                 frontmatter_skip_chars: 0,
                 max_total_glosses: 100,
-            });
+            },
+        );
 
         let count = builder.generate_from_book(&ir);
         // "abstruse's" has 's stripped by dictionary and matches abstruse
@@ -700,19 +719,17 @@ mod tests {
             sections: vec![Section {
                 id: "sec1".to_string(),
                 title: "Chapter 1".to_string(),
-                blocks: vec![
-                    Block::Paragraph {
-                        id: "p1".to_string(),
-                        spans: vec![TextSpan {
-                            text: "The abstruse theorem.".to_string(),
-                            style: None,
-                            anchor_id: None,
-                            href: None,
-                            ruby: None,
-                        }],
+                blocks: vec![Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "The abstruse theorem.".to_string(),
                         style: None,
-                    },
-                ],
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                }],
             }],
             resources,
             toc: Vec::new(),
@@ -720,8 +737,8 @@ mod tests {
             footnotes: std::collections::HashMap::new(),
         };
 
-        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1")
-            .with_pacing(WordWisePacingConfig {
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
+            WordWisePacingConfig {
                 min_difficulty: 1,
                 target_difficulty: 5,
                 min_distance: 1,
@@ -729,7 +746,8 @@ mod tests {
                 window_size: 500,
                 frontmatter_skip_chars: 0,
                 max_total_glosses: 100,
-            });
+            },
+        );
 
         let count = builder.generate_from_book(&ir);
         assert_eq!(count, 2);
@@ -738,7 +756,11 @@ mod tests {
         // Chapter 1: 1 (root) = PID 7
         // "The " = 4 chars, so "abstruse" starts at offset 4 within block
         // Expected start: 6 (cover) + 1 (root) + 4 ("The ") = 11
-        assert_eq!(gloss.start, 11, "Expected PID 11 with cover offset, got {}", gloss.start);
+        assert_eq!(
+            gloss.start, 11,
+            "Expected PID 11 with cover offset, got {}",
+            gloss.start
+        );
     }
 
     #[test]
@@ -802,11 +824,41 @@ mod tests {
         // 4 easy words (Difficulty 5: grief, coffin, hesitate, download) appear earlier in the window,
         // followed by a harder word (Difficulty 4: jaundiced).
         let candidates = vec![
-            WordWiseGloss { start: 100, end: None, difficulty: 5, sense_id: 41273, low_confidence: false }, // grief
-            WordWiseGloss { start: 200, end: None, difficulty: 5, sense_id: 13689, low_confidence: false }, // coffin
-            WordWiseGloss { start: 300, end: None, difficulty: 5, sense_id: 5308, low_confidence: false },  // hesitate
-            WordWiseGloss { start: 400, end: None, difficulty: 5, sense_id: 28861, low_confidence: false }, // download
-            WordWiseGloss { start: 500, end: None, difficulty: 4, sense_id: 19346, low_confidence: false }, // jaundiced
+            WordWiseGloss {
+                start: 100,
+                end: None,
+                difficulty: 5,
+                sense_id: 41273,
+                low_confidence: false,
+            }, // grief
+            WordWiseGloss {
+                start: 200,
+                end: None,
+                difficulty: 5,
+                sense_id: 13689,
+                low_confidence: false,
+            }, // coffin
+            WordWiseGloss {
+                start: 300,
+                end: None,
+                difficulty: 5,
+                sense_id: 5308,
+                low_confidence: false,
+            }, // hesitate
+            WordWiseGloss {
+                start: 400,
+                end: None,
+                difficulty: 5,
+                sense_id: 28861,
+                low_confidence: false,
+            }, // download
+            WordWiseGloss {
+                start: 500,
+                end: None,
+                difficulty: 4,
+                sense_id: 19346,
+                low_confidence: false,
+            }, // jaundiced
         ];
 
         let selected = WordWiseBuilder::filter_candidates_priority_paced(&candidates, &pacing);
@@ -843,8 +895,20 @@ mod tests {
         // Word 1: easy word (diff 5, start 100)
         // Word 2: hard word (diff 2, start 110)
         let candidates = vec![
-            WordWiseGloss { start: 100, end: None, difficulty: 5, sense_id: 41273, low_confidence: false },
-            WordWiseGloss { start: 110, end: None, difficulty: 2, sense_id: 1001, low_confidence: false },
+            WordWiseGloss {
+                start: 100,
+                end: None,
+                difficulty: 5,
+                sense_id: 41273,
+                low_confidence: false,
+            },
+            WordWiseGloss {
+                start: 110,
+                end: None,
+                difficulty: 2,
+                sense_id: 1001,
+                low_confidence: false,
+            },
         ];
 
         let selected = WordWiseBuilder::filter_candidates_priority_paced(&candidates, &pacing);

@@ -1,10 +1,10 @@
 //! Locator suites, position maps, and container entity map indexing for KFX.
 
+use super::{KfxPackager, SINGLETON_ID, SectionPackData, symbols::LocalSymbols};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
 use crate::ir::Block;
 use crate::symbols::*;
-use super::{symbols::LocalSymbols, KfxPackager, SectionPackData, SINGLETON_ID};
 
 impl<'a> KfxPackager<'a> {
     pub(crate) fn build_position_maps(&mut self, section_data: &[SectionPackData]) {
@@ -229,7 +229,8 @@ impl<'a> KfxPackager<'a> {
                 }
 
                 if !img_syms.is_empty() {
-                    let dep_syms: Vec<IonValue> = img_syms.into_iter().map(IonValue::Symbol).collect();
+                    let dep_syms: Vec<IonValue> =
+                        img_syms.into_iter().map(IonValue::Symbol).collect();
                     entity_dependencies.push(IonValue::Struct(vec![
                         (sym_id, IonValue::Symbol(sec_pack.sec_sym_id)),
                         (sym_mandatory_dependencies, IonValue::List(dep_syms)),
@@ -247,7 +248,10 @@ impl<'a> KfxPackager<'a> {
             let raw_sym_id = symbols.intern(&raw_path);
             entity_dependencies.push(IonValue::Struct(vec![
                 (sym_id, IonValue::Symbol(res_sym_id)),
-                (sym_mandatory_dependencies, IonValue::List(vec![IonValue::Symbol(raw_sym_id)])),
+                (
+                    sym_mandatory_dependencies,
+                    IonValue::List(vec![IonValue::Symbol(raw_sym_id)]),
+                ),
             ]));
         }
 

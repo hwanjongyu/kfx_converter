@@ -31,7 +31,11 @@ impl TextSpan {
 
     pub fn with_resolved_styles(mut self, styles: &SpanStyles) -> Self {
         let tokens = styles.to_tokens();
-        self.style = if tokens.is_empty() { None } else { Some(tokens) };
+        self.style = if tokens.is_empty() {
+            None
+        } else {
+            Some(tokens)
+        };
         self
     }
 }
@@ -121,9 +125,7 @@ impl SpanStyles {
                 "font_size_lg" => styles.font_size = FontSizeBucket::Large,
                 "font_size_xl" => styles.font_size = FontSizeBucket::ExtraLarge,
                 "font_size_xxl" => styles.font_size = FontSizeBucket::ExtraExtraLarge,
-                t if !t.starts_with("dropcap")
-                    && !styles.custom_classes.iter().any(|c| c == t) =>
-                {
+                t if !t.starts_with("dropcap") && !styles.custom_classes.iter().any(|c| c == t) => {
                     styles.custom_classes.push(t.to_string());
                 }
                 _ => {}
@@ -147,16 +149,36 @@ impl SpanStyles {
                 tokens.push("dropcap_2");
             }
         }
-        if self.format.bold { tokens.push("bold"); }
-        if self.format.italic { tokens.push("italic"); }
-        if self.format.underline { tokens.push("underline"); }
-        if self.format.strikethrough { tokens.push("strike"); }
-        if self.format.code { tokens.push("code"); }
-        if self.format.superscript { tokens.push("sup"); }
-        if self.format.subscript { tokens.push("sub"); }
-        if self.format.small_caps { tokens.push("small_caps"); }
-        if self.format.uppercase { tokens.push("uppercase"); }
-        if self.format.noteref { tokens.push("noteref"); }
+        if self.format.bold {
+            tokens.push("bold");
+        }
+        if self.format.italic {
+            tokens.push("italic");
+        }
+        if self.format.underline {
+            tokens.push("underline");
+        }
+        if self.format.strikethrough {
+            tokens.push("strike");
+        }
+        if self.format.code {
+            tokens.push("code");
+        }
+        if self.format.superscript {
+            tokens.push("sup");
+        }
+        if self.format.subscript {
+            tokens.push("sub");
+        }
+        if self.format.small_caps {
+            tokens.push("small_caps");
+        }
+        if self.format.uppercase {
+            tokens.push("uppercase");
+        }
+        if self.format.noteref {
+            tokens.push("noteref");
+        }
         match self.font_size {
             FontSizeBucket::Normal => {}
             FontSizeBucket::ExtraSmall => tokens.push("font_size_xs"),
@@ -211,10 +233,18 @@ impl BlockStyle {
             TextAlignment::Right => tokens.push("align_right"),
             TextAlignment::Justify => tokens.push("align_justify"),
         }
-        if self.is_first_paragraph { tokens.push("p_first"); }
-        if self.is_hanging_indent { tokens.push("hanging_indent"); }
-        if self.is_blockquote { tokens.push("blockquote"); }
-        if self.page_break_before { tokens.push("page_break_before"); }
+        if self.is_first_paragraph {
+            tokens.push("p_first");
+        }
+        if self.is_hanging_indent {
+            tokens.push("hanging_indent");
+        }
+        if self.is_blockquote {
+            tokens.push("blockquote");
+        }
+        if self.page_break_before {
+            tokens.push("page_break_before");
+        }
         for c in &self.custom_classes {
             tokens.push(c);
         }
@@ -297,7 +327,9 @@ impl Block {
     /// Returns the resolved strongly-typed style for this block.
     pub fn resolved_style(&self) -> BlockStyle {
         let st = match self {
-            Block::Paragraph { style, .. } | Block::Heading { style, .. } => style.as_deref().unwrap_or_default(),
+            Block::Paragraph { style, .. } | Block::Heading { style, .. } => {
+                style.as_deref().unwrap_or_default()
+            }
             _ => "",
         };
         BlockStyle::from_tokens(st)
@@ -306,7 +338,11 @@ impl Block {
     /// Sets the strongly-typed style for this block.
     pub fn with_resolved_style(mut self, style: &BlockStyle) -> Self {
         let tokens = style.to_tokens();
-        let opt = if tokens.is_empty() { None } else { Some(tokens) };
+        let opt = if tokens.is_empty() {
+            None
+        } else {
+            Some(tokens)
+        };
         match &mut self {
             Block::Paragraph { style, .. } | Block::Heading { style, .. } => *style = opt,
             _ => {}
@@ -324,21 +360,17 @@ impl Block {
                 }
                 out
             }
-            Block::Table { rows, .. } => {
-                rows.iter()
-                    .map(|r| r.join("\t"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            Block::List { items, .. } => {
-                items.iter()
-                    .flat_map(|it| it.iter().map(|b| b.plain_text()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            Block::Image { alt, .. } => {
-                alt.clone().unwrap_or_default()
-            }
+            Block::Table { rows, .. } => rows
+                .iter()
+                .map(|r| r.join("\t"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Block::List { items, .. } => items
+                .iter()
+                .flat_map(|it| it.iter().map(|b| b.plain_text()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Block::Image { alt, .. } => alt.clone().unwrap_or_default(),
             Block::HorizontalRule => "---".to_string(),
         }
     }
@@ -349,31 +381,41 @@ impl Block {
             Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
                 spans.iter().map(|s| s.text.chars().count()).sum()
             }
-            Block::Table { rows, .. } => {
-                rows.iter().flat_map(|r| r.iter()).map(|c| c.chars().count()).sum()
-            }
-            Block::List { items, .. } => {
-                items.iter().flat_map(|it| it.iter()).map(|b| b.char_count()).sum()
-            }
-            Block::Image { alt, .. } => {
-                alt.as_ref().map(|a| a.chars().count()).unwrap_or(0)
-            }
+            Block::Table { rows, .. } => rows
+                .iter()
+                .flat_map(|r| r.iter())
+                .map(|c| c.chars().count())
+                .sum(),
+            Block::List { items, .. } => items
+                .iter()
+                .flat_map(|it| it.iter())
+                .map(|b| b.char_count())
+                .sum(),
+            Block::Image { alt, .. } => alt.as_ref().map(|a| a.chars().count()).unwrap_or(0),
             Block::HorizontalRule => 3,
         }
     }
 
     pub fn has_page_break_before(&self) -> bool {
         match self {
-            Block::Paragraph { style: Some(st), .. } => st.contains("page_break_before"),
-            Block::Heading { style: Some(st), .. } => st.contains("page_break_before"),
+            Block::Paragraph {
+                style: Some(st), ..
+            } => st.contains("page_break_before"),
+            Block::Heading {
+                style: Some(st), ..
+            } => st.contains("page_break_before"),
             _ => false,
         }
     }
 
     pub fn has_page_break_after(&self) -> bool {
         match self {
-            Block::Paragraph { style: Some(st), .. } => st.contains("page_break_after"),
-            Block::Heading { style: Some(st), .. } => st.contains("page_break_after"),
+            Block::Paragraph {
+                style: Some(st), ..
+            } => st.contains("page_break_after"),
+            Block::Heading {
+                style: Some(st), ..
+            } => st.contains("page_break_after"),
             _ => false,
         }
     }
@@ -402,7 +444,10 @@ impl BookIR {
             }
 
             let total_chars: usize = section.blocks.iter().map(|b| b.char_count()).sum();
-            let has_forced_break = section.blocks.iter().any(|b| b.has_page_break_before() || b.has_page_break_after());
+            let has_forced_break = section
+                .blocks
+                .iter()
+                .any(|b| b.has_page_break_before() || b.has_page_break_after());
 
             if !has_forced_break && total_chars <= max_chars && section.blocks.len() <= max_blocks {
                 // Not fragmented: map anchors directly
@@ -424,10 +469,15 @@ impl BookIR {
             for block in section.blocks {
                 let block_chars = block.char_count();
                 let is_forced_break = block.has_page_break_before()
-                    || (!current_blocks.is_empty() && current_blocks.last().is_some_and(|b: &Block| b.has_page_break_after()));
+                    || (!current_blocks.is_empty()
+                        && current_blocks
+                            .last()
+                            .is_some_and(|b: &Block| b.has_page_break_after()));
 
                 if !current_blocks.is_empty()
-                    && (is_forced_break || current_chars + block_chars > max_chars || current_blocks.len() >= max_blocks)
+                    && (is_forced_break
+                        || current_chars + block_chars > max_chars
+                        || current_blocks.len() >= max_blocks)
                 {
                     let part_id = format!("{}_p{}", orig_id, part_idx);
                     for b in &current_blocks {
@@ -488,7 +538,9 @@ impl BookIR {
         ) {
             for item in items.iter_mut() {
                 if let Some(ref anchor) = item.target_anchor {
-                    if let Some(part_id) = anchor_map.get(&(item.target_section.clone(), anchor.clone())) {
+                    if let Some(part_id) =
+                        anchor_map.get(&(item.target_section.clone(), anchor.clone()))
+                    {
                         item.target_section = part_id.clone();
                     } else if let Some(first_part) = section_map.get(&item.target_section) {
                         item.target_section = first_part.clone();
@@ -504,7 +556,9 @@ impl BookIR {
         // Update Page List references
         for page in &mut self.page_list {
             if let Some(ref anchor) = page.target_anchor {
-                if let Some(part_id) = anchor_part_map.get(&(page.target_section.clone(), anchor.clone())) {
+                if let Some(part_id) =
+                    anchor_part_map.get(&(page.target_section.clone(), anchor.clone()))
+                {
                     page.target_section = part_id.clone();
                 } else if let Some(first_part) = section_first_part_map.get(&page.target_section) {
                     page.target_section = first_part.clone();
@@ -608,12 +662,16 @@ impl BookIR {
     /// across both `KfxPackager` and `WordWiseBuilder`.
     pub fn ensure_cover_section(&mut self) {
         if let Some(cover_res_id) = self.resolve_cover_resource_id() {
-            let first_is_cover = self.sections.first().map(|s| {
-                s.blocks.iter().any(|b| match b {
-                    Block::Image { resource_id, .. } => resource_id == &cover_res_id,
-                    _ => false,
+            let first_is_cover = self
+                .sections
+                .first()
+                .map(|s| {
+                    s.blocks.iter().any(|b| match b {
+                        Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                        _ => false,
+                    })
                 })
-            }).unwrap_or(false);
+                .unwrap_or(false);
 
             if !first_is_cover {
                 let cover_section = Section {
@@ -682,11 +740,14 @@ mod tests {
     #[test]
     fn test_ir_normalize_idempotent() {
         let mut book = BookIR::default();
-        book.resources.insert("cover.jpg".to_string(), ResourceAsset {
-            id: "cover.jpg".to_string(),
-            mime_type: "image/jpeg".to_string(),
-            data: vec![0u8; 10],
-        });
+        book.resources.insert(
+            "cover.jpg".to_string(),
+            ResourceAsset {
+                id: "cover.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![0u8; 10],
+            },
+        );
         book.sections.push(Section {
             id: "sec_1".to_string(),
             title: "Chapter 1".to_string(),
@@ -740,7 +801,11 @@ mod tests {
                 spans: vec![TextSpan {
                     text: "Block of text ".repeat(10),
                     style: None,
-                    anchor_id: if i == 5 { Some("mid_anchor".to_string()) } else { None },
+                    anchor_id: if i == 5 {
+                        Some("mid_anchor".to_string())
+                    } else {
+                        None
+                    },
                     href: None,
                     ruby: None,
                 }],
@@ -757,14 +822,12 @@ mod tests {
             title: "Chapter 1 Beginning".to_string(),
             target_section: "chapter_1".to_string(),
             target_anchor: None,
-            children: vec![
-                TocItem {
-                    title: "Mid Chapter".to_string(),
-                    target_section: "chapter_1".to_string(),
-                    target_anchor: Some("mid_anchor".to_string()),
-                    children: Vec::new(),
-                }
-            ],
+            children: vec![TocItem {
+                title: "Mid Chapter".to_string(),
+                target_section: "chapter_1".to_string(),
+                target_anchor: Some("mid_anchor".to_string()),
+                children: Vec::new(),
+            }],
         });
 
         book.page_list.push(PageEntry {
@@ -824,7 +887,11 @@ mod tests {
         // Even with huge max_chars and max_blocks, forced page break must partition into 2 sections
         book.fragment_large_sections(100_000, 100);
 
-        assert_eq!(book.sections.len(), 2, "Expected 2 sections partitioned by forced page break");
+        assert_eq!(
+            book.sections.len(),
+            2,
+            "Expected 2 sections partitioned by forced page break"
+        );
         assert_eq!(book.sections[0].id, "chapter_scene_p1");
         assert_eq!(book.sections[1].id, "chapter_scene_p2");
         assert_eq!(book.sections[0].blocks.len(), 1);
@@ -845,7 +912,10 @@ mod tests {
                 data: vec![0xFF, 0xD8, 0xFF, 0xE0],
             },
         );
-        assert_eq!(book.resolve_cover_resource_id(), Some("cover_img".to_string()));
+        assert_eq!(
+            book.resolve_cover_resource_id(),
+            Some("cover_img".to_string())
+        );
 
         // 2. Explicit metadata overrides heuristic
         book.metadata.cover_image_id = Some("explicit_cover".to_string());
@@ -857,7 +927,10 @@ mod tests {
                 data: vec![0xFF, 0xD8, 0xFF, 0xE0],
             },
         );
-        assert_eq!(book.resolve_cover_resource_id(), Some("explicit_cover".to_string()));
+        assert_eq!(
+            book.resolve_cover_resource_id(),
+            Some("explicit_cover".to_string())
+        );
 
         // 3. Explicit metadata pointing to a non-image (e.g. cover.xhtml) falls back to image
         book.resources.remove("explicit_cover");
@@ -871,7 +944,10 @@ mod tests {
             },
         );
         // Must reject the non-image cover_xhtml_doc and fall back to cover_img
-        assert_eq!(book.resolve_cover_resource_id(), Some("cover_img".to_string()));
+        assert_eq!(
+            book.resolve_cover_resource_id(),
+            Some("cover_img".to_string())
+        );
     }
 
     #[test]
@@ -922,7 +998,10 @@ mod tests {
         assert!(span_styles.format.strikethrough);
         assert_eq!(span_styles.dropcap, DropCapStyle::StandardTwoChar);
         assert_eq!(span_styles.font_size, FontSizeBucket::Large);
-        assert_eq!(span_styles.custom_classes, vec!["custom_author".to_string()]);
+        assert_eq!(
+            span_styles.custom_classes,
+            vec!["custom_author".to_string()]
+        );
 
         let block_tokens = "align_center p_first hanging_indent page_break_before custom_scene";
         let block_style = BlockStyle::from_tokens(block_tokens);
@@ -940,7 +1019,10 @@ mod tests {
             href: None,
             ruby: None,
         };
-        assert_eq!(span.resolved_styles().dropcap, DropCapStyle::StandardTwoChar);
+        assert_eq!(
+            span.resolved_styles().dropcap,
+            DropCapStyle::StandardTwoChar
+        );
 
         let block = Block::Paragraph {
             id: "p1".to_string(),
@@ -949,5 +1031,65 @@ mod tests {
         };
         assert_eq!(block.resolved_style().alignment, TextAlignment::Center);
     }
-}
 
+    #[test]
+    fn test_block_plain_text_and_char_count_and_page_break_after() {
+        let heading = Block::Heading {
+            id: "h1".to_string(),
+            level: 1,
+            spans: vec![TextSpan {
+                text: "Introduction".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: Some("page_break_after".to_string()),
+        };
+        assert_eq!(heading.plain_text(), "Introduction");
+        assert_eq!(heading.char_count(), 12);
+        assert!(heading.has_page_break_after());
+        assert!(!heading.has_page_break_before());
+
+        let image = Block::Image {
+            id: "img1".to_string(),
+            resource_id: "res1".to_string(),
+            alt: Some("A diagram".to_string()),
+            width: Some(100),
+            height: Some(100),
+        };
+        assert_eq!(image.plain_text(), "A diagram");
+        assert_eq!(image.char_count(), 9);
+
+        let hr = Block::HorizontalRule;
+        assert_eq!(hr.plain_text(), "---");
+        assert_eq!(hr.char_count(), 3);
+
+        let table = Block::Table {
+            id: "t1".to_string(),
+            rows: vec![
+                vec!["Col1".to_string(), "Col2".to_string()],
+                vec!["Val1".to_string(), "Val2".to_string()],
+            ],
+        };
+        assert_eq!(table.char_count(), 16);
+
+        let list = Block::List {
+            id: "l1".to_string(),
+            ordered: false,
+            items: vec![vec![Block::Paragraph {
+                id: "li1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Item 1".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }]],
+        };
+        assert_eq!(list.char_count(), 6);
+        assert_eq!(list.plain_text(), "Item 1");
+    }
+}

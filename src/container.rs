@@ -1,10 +1,10 @@
 //! Amazon KFX Container (CONT) Reader and Writer
 //! Implements binary packing/unpacking of the KFX container format compliant with Amazon Kindle OS.
 
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use thiserror::Error;
 
 use crate::ion::{IonValue, IonWriter};
@@ -130,10 +130,13 @@ impl KfxContainer {
                 };
                 if let Some(fields) = struct_fields {
                     for (sid, val) in fields {
-                        if sid == 414 { // bcIndexTabLength
+                        if sid == 414 {
+                            // bcIndexTabLength
                             if let IonValue::Int(len) = val
-                                && len > 0 && (len as usize) < index_tab_len {
-                                    index_tab_len = len as usize;
+                                && len > 0
+                                && (len as usize) < index_tab_len
+                            {
+                                index_tab_len = len as usize;
                             }
                             break;
                         }
@@ -164,9 +167,12 @@ impl KfxContainer {
             let offset = file.read_u64::<LittleEndian>()?;
             let length = file.read_u64::<LittleEndian>()?;
 
-            let abs_offset = (header_length as u64)
-                .checked_add(offset)
-                .ok_or_else(|| ContainerError::CorruptedHeader(format!("Chunk offset arithmetic overflow: {}", offset)))?;
+            let abs_offset = (header_length as u64).checked_add(offset).ok_or_else(|| {
+                ContainerError::CorruptedHeader(format!(
+                    "Chunk offset arithmetic overflow: {}",
+                    offset
+                ))
+            })?;
 
             chunks.push(ChunkEntry {
                 entity_id,
@@ -186,7 +192,11 @@ impl KfxContainer {
     /// Reads the raw payload bytes for a specific chunk entry, stripping any ENTY envelope if present.
     pub fn read_chunk(&mut self, chunk: &ChunkEntry) -> Result<Vec<u8>, ContainerError> {
         let file_len = self.reader.metadata()?.len();
-        if chunk.offset.checked_add(chunk.length).is_none_or(|end| end > file_len) {
+        if chunk
+            .offset
+            .checked_add(chunk.length)
+            .is_none_or(|end| end > file_len)
+        {
             return Err(ContainerError::CorruptedHeader(format!(
                 "Chunk offset ({}) + length ({}) exceeds file size ({})",
                 chunk.offset, chunk.length, file_len
@@ -276,20 +286,24 @@ impl KfxContainer {
         let doc_sym_bytes = doc_symbols_data.unwrap_or(&[]);
         let doc_sym_offset = index_tab_offset
             .checked_add(index_tab_length)
-            .ok_or_else(|| ContainerError::CorruptedHeader("Container doc_sym_offset overflow".into()))?;
+            .ok_or_else(|| {
+                ContainerError::CorruptedHeader("Container doc_sym_offset overflow".into())
+            })?;
         let doc_sym_length = u32::try_from(doc_sym_bytes.len())
             .map_err(|_| ContainerError::CorruptedHeader("doc_sym_length overflow".into()))?;
 
         let format_caps_bytes = format_caps_data.unwrap_or(&[]);
-        let format_caps_offset = doc_sym_offset
-            .checked_add(doc_sym_length)
-            .ok_or_else(|| ContainerError::CorruptedHeader("Container format_caps_offset overflow".into()))?;
+        let format_caps_offset = doc_sym_offset.checked_add(doc_sym_length).ok_or_else(|| {
+            ContainerError::CorruptedHeader("Container format_caps_offset overflow".into())
+        })?;
         let format_caps_length = u32::try_from(format_caps_bytes.len())
             .map_err(|_| ContainerError::CorruptedHeader("format_caps_length overflow".into()))?;
 
         let ci_offset = format_caps_offset
             .checked_add(format_caps_length)
-            .ok_or_else(|| ContainerError::CorruptedHeader("Container ci_offset overflow".into()))?;
+            .ok_or_else(|| {
+                ContainerError::CorruptedHeader("Container ci_offset overflow".into())
+            })?;
 
         // Build ContainerInfo Ion structure
         let sym_bc_cont_id = symbol_id("bcContId").unwrap_or(409);
@@ -304,8 +318,14 @@ impl KfxContainer {
             (sym_bc_compr_type, IonValue::Int(0)),
             (sym_bc_drm_scheme, IonValue::Int(0)),
             (sym_bc_chunk_size, IonValue::Int(4096)),
-            (sym_bc_index_tab_offset, IonValue::Int(index_tab_offset as i64)),
-            (sym_bc_index_tab_length, IonValue::Int(index_tab_length as i64)),
+            (
+                sym_bc_index_tab_offset,
+                IonValue::Int(index_tab_offset as i64),
+            ),
+            (
+                sym_bc_index_tab_length,
+                IonValue::Int(index_tab_length as i64),
+            ),
         ];
 
         if doc_sym_length > 0 {
@@ -335,7 +355,9 @@ impl KfxContainer {
         let header_length = ci_offset
             .checked_add(ci_length)
             .and_then(|v| v.checked_add(kfxgen_info.len() as u32))
-            .ok_or_else(|| ContainerError::CorruptedHeader("Container header_length overflow".into()))?;
+            .ok_or_else(|| {
+                ContainerError::CorruptedHeader("Container header_length overflow".into())
+            })?;
 
         // Write Fixed 18-byte CONT Header (<4sHIII)
         writer.write_all(KFX_MAGIC)?;
@@ -477,7 +499,10 @@ mod tests {
 
         let result = opened.read_chunk(&corrupted_chunk);
         assert!(result.is_err());
-        assert!(matches!(result.err().unwrap(), ContainerError::CorruptedHeader(_)));
+        assert!(matches!(
+            result.err().unwrap(),
+            ContainerError::CorruptedHeader(_)
+        ));
     }
 
     #[test]
@@ -513,7 +538,10 @@ mod tests {
         let ci_length = (&data[14..18]).read_u32::<LittleEndian>().unwrap();
 
         assert_eq!(header_length, ci_offset + ci_length + 2);
-        assert_eq!(&data[(ci_offset + ci_length) as usize..header_length as usize], b"[]");
+        assert_eq!(
+            &data[(ci_offset + ci_length) as usize..header_length as usize],
+            b"[]"
+        );
 
         // index_tab is 1 entry * 24 bytes = 24 bytes, starts at 18
         // doc_sym starts at 18 + 24 = 42
@@ -521,7 +549,10 @@ mod tests {
 
         // format_caps starts immediately after doc_sym: 42 + doc_sym.len()
         let format_caps_offset = 42 + doc_sym.len();
-        assert_eq!(&data[format_caps_offset..format_caps_offset + format_caps.len()], format_caps);
+        assert_eq!(
+            &data[format_caps_offset..format_caps_offset + format_caps.len()],
+            format_caps
+        );
 
         // ContainerInfo starts after format_caps
         assert_eq!(ci_offset as usize, format_caps_offset + format_caps.len());
@@ -545,7 +576,8 @@ mod tests {
         let header_len = 18 + 24 + ci_bytes.len() as u32 + 2;
         data.write_u32::<LittleEndian>(header_len).unwrap();
         data.write_u32::<LittleEndian>(18 + 24).unwrap(); // ci_offset
-        data.write_u32::<LittleEndian>(ci_bytes.len() as u32).unwrap(); // ci_length
+        data.write_u32::<LittleEndian>(ci_bytes.len() as u32)
+            .unwrap(); // ci_length
 
         // bcIndexTab (24 bytes for 1 chunk)
         let mut chunk_entry = vec![0u8; 24];
@@ -565,6 +597,10 @@ mod tests {
         tmp_file.write_all(&data).unwrap();
 
         let opened = KfxContainer::open(tmp_file.path()).unwrap();
-        assert_eq!(opened.chunks.len(), 1, "Must parse 1 chunk from field 414 despite preceding [0x03, 0x9e]");
+        assert_eq!(
+            opened.chunks.len(),
+            1,
+            "Must parse 1 chunk from field 414 despite preceding [0x03, 0x9e]"
+        );
     }
 }

@@ -1,13 +1,13 @@
 //! Navigation document (EPUB 3 nav.xhtml and EPUB 2 toc.ncx) parsing and page-list separation.
 
+use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use quick_xml::events::Event;
-use quick_xml::Reader as XmlReader;
 use zip::ZipArchive;
 
-use crate::epub::archive::{resolve_zip_path, MAX_METADATA_BYTES};
+use crate::epub::archive::{MAX_METADATA_BYTES, resolve_zip_path};
 use crate::epub::opf::ManifestItem;
 use crate::ir::{PageEntry, Section, TocItem};
 
@@ -22,14 +22,22 @@ pub fn extract_navigation<R: Read + std::io::Seek>(
 ) -> (Vec<TocItem>, Vec<PageEntry>) {
     // 1. Try EPUB 3 Navigation Document (nav.xhtml or properties="nav")
     for item in manifest.values() {
-        let is_nav = item.properties.as_deref().map(|p| p.contains("nav")).unwrap_or(false)
+        let is_nav = item
+            .properties
+            .as_deref()
+            .map(|p| p.contains("nav"))
+            .unwrap_or(false)
             || item.id == "nav"
             || item.href.ends_with("nav.xhtml");
         if is_nav && item.media_type.contains("xml") {
             let full_path = resolve_zip_path(opf_dir, &item.href);
             if let Ok(mut entry) = archive.by_name(&full_path) {
                 let mut s = String::new();
-                if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
+                if (&mut entry)
+                    .take(MAX_METADATA_BYTES)
+                    .read_to_string(&mut s)
+                    .is_ok()
+                {
                     let (toc, page_list) = parse_nav_xhtml(&s, href_to_section);
                     if !toc.is_empty() {
                         return (toc, page_list);
@@ -48,7 +56,11 @@ pub fn extract_navigation<R: Read + std::io::Seek>(
             let full_path = resolve_zip_path(opf_dir, &item.href);
             if let Ok(mut entry) = archive.by_name(&full_path) {
                 let mut s = String::new();
-                if (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut s).is_ok() {
+                if (&mut entry)
+                    .take(MAX_METADATA_BYTES)
+                    .read_to_string(&mut s)
+                    .is_ok()
+                {
                     let (toc, page_list) = parse_ncx(&s, href_to_section);
                     if !toc.is_empty() {
                         return (toc, page_list);

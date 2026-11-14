@@ -4,14 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::KindleStudio;
+use crate::state::{
+    BatchProgressState, ConversionTask, DeviceStatus, EpubSortField, LocalEpubStatus,
+    SortDirection, TaskStatus, convert_epub_file, delete_device_file, detect_kindle_device,
+    eject_kindle_device, load_device_files, scan_local_epub_directory,
+};
 use gpui::*;
 use kfx_converter::KindleBookFile;
-use crate::state::{
-    convert_epub_file, delete_device_file, detect_kindle_device, eject_kindle_device,
-    load_device_files, scan_local_epub_directory, BatchProgressState, ConversionTask,
-    DeviceStatus, EpubSortField, LocalEpubStatus, SortDirection, TaskStatus,
-};
-use super::KindleStudio;
 
 impl KindleStudio {
     pub fn refresh_device(&mut self, cx: &mut Context<Self>) {
@@ -30,10 +30,15 @@ impl KindleStudio {
                 let mut f_list = files;
                 for file in &mut f_list {
                     if file.author == "Unknown" {
-                        let file_stem = file.full_path.file_stem().unwrap_or_default().to_string_lossy();
+                        let file_stem = file
+                            .full_path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy();
                         if let Some(item) = this.folder_state.items.iter().find(|i| {
-                            i.path.file_stem().map(|s| s.to_string_lossy()) == Some(file_stem.clone())
-                            || i.title.eq_ignore_ascii_case(&file.title)
+                            i.path.file_stem().map(|s| s.to_string_lossy())
+                                == Some(file_stem.clone())
+                                || i.title.eq_ignore_ascii_case(&file.title)
                         }) {
                             file.title = item.title.clone();
                             file.author = item.author.clone();
@@ -83,8 +88,16 @@ impl KindleStudio {
         if let Some(pos) = self.files.iter().position(|f| f.name == file_name) {
             let file = self.files[pos].clone();
             let file_name_owned = file_name.to_string();
-            let Some(allowed_root) = self.device.path.clone().or_else(|| self.device.root_path.clone()) else {
-                self.status_message = Some(("Cannot delete file: Kindle storage root is not available.".into(), true));
+            let Some(allowed_root) = self
+                .device
+                .path
+                .clone()
+                .or_else(|| self.device.root_path.clone())
+            else {
+                self.status_message = Some((
+                    "Cannot delete file: Kindle storage root is not available.".into(),
+                    true,
+                ));
                 cx.notify();
                 return;
             };
@@ -104,10 +117,15 @@ impl KindleStudio {
                 this.update(cx, |this, cx| {
                     match del_res {
                         Ok(_) => {
-                            if let Some(idx) = this.files.iter().position(|f| f.name == file_name_owned) {
+                            if let Some(idx) =
+                                this.files.iter().position(|f| f.name == file_name_owned)
+                            {
                                 this.files.remove(idx);
                             }
-                            this.status_message = Some((format!("'{}' book and cache deleted.", file_name_owned), false));
+                            this.status_message = Some((
+                                format!("'{}' book and cache deleted.", file_name_owned),
+                                false,
+                            ));
                             this.device = new_device;
                         }
                         Err(err) => {
@@ -137,9 +155,11 @@ impl KindleStudio {
                 this.update(cx, |this, cx| {
                     this.folder_state.current_folder = Some(folder);
                     this.rescan_folder(cx);
-                }).ok();
+                })
+                .ok();
             }
-        }).detach();
+        })
+        .detach();
     }
 
     pub fn rescan_folder(&mut self, cx: &mut Context<Self>) {
@@ -154,16 +174,19 @@ impl KindleStudio {
         let device = self.device.clone();
 
         cx.spawn(async move |this, cx| {
-            let items = cx.background_executor().spawn(async move {
-                scan_local_epub_directory(&folder, recursive, &device)
-            }).await;
+            let items = cx
+                .background_executor()
+                .spawn(async move { scan_local_epub_directory(&folder, recursive, &device) })
+                .await;
 
             this.update(cx, |this, cx| {
                 this.folder_state.items = items;
                 this.folder_state.is_scanning = false;
                 cx.notify();
-            }).ok();
-        }).detach();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn toggle_select_all(&mut self, select: bool, cx: &mut Context<Self>) {
@@ -205,7 +228,9 @@ impl KindleStudio {
     }
 
     pub fn convert_selected_epubs(&mut self, sync_to_kindle: bool, cx: &mut Context<Self>) {
-        let selected_paths: Vec<PathBuf> = self.folder_state.items
+        let selected_paths: Vec<PathBuf> = self
+            .folder_state
+            .items
             .iter()
             .filter(|i| i.is_selected)
             .map(|i| i.path.clone())
@@ -218,7 +243,13 @@ impl KindleStudio {
         }
 
         let count = selected_paths.len();
-        self.status_message = Some((format!("Starting bounded conversion of {} books (2 concurrent workers)...", count), false));
+        self.status_message = Some((
+            format!(
+                "Starting bounded conversion of {} books (2 concurrent workers)...",
+                count
+            ),
+            false,
+        ));
 
         if sync_to_kindle {
             self.settings.auto_deploy = true;
@@ -233,7 +264,11 @@ impl KindleStudio {
             failed_tasks: 0,
             active_tasks: 0,
             current_filename: String::new(),
-            current_stage: if sync_to_kindle { "Preparing transfer...".into() } else { "Preparing conversion...".into() },
+            current_stage: if sync_to_kindle {
+                "Preparing transfer...".into()
+            } else {
+                "Preparing conversion...".into()
+            },
             is_sync: sync_to_kindle,
             is_cancelled: false,
         });
@@ -246,7 +281,11 @@ impl KindleStudio {
 
         let mut queued_tasks = VecDeque::new();
         for path in &selected_paths {
-            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let file_size_str = match std::fs::metadata(path) {
                 Ok(meta) => {
                     let bytes = meta.len();
@@ -260,15 +299,18 @@ impl KindleStudio {
             };
             let task_id = (self.tasks.len() as u64) + (queued_tasks.len() as u64) + 1;
             queued_tasks.push_back((task_id, path.clone()));
-            self.tasks.insert(0, ConversionTask {
-                id: task_id,
-                filename,
-                file_size_str,
-                status: TaskStatus::Queued,
-                progress: 0.0,
-                word_wise: self.settings.word_wise,
-                xray: false,
-            });
+            self.tasks.insert(
+                0,
+                ConversionTask {
+                    id: task_id,
+                    filename,
+                    file_size_str,
+                    status: TaskStatus::Queued,
+                    progress: 0.0,
+                    word_wise: self.settings.word_wise,
+                    xray: false,
+                },
+            );
         }
         cx.notify();
 
@@ -303,7 +345,11 @@ impl KindleStudio {
                         break;
                     };
 
-                    let filename = path_buf.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let filename = path_buf
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
 
                     let _ = this.update(cx, |this, cx| {
                         if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
@@ -313,11 +359,24 @@ impl KindleStudio {
                         if let Some(ref mut bp) = this.folder_state.batch_progress {
                             bp.active_tasks += 1;
                             bp.current_filename = filename.clone();
-                            bp.current_stage = if s_clone.auto_deploy { "Packaging & Transferring...".into() } else { "Packaging KFX...".into() };
+                            bp.current_stage = if s_clone.auto_deploy {
+                                "Packaging & Transferring...".into()
+                            } else {
+                                "Packaging KFX...".into()
+                            };
                         }
-                        if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == path_buf) {
+                        if let Some(item) = this
+                            .folder_state
+                            .items
+                            .iter_mut()
+                            .find(|i| i.path == path_buf)
+                        {
                             item.status = LocalEpubStatus::Processing {
-                                stage: if s_clone.auto_deploy { "Packaging & Sync".into() } else { "Packaging KFX".into() },
+                                stage: if s_clone.auto_deploy {
+                                    "Packaging & Sync".into()
+                                } else {
+                                    "Packaging KFX".into()
+                                },
                                 progress: 30,
                             };
                         }
@@ -327,9 +386,12 @@ impl KindleStudio {
                     let target_path = path_buf.clone();
                     let s = s_clone.clone();
                     let d = d_clone.clone();
-                    let res = cx.background_executor().spawn(async move {
-                        convert_epub_file(&target_path, &s, &d, None::<fn(f32, &str)>)
-                    }).await;
+                    let res = cx
+                        .background_executor()
+                        .spawn(async move {
+                            convert_epub_file(&target_path, &s, &d, None::<fn(f32, &str)>)
+                        })
+                        .await;
 
                     let cancel_check = cancel.clone();
                     let _ = this.update(cx, |this, cx| {
@@ -340,7 +402,12 @@ impl KindleStudio {
                             if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
                                 t.status = TaskStatus::Failed("Batch conversion cancelled".into());
                             }
-                            if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == path_buf) {
+                            if let Some(item) = this
+                                .folder_state
+                                .items
+                                .iter_mut()
+                                .find(|i| i.path == path_buf)
+                            {
                                 item.status = LocalEpubStatus::Unconverted;
                             }
                             cx.notify();
@@ -368,15 +435,33 @@ impl KindleStudio {
                                 }
                             }
                         }
-                        if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == path_buf) {
+                        if let Some(item) = this
+                            .folder_state
+                            .items
+                            .iter_mut()
+                            .find(|i| i.path == path_buf)
+                        {
                             match &res {
                                 Ok(r) => {
                                     if r.synced_to_device {
                                         item.status = LocalEpubStatus::OnDevice;
-                                        let kfx_name = r.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                        let kfx_name = r
+                                            .output_path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string();
                                         if !this.files.iter().any(|f| f.name == kfx_name) {
-                                            let dev_path = this.device.path.as_ref().map(|p| p.join(&kfx_name)).unwrap_or_else(|| r.output_path.clone());
-                                            let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                                            let dev_path = this
+                                                .device
+                                                .path
+                                                .as_ref()
+                                                .map(|p| p.join(&kfx_name))
+                                                .unwrap_or_else(|| r.output_path.clone());
+                                            let now_ts = SystemTime::now()
+                                                .duration_since(UNIX_EPOCH)
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or(0);
                                             this.files.push(KindleBookFile {
                                                 name: kfx_name,
                                                 title: item.title.clone(),
@@ -403,16 +488,26 @@ impl KindleStudio {
                         cx.notify();
                     });
                 }
-            }).detach();
+            })
+            .detach();
         }
 
         cx.notify();
     }
 
-    pub fn convert_single_epub(&mut self, path: PathBuf, sync_to_kindle: bool, cx: &mut Context<Self>) {
+    pub fn convert_single_epub(
+        &mut self,
+        path: PathBuf,
+        sync_to_kindle: bool,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(item) = self.folder_state.items.iter_mut().find(|i| i.path == path) {
             item.status = LocalEpubStatus::Processing {
-                stage: if sync_to_kindle { "Packaging & Sync".into() } else { "Packaging KFX".into() },
+                stage: if sync_to_kindle {
+                    "Packaging & Sync".into()
+                } else {
+                    "Packaging KFX".into()
+                },
                 progress: 30,
             };
         }
@@ -452,7 +547,11 @@ impl KindleStudio {
     }
 
     pub fn process_epub_file(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let file_size_str = match std::fs::metadata(path) {
             Ok(meta) => {
                 let bytes = meta.len();
@@ -466,15 +565,18 @@ impl KindleStudio {
         };
 
         let task_id = (self.tasks.len() as u64) + 1;
-        self.tasks.insert(0, ConversionTask {
-            id: task_id,
-            filename: filename.clone(),
-            file_size_str,
-            status: TaskStatus::Converting,
-            progress: 0.5,
-            word_wise: self.settings.word_wise,
-            xray: false,
-        });
+        self.tasks.insert(
+            0,
+            ConversionTask {
+                id: task_id,
+                filename: filename.clone(),
+                file_size_str,
+                status: TaskStatus::Converting,
+                progress: 0.5,
+                word_wise: self.settings.word_wise,
+                xray: false,
+            },
+        );
         cx.notify();
 
         self.device = detect_kindle_device();
@@ -503,15 +605,33 @@ impl KindleStudio {
                                 t.status = TaskStatus::ConvertedLocalOnly;
                             }
                             if res.synced_to_device {
-                                let kfx_name = res.output_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                let kfx_name = res
+                                    .output_path
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
                                 if !this.files.iter().any(|f| f.name == kfx_name) {
-                                    let dev_path = this.device.path.as_ref().map(|p| p.join(&kfx_name)).unwrap_or_else(|| res.output_path.clone());
-                                    let (item_title, item_author) = if let Some(item) = this.folder_state.items.iter().find(|i| i.path == target_path) {
+                                    let dev_path = this
+                                        .device
+                                        .path
+                                        .as_ref()
+                                        .map(|p| p.join(&kfx_name))
+                                        .unwrap_or_else(|| res.output_path.clone());
+                                    let (item_title, item_author) = if let Some(item) = this
+                                        .folder_state
+                                        .items
+                                        .iter()
+                                        .find(|i| i.path == target_path)
+                                    {
                                         (item.title.clone(), item.author.clone())
                                     } else {
                                         (kfx_name.clone(), "Unknown".into())
                                     };
-                                    let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                                    let now_ts = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0);
                                     this.files.push(KindleBookFile {
                                         name: kfx_name,
                                         title: item_title,
@@ -528,7 +648,12 @@ impl KindleStudio {
                                 }
                             }
 
-                            if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == target_path) {
+                            if let Some(item) = this
+                                .folder_state
+                                .items
+                                .iter_mut()
+                                .find(|i| i.path == target_path)
+                            {
                                 item.status = if res.synced_to_device {
                                     LocalEpubStatus::OnDevice
                                 } else {
@@ -539,18 +664,29 @@ impl KindleStudio {
                         }
                         Err(err) => {
                             t.status = TaskStatus::Failed(err.clone());
-                            if let Some(item) = this.folder_state.items.iter_mut().find(|i| i.path == target_path) {
+                            if let Some(item) = this
+                                .folder_state
+                                .items
+                                .iter_mut()
+                                .find(|i| i.path == target_path)
+                            {
                                 item.status = LocalEpubStatus::Error(err);
                             }
                         }
                     }
                 }
                 cx.notify();
-            }).ok();
-        }).detach();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    pub(super) fn handle_sort_column_click(&mut self, field: EpubSortField, cx: &mut Context<Self>) {
+    pub(super) fn handle_sort_column_click(
+        &mut self,
+        field: EpubSortField,
+        cx: &mut Context<Self>,
+    ) {
         if self.folder_state.sort_field == field {
             self.folder_state.sort_direction = self.folder_state.sort_direction.toggle();
         } else {
@@ -563,7 +699,11 @@ impl KindleStudio {
         cx.notify();
     }
 
-    pub(super) fn handle_explorer_sort_column_click(&mut self, field: EpubSortField, cx: &mut Context<Self>) {
+    pub(super) fn handle_explorer_sort_column_click(
+        &mut self,
+        field: EpubSortField,
+        cx: &mut Context<Self>,
+    ) {
         if self.explorer_sort_field == field {
             self.explorer_sort_direction = self.explorer_sort_direction.toggle();
         } else {

@@ -1,9 +1,9 @@
 //! Navigation container ($391) and book navigation ($389) entity generation for KFX.
 
+use super::{KfxPackager, SINGLETON_ID, SectionPackData, symbols::LocalSymbols};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
 use crate::symbols::symbol_id;
-use super::{symbols::LocalSymbols, KfxPackager, SectionPackData, SINGLETON_ID};
 
 impl<'a> KfxPackager<'a> {
     pub(crate) fn build_navigation(
@@ -54,19 +54,26 @@ impl<'a> KfxPackager<'a> {
                     .or_else(|| section_data.first());
 
                 let target_pos = if let Some(sec) = target_sec {
-                    sec.block_info.first().map(|&(eid, _)| eid).unwrap_or(sec.sec_eid)
+                    sec.block_info
+                        .first()
+                        .map(|&(eid, _)| eid)
+                        .unwrap_or(sec.sec_eid)
                 } else {
                     200
                 };
 
                 let entry_val = IonValue::Struct(vec![
-                    (sym_representation, IonValue::Struct(vec![
-                        (sym_label, IonValue::String(item.title.clone())),
-                    ])),
-                    (sym_target_position, IonValue::Struct(vec![
-                        (sym_id, IonValue::Int(target_pos as i64)),
-                        (sym_offset, IonValue::Int(0)),
-                    ])),
+                    (
+                        sym_representation,
+                        IonValue::Struct(vec![(sym_label, IonValue::String(item.title.clone()))]),
+                    ),
+                    (
+                        sym_target_position,
+                        IonValue::Struct(vec![
+                            (sym_id, IonValue::Int(target_pos as i64)),
+                            (sym_offset, IonValue::Int(0)),
+                        ]),
+                    ),
                 ]);
                 entries.push(entry_val);
             }
@@ -147,19 +154,29 @@ impl<'a> KfxPackager<'a> {
                     .or_else(|| section_data.first());
 
                 let target_pos = if let Some(sec) = target_sec {
-                    sec.block_info.first().map(|&(eid, _)| eid).unwrap_or(sec.sec_eid)
+                    sec.block_info
+                        .first()
+                        .map(|&(eid, _)| eid)
+                        .unwrap_or(sec.sec_eid)
                 } else {
                     200
                 };
 
                 let entry_val = IonValue::Struct(vec![
-                    (sym_representation, IonValue::Struct(vec![
-                        (sym_label, IonValue::String(page.page_number.clone())),
-                    ])),
-                    (sym_target_position, IonValue::Struct(vec![
-                        (sym_id, IonValue::Int(target_pos as i64)),
-                        (sym_offset, IonValue::Int(0)),
-                    ])),
+                    (
+                        sym_representation,
+                        IonValue::Struct(vec![(
+                            sym_label,
+                            IonValue::String(page.page_number.clone()),
+                        )]),
+                    ),
+                    (
+                        sym_target_position,
+                        IonValue::Struct(vec![
+                            (sym_id, IonValue::Int(target_pos as i64)),
+                            (sym_offset, IonValue::Int(0)),
+                        ]),
+                    ),
                 ]);
                 page_entries.push(entry_val);
             }

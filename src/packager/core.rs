@@ -3,10 +3,10 @@
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use crate::container::{KfxContainer, KfxEntity};
-use crate::ir::{BookIR, Section};
 use super::error::PackagerError;
 use super::symbols::*;
+use crate::container::{KfxContainer, KfxEntity};
+use crate::ir::{BookIR, Section};
 
 /// Packages a `BookIR` into an Amazon KFX container.
 pub struct KfxPackager<'a> {
@@ -48,12 +48,15 @@ impl<'a> KfxPackager<'a> {
 
         // Ensure dedicated cover section at index 0 without cloning heavy resource maps
         if let Some(cover_res_id) = book.resolve_cover_resource_id() {
-            let first_is_cover = sections.first().map(|s| {
-                s.blocks.iter().any(|b| match b {
-                    crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
-                    _ => false,
+            let first_is_cover = sections
+                .first()
+                .map(|s| {
+                    s.blocks.iter().any(|b| match b {
+                        crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                        _ => false,
+                    })
                 })
-            }).unwrap_or(false);
+                .unwrap_or(false);
 
             if !first_is_cover {
                 let cover_section = Section {
@@ -169,7 +172,8 @@ impl<'a> KfxPackager<'a> {
         let format_caps_data = self.build_format_capabilities();
 
         // 9. Pre-flight reference validation to ensure 100% referential integrity
-        let validator = crate::validator::KfxPreflightValidator::new(&self.entities, Some(&symbols));
+        let validator =
+            crate::validator::KfxPreflightValidator::new(&self.entities, Some(&symbols));
         validator.validate()?;
 
         // Sort entities by Yellowjacket preferred fragment type order, then by entity_id

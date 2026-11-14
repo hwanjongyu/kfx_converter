@@ -60,14 +60,25 @@ impl SdrDeployer {
                     let lower = clean.to_ascii_lowercase();
                     let parts: Vec<&str> = clean.split(['-', '_']).collect();
                     let bcp47 = if parts.len() == 2 {
-                        format!("{}-{}", parts[0].to_ascii_lowercase(), parts[1].to_ascii_uppercase())
+                        format!(
+                            "{}-{}",
+                            parts[0].to_ascii_lowercase(),
+                            parts[1].to_ascii_uppercase()
+                        )
                     } else {
                         clean.to_string()
                     };
                     let primary_upper = parts[0].to_ascii_uppercase();
                     let primary_lower = parts[0].to_ascii_lowercase();
 
-                    for tag in [clean.to_string(), upper, lower, bcp47, primary_upper, primary_lower] {
+                    for tag in [
+                        clean.to_string(),
+                        upper,
+                        lower,
+                        bcp47,
+                        primary_upper,
+                        primary_lower,
+                    ] {
                         if !lang_tags.contains(&tag) {
                             lang_tags.push(tag);
                         }
@@ -159,18 +170,58 @@ mod tests {
         .unwrap();
 
         // 1. Verify primary, EN-CA, and alias .kll files
-        assert!(sdr_path.join(format!("LanguageLayer.en.{}.kll", asin)).is_file());
-        assert!(sdr_path.join(format!("LanguageLayer.EN-CA.{}.kll", asin)).is_file());
-        assert!(sdr_path.join(format!("LanguageLayer.EN-CA.B{}.kll", &asin[..9])).is_file());
-        assert!(sdr_path.join(format!("LanguageLayer.en.B{}.kll", &asin[..9])).is_file());
-        assert!(sdr_path.join(format!("LanguageLayer.en.{}.kll", content_id)).is_file());
-        assert!(sdr_path.join(format!("LanguageLayer.EN-CA.{}.kll", content_id)).is_file());
+        assert!(
+            sdr_path
+                .join(format!("LanguageLayer.en.{}.kll", asin))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("LanguageLayer.EN-CA.{}.kll", asin))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("LanguageLayer.EN-CA.B{}.kll", &asin[..9]))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("LanguageLayer.en.B{}.kll", &asin[..9]))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("LanguageLayer.en.{}.kll", content_id))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("LanguageLayer.EN-CA.{}.kll", content_id))
+                .is_file()
+        );
 
         // 2. Verify cover.jpg and thumbnails
         assert!(sdr_path.join("cover.jpg").is_file());
-        assert!(sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", asin)).is_file());
-        assert!(sdr_path.join(format!("thumbnail_{}_PDOC_portrait.jpg", asin)).is_file());
-        assert!(sdr_path.join(format!("thumbnail_{}_portrait.jpg", asin)).is_file());
-        assert!(sdr_path.join(format!("thumbnail_{}_EBOK_portrait.jpg", content_id)).is_file());
+        assert!(
+            sdr_path
+                .join(format!("thumbnail_{}_EBOK_portrait.jpg", asin))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("thumbnail_{}_PDOC_portrait.jpg", asin))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("thumbnail_{}_portrait.jpg", asin))
+                .is_file()
+        );
+        assert!(
+            sdr_path
+                .join(format!("thumbnail_{}_EBOK_portrait.jpg", content_id))
+                .is_file()
+        );
     }
 }

@@ -3,10 +3,10 @@
 //! Handles hardware USB sysfs probing, MTP/UMS mount detection, model resolution,
 //! storage capacity queries, and safe device unmounting (`libc::syncfs`, `gio`, `udisksctl`).
 
+use super::DEVICE_SYNC_LOCK;
+use super::types::{KindleDeviceInfo, SyncError, UnmountedKindleUsb};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use super::types::{KindleDeviceInfo, SyncError, UnmountedKindleUsb};
-use super::DEVICE_SYNC_LOCK;
 
 /// Queries filesystem storage statistics (used_gb, total_gb).
 #[cfg(unix)]
@@ -17,7 +17,11 @@ pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
     let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
-        let block_size = if stat.f_frsize > 0 { stat.f_frsize } else { stat.f_bsize } as u64;
+        let block_size = if stat.f_frsize > 0 {
+            stat.f_frsize
+        } else {
+            stat.f_bsize
+        } as u64;
         let total_bytes = stat.f_blocks as u64 * block_size;
         let free_bytes = stat.f_bavail as u64 * block_size;
         let used_bytes = total_bytes.saturating_sub(free_bytes);
@@ -129,7 +133,9 @@ pub fn resolve_model_name(root: &Path, hint: &str) -> String {
             if content.contains("G0028") {
                 return "Kindle Colorsoft".to_string();
             }
-            let oasis_prefixes = ["G0B0", "G000P8", "G000SA", "G000WL", "G000WM", "G000WN", "G0011L"];
+            let oasis_prefixes = [
+                "G0B0", "G000P8", "G000SA", "G000WL", "G000WM", "G000WN", "G0011L",
+            ];
             if oasis_prefixes.iter().any(|&p| content.contains(p)) {
                 return "Kindle Oasis".to_string();
             }
@@ -138,9 +144,8 @@ pub fn resolve_model_name(root: &Path, hint: &str) -> String {
                 return "Kindle Voyage".to_string();
             }
             let pw_prefixes = [
-                "B012", "B024", "9024", "B0D4", "90D4", "B05A", "G090G1", "G090KB",
-                "G090LK", "B017", "B060", "B061", "B062", "G000PP", "G000T6", "G000T1",
-                "G001LG", "G001PX",
+                "B012", "B024", "9024", "B0D4", "90D4", "B05A", "G090G1", "G090KB", "G090LK",
+                "B017", "B060", "B061", "B062", "G000PP", "G000T6", "G000T1", "G001LG", "G001PX",
             ];
             if pw_prefixes.iter().any(|&p| content.contains(p)) {
                 return "Kindle Paperwhite".to_string();
@@ -213,13 +218,23 @@ pub fn probe_unmounted_usb_kindle_in(usb_dir: &Path) -> Option<UnmountedKindleUs
 /// Detects connected Kindle root directory and metadata (GVFS MTP or USB UMS mount).
 pub fn detect_device_info() -> Option<KindleDeviceInfo> {
     // 0. Explicit environment variable overrides for headless servers / CI / Docker
-    if let Ok(custom_root) = std::env::var("KINDLE_ROOT").or_else(|_| std::env::var("KINDLE_MOUNT_PATH")) {
+    if let Ok(custom_root) =
+        std::env::var("KINDLE_ROOT").or_else(|_| std::env::var("KINDLE_MOUNT_PATH"))
+    {
         let root = PathBuf::from(custom_root);
         if root.is_dir() {
             let internal = root.join("Internal Storage");
-            let active_root = if internal.is_dir() { internal } else { root.clone() };
+            let active_root = if internal.is_dir() {
+                internal
+            } else {
+                root.clone()
+            };
             let doc_path = active_root.join("documents");
-            let final_docs = if doc_path.is_dir() { doc_path } else { active_root.clone() };
+            let final_docs = if doc_path.is_dir() {
+                doc_path
+            } else {
+                active_root.clone()
+            };
             let model = resolve_model_name(&active_root, &active_root.to_string_lossy());
             let (used_gb, total_gb) = get_storage_stats(&active_root).unwrap_or((12.4, 27.2));
             return Some(KindleDeviceInfo {
@@ -238,25 +253,30 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
         let uid = unsafe { libc::getuid() };
         let gvfs_dir = PathBuf::from(format!("/run/user/{}/gvfs", uid));
         if gvfs_dir.is_dir()
-            && let Ok(entries) = std::fs::read_dir(&gvfs_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if is_kindle_name(&name) {
-                        let internal = entry.path().join("Internal Storage");
-                        let root = if internal.is_dir() { internal } else { entry.path() };
-                        let doc_path = root.join("documents");
-                        let model = resolve_model_name(&root, &name);
-                        let (used_gb, total_gb) = get_storage_stats(&root).unwrap_or((12.4, 27.2));
-                        return Some(KindleDeviceInfo {
-                            root,
-                            documents_dir: doc_path,
-                            model_name: model,
-                            used_gb,
-                            total_gb,
-                        });
-                    }
+            && let Ok(entries) = std::fs::read_dir(&gvfs_dir)
+        {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if is_kindle_name(&name) {
+                    let internal = entry.path().join("Internal Storage");
+                    let root = if internal.is_dir() {
+                        internal
+                    } else {
+                        entry.path()
+                    };
+                    let doc_path = root.join("documents");
+                    let model = resolve_model_name(&root, &name);
+                    let (used_gb, total_gb) = get_storage_stats(&root).unwrap_or((12.4, 27.2));
+                    return Some(KindleDeviceInfo {
+                        root,
+                        documents_dir: doc_path,
+                        model_name: model,
+                        used_gb,
+                        total_gb,
+                    });
                 }
             }
+        }
     }
 
     // 2. Check UMS mount points across Linux, macOS, and Windows
@@ -295,7 +315,10 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
     #[cfg(target_os = "linux")]
     {
         if let Ok(username) = std::env::var("USER") {
-            for base in [format!("/run/media/{}", username), format!("/media/{}", username)] {
+            for base in [
+                format!("/run/media/{}", username),
+                format!("/media/{}", username),
+            ] {
                 if let Ok(entries) = std::fs::read_dir(&base) {
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
@@ -354,7 +377,7 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
                     // Media ejected or dummy unmounted mountpoint
                     continue;
                 }
-                
+
                 let cand_str = cand.to_string_lossy();
                 let model_name = resolve_model_name(&cand, &cand_str);
 
@@ -416,35 +439,47 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
             } else {
                 &root_str
             };
-            let status = Command::new("gio").args(["mount", "-u", mtp_mount]).status();
-            if let Ok(s) = status && !s.success() {
+            let status = Command::new("gio")
+                .args(["mount", "-u", mtp_mount])
+                .status();
+            if let Ok(s) = status
+                && !s.success()
+            {
                 return Err(SyncError::GioFailed(format!(
                     "Failed to unmount MTP Kindle device at {:?} (exit code {:?})",
-                    mtp_mount, s.code()
+                    mtp_mount,
+                    s.code()
                 )));
             }
         } else {
             let status = Command::new("gio").args(["mount", "-u"]).arg(root).status();
             if status.is_err() || !status.unwrap().success() {
-                let block_dev = std::fs::read_to_string("/proc/mounts").ok().and_then(|mounts| {
-                    for line in mounts.lines() {
-                        let mut parts = line.split_whitespace();
-                        if let (Some(dev), Some(mount)) = (parts.next(), parts.next())
-                            && mount == root.to_str().unwrap_or_default()
-                        {
-                            return Some(dev.to_string());
+                let block_dev = std::fs::read_to_string("/proc/mounts")
+                    .ok()
+                    .and_then(|mounts| {
+                        for line in mounts.lines() {
+                            let mut parts = line.split_whitespace();
+                            if let (Some(dev), Some(mount)) = (parts.next(), parts.next())
+                                && mount == root.to_str().unwrap_or_default()
+                            {
+                                return Some(dev.to_string());
+                            }
                         }
-                    }
-                    None
-                });
+                        None
+                    });
                 if let Some(dev) = block_dev {
-                    let udisks_status = Command::new("udisksctl").args(["unmount", "-b", &dev]).status();
+                    let udisks_status = Command::new("udisksctl")
+                        .args(["unmount", "-b", &dev])
+                        .status();
                     if udisks_status.is_err() || !udisks_status.unwrap().success() {
                         let umount_status = Command::new("umount").arg(root).status();
-                        if let Ok(s) = umount_status && !s.success() {
+                        if let Ok(s) = umount_status
+                            && !s.success()
+                        {
                             return Err(SyncError::GioFailed(format!(
                                 "Failed to cleanly unmount Kindle device at {:?} (device may be busy, exit code {:?})",
-                                root, s.code()
+                                root,
+                                s.code()
                             )));
                         }
                     }
@@ -454,7 +489,10 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("diskutil").args(["unmount"]).arg(root).status();
+        let _ = Command::new("diskutil")
+            .args(["unmount"])
+            .arg(root)
+            .status();
     }
 
     Ok(())
@@ -509,16 +547,46 @@ mod tests {
         let root = temp.path();
 
         // 1. Hint-based model resolution across all Kindle hardware variants
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle Scribe"), "Kindle Scribe");
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle Paperwhite"), "Kindle Paperwhite");
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle Oasis"), "Kindle Oasis");
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle Voyage"), "Kindle Voyage");
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle Colorsoft"), "Kindle Colorsoft");
-        assert_eq!(KindleSync::resolve_model_name(root, "/media/drew/Kindle Basic"), "Kindle Basic");
-        assert_eq!(KindleSync::resolve_model_name(root, "mtp:host=Kindle_Touch_1234"), "Kindle Touch");
-        assert_eq!(KindleSync::resolve_model_name(root, "Kindle Keyboard"), "Kindle Keyboard");
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle DX"), "Kindle DX");
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle"), "Kindle");
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle Scribe"),
+            "Kindle Scribe"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle Paperwhite"),
+            "Kindle Paperwhite"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle Oasis"),
+            "Kindle Oasis"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle Voyage"),
+            "Kindle Voyage"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle Colorsoft"),
+            "Kindle Colorsoft"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/media/drew/Kindle Basic"),
+            "Kindle Basic"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "mtp:host=Kindle_Touch_1234"),
+            "Kindle Touch"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "Kindle Keyboard"),
+            "Kindle Keyboard"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle DX"),
+            "Kindle DX"
+        );
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle"),
+            "Kindle"
+        );
 
         // 2. File-based resolution via system/version.txt
         let sys_dir = root.join("system");
@@ -526,17 +594,29 @@ mod tests {
         let ver_file = sys_dir.join("version.txt");
 
         std::fs::write(&ver_file, b"Kindle Oasis 5.16.2.1.1").unwrap();
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle"), "Kindle Oasis");
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle"),
+            "Kindle Oasis"
+        );
 
         std::fs::write(&ver_file, b"Kindle Colorsoft 5.17.0").unwrap();
-        assert_eq!(KindleSync::resolve_model_name(root, "/Volumes/Kindle"), "Kindle Colorsoft");
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/Volumes/Kindle"),
+            "Kindle Colorsoft"
+        );
 
         // Serial number prefix based detection in system files (e.g. G092 -> Scribe, B013 -> Voyage)
         std::fs::write(&ver_file, b"Device Serial: G092240123456789").unwrap();
-        assert_eq!(KindleSync::resolve_model_name(root, "/media/drew/Drive"), "Kindle Scribe");
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/media/drew/Drive"),
+            "Kindle Scribe"
+        );
 
         std::fs::write(&ver_file, b"Device Serial: B0131234567890AB").unwrap();
-        assert_eq!(KindleSync::resolve_model_name(root, "/media/drew/Drive"), "Kindle Voyage");
+        assert_eq!(
+            KindleSync::resolve_model_name(root, "/media/drew/Drive"),
+            "Kindle Voyage"
+        );
     }
 
     #[test]

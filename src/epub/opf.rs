@@ -1,8 +1,8 @@
 //! OPF package document parsing, metadata extraction, manifest items, and spine reading order.
 
-use std::collections::HashMap;
-use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event;
+use std::collections::HashMap;
 
 use crate::epub::EpubError;
 use crate::ir::BookMetadata;
@@ -78,9 +78,11 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
 
                     if !id.is_empty() && !href.is_empty() {
                         if let Some(ref props) = properties
-                            && props.contains("cover-image") && metadata.cover_image_id.is_none() {
-                                metadata.cover_image_id = Some(id.clone());
-                            }
+                            && props.contains("cover-image")
+                            && metadata.cover_image_id.is_none()
+                        {
+                            metadata.cover_image_id = Some(id.clone());
+                        }
                         manifest.insert(
                             id.clone(),
                             ManifestItem {

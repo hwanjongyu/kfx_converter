@@ -1,8 +1,8 @@
 //! EPUB zip archive handling, path traversal protection, and decompression bomb defenses.
 
-use std::io::Read;
-use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event;
+use std::io::Read;
 use zip::ZipArchive;
 
 use crate::epub::EpubError;
@@ -70,7 +70,9 @@ pub fn find_opf_path<R: Read + std::io::Seek>(
         .map_err(|_| EpubError::Invalid("META-INF/container.xml not found".to_string()))?;
 
     let mut content = String::new();
-    (&mut entry).take(MAX_METADATA_BYTES).read_to_string(&mut content)?;
+    (&mut entry)
+        .take(MAX_METADATA_BYTES)
+        .read_to_string(&mut content)?;
 
     let mut xml_reader = XmlReader::from_str(&content);
     let mut buf = Vec::new();
@@ -95,5 +97,7 @@ pub fn find_opf_path<R: Read + std::io::Seek>(
         buf.clear();
     }
 
-    Err(EpubError::Invalid("No rootfile element found in container.xml".to_string()))
+    Err(EpubError::Invalid(
+        "No rootfile element found in container.xml".to_string(),
+    ))
 }

@@ -9,7 +9,13 @@ pub fn sanitize_filename(name: &str) -> String {
     let forbidden = ['\\', '/', ':', '*', '?', '"', '<', '>', '|', '\0'];
     let mut clean: String = name
         .chars()
-        .map(|c| if forbidden.contains(&c) || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if forbidden.contains(&c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
 
     // Disallow relative directory traversal sequences
@@ -26,9 +32,8 @@ pub fn sanitize_filename(name: &str) -> String {
     let uppercase = clean.to_ascii_uppercase();
     let base_name = uppercase.split('.').next().unwrap_or("");
     let dos_devices = [
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if dos_devices.contains(&base_name) {
         clean = format!("{}_book", clean);
@@ -63,7 +68,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename_basic() {
-        assert_eq!(KindleSync::sanitize_filename("Simple Title"), "Simple Title");
+        assert_eq!(
+            KindleSync::sanitize_filename("Simple Title"),
+            "Simple Title"
+        );
         assert_eq!(
             KindleSync::sanitize_filename("What If?: Serious Scientific Answers"),
             "What If__ Serious Scientific Answers"
@@ -73,7 +81,10 @@ mod tests {
             "____etc_passwd"
         );
         assert_eq!(KindleSync::sanitize_filename("   "), "book");
-        assert_eq!(KindleSync::sanitize_filename("Trailing Dots..."), "Trailing Dots");
+        assert_eq!(
+            KindleSync::sanitize_filename("Trailing Dots..."),
+            "Trailing Dots"
+        );
     }
 
     #[test]

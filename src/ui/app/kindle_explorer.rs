@@ -1,11 +1,15 @@
-use gpui::*;
-use crate::state::{case_insensitive_cmp, EpubSortField, KindleFile, SortDirection};
-use crate::theme::Theme;
 use super::KindleStudio;
+use crate::state::{EpubSortField, KindleFile, SortDirection, case_insensitive_cmp};
+use crate::theme::Theme;
+use gpui::*;
 
 impl KindleStudio {
     /// Renders the Connected Kindle Library Pane (Storage Meter, Format Filters, Book List, Delete).
-    pub(super) fn render_kindle_pane(&self, cx: &mut Context<Self>, _in_split: bool) -> impl IntoElement {
+    pub(super) fn render_kindle_pane(
+        &self,
+        cx: &mut Context<Self>,
+        _in_split: bool,
+    ) -> impl IntoElement {
         let is_offline = !self.device.connected;
         let active_filter = self.filter_format.as_deref().unwrap_or("ALL");
 
@@ -16,7 +20,8 @@ impl KindleStudio {
         let count_all = self.files.len();
 
         let search_lower = self.search_query.to_lowercase();
-        let mut filtered_indices: Vec<usize> = self.files
+        let mut filtered_indices: Vec<usize> = self
+            .files
             .iter()
             .enumerate()
             .filter(|(_, f)| {
@@ -391,7 +396,10 @@ impl KindleStudio {
     }
 
     /// Renders sortable column headers for the connected Kindle explorer table.
-    pub(super) fn render_kindle_table_column_headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_kindle_table_column_headers(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let sort_field = self.explorer_sort_field;
         let sort_dir = self.explorer_sort_direction;
 
@@ -408,60 +416,50 @@ impl KindleStudio {
             .text_xs()
             .font_weight(FontWeight::BOLD)
             // 1. Format Header
-            .child(
-                self.render_explorer_sort_column_cell(
-                    "Format",
-                    EpubSortField::Status,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(70.0)).flex_shrink_0(),
-                    cx,
-                )
-            )
+            .child(self.render_explorer_sort_column_cell(
+                "Format",
+                EpubSortField::Status,
+                sort_field,
+                sort_dir,
+                div().w(px(70.0)).flex_shrink_0(),
+                cx,
+            ))
             // 2. Title Header
-            .child(
-                self.render_explorer_sort_column_cell(
-                    "Title",
-                    EpubSortField::Title,
-                    sort_field,
-                    sort_dir,
-                    div().flex_1().min_w_0(),
-                    cx,
-                )
-            )
+            .child(self.render_explorer_sort_column_cell(
+                "Title",
+                EpubSortField::Title,
+                sort_field,
+                sort_dir,
+                div().flex_1().min_w_0(),
+                cx,
+            ))
             // 3. Author Header
-            .child(
-                self.render_explorer_sort_column_cell(
-                    "Author",
-                    EpubSortField::Author,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(130.0)).flex_shrink_0().min_w_0(),
-                    cx,
-                )
-            )
+            .child(self.render_explorer_sort_column_cell(
+                "Author",
+                EpubSortField::Author,
+                sort_field,
+                sort_dir,
+                div().w(px(130.0)).flex_shrink_0().min_w_0(),
+                cx,
+            ))
             // 4. Size Header
-            .child(
-                self.render_explorer_sort_column_cell(
-                    "Size",
-                    EpubSortField::FileSize,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(65.0)).flex_shrink_0(),
-                    cx,
-                )
-            )
+            .child(self.render_explorer_sort_column_cell(
+                "Size",
+                EpubSortField::FileSize,
+                sort_field,
+                sort_dir,
+                div().w(px(65.0)).flex_shrink_0(),
+                cx,
+            ))
             // 5. Date Header
-            .child(
-                self.render_explorer_sort_column_cell(
-                    "Date",
-                    EpubSortField::DateModified,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(75.0)).flex_shrink_0(),
-                    cx,
-                )
-            )
+            .child(self.render_explorer_sort_column_cell(
+                "Date",
+                EpubSortField::DateModified,
+                sort_field,
+                sort_dir,
+                div().w(px(75.0)).flex_shrink_0(),
+                cx,
+            ))
             // Action spacer
             .child(div().w(px(32.0)).flex_shrink_0())
             // Scrollbar spacer (14px)
@@ -592,20 +590,32 @@ impl KindleStudio {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(if is_confirming { Theme::accent_red() } else { Theme::bg_card_hover() })
+                                    .bg(if is_confirming {
+                                        Theme::accent_red()
+                                    } else {
+                                        Theme::bg_card_hover()
+                                    })
                                     .text_xs()
-                                    .text_color(if is_confirming { Theme::bg_root() } else { Theme::accent_red() })
+                                    .text_color(if is_confirming {
+                                        Theme::bg_root()
+                                    } else {
+                                        Theme::accent_red()
+                                    })
                                     .child(if is_confirming { "Confirm?" } else { "🗑" })
                                     .on_click(move |_ev, _window, cx| {
-                                        view_del.update(cx, |this, cx| {
-                                            if this.confirm_delete_file.as_deref() == Some(&f_del) {
-                                                this.confirm_delete_file = None;
-                                                this.delete_file(&f_del, cx);
-                                            } else {
-                                                this.confirm_delete_file = Some(f_del.clone());
-                                                cx.notify();
-                                            }
-                                        }).ok();
+                                        view_del
+                                            .update(cx, |this, cx| {
+                                                if this.confirm_delete_file.as_deref()
+                                                    == Some(&f_del)
+                                                {
+                                                    this.confirm_delete_file = None;
+                                                    this.delete_file(&f_del, cx);
+                                                } else {
+                                                    this.confirm_delete_file = Some(f_del.clone());
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
                                     }),
                             ),
                     ),

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "kfx-conv"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "kfx-studio"

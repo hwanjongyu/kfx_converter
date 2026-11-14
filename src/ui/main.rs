@@ -3,9 +3,9 @@
 
 use gpui::*;
 
-mod theme;
-mod state;
 mod app;
+mod state;
+mod theme;
 
 use app::KindleStudio;
 

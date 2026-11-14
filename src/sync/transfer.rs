@@ -3,13 +3,13 @@
 //! Handles safe transfer of KFX books, lockscreen cover thumbnails, and Word Wise sidecars
 //! over UMS and Linux GVFS MTP (`gio copy`), with atomic `.part` renames and streaming copy.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use super::DEVICE_SYNC_LOCK;
 use super::catalog::clean_stale_sdr_files;
 use super::sanitize::{sanitize_asin, sanitize_filename};
 use super::types::SyncError;
-use super::DEVICE_SYNC_LOCK;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 /// Synchronizes a converted KFX file, multi-identifier cover thumbnails, and optional sidecars to the Kindle.
 #[allow(clippy::too_many_arguments)]
@@ -48,11 +48,12 @@ pub fn sync_to_device(
         }
     }
     if let Ok(metadata) = docs_dir.metadata()
-        && metadata.permissions().readonly() {
-            return Err(SyncError::SecurityViolation(
+        && metadata.permissions().readonly()
+    {
+        return Err(SyncError::SecurityViolation(
                 "Kindle storage is mounted read-only (likely due to an unclean USB disconnect). Please reconnect the Kindle USB cable.".to_string(),
             ));
-        }
+    }
 
     let safe_title = kfx_source
         .file_stem()
@@ -172,7 +173,9 @@ pub fn sync_to_device(
         }
     }
     #[cfg(all(unix, not(target_os = "linux")))]
-    unsafe { libc::sync() };
+    unsafe {
+        libc::sync()
+    };
 
     // Final settle delay to ensure all FAT directory transactions are safely buffered
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -257,7 +260,9 @@ pub fn execute_gio_copy_with_timeout(
     loop {
         match child.try_wait()? {
             Some(status) => {
-                let err_msg = stderr_thread.and_then(|t| t.join().ok()).unwrap_or_default();
+                let err_msg = stderr_thread
+                    .and_then(|t| t.join().ok())
+                    .unwrap_or_default();
                 if status.success() {
                     return Ok(());
                 } else {
@@ -368,21 +373,34 @@ mod tests {
         assert!(asin_pdoc.is_file(), "ASIN PDOC thumbnail missing");
 
         // 2. Content-ID-keyed thumbnails (both EBOK and PDOC)
-        let cid_ebok = thumb_dir.join("thumbnail_ABCDEF1234567890ABCDEF1234567890_EBOK_portrait.jpg");
-        let cid_pdoc = thumb_dir.join("thumbnail_ABCDEF1234567890ABCDEF1234567890_PDOC_portrait.jpg");
+        let cid_ebok =
+            thumb_dir.join("thumbnail_ABCDEF1234567890ABCDEF1234567890_EBOK_portrait.jpg");
+        let cid_pdoc =
+            thumb_dir.join("thumbnail_ABCDEF1234567890ABCDEF1234567890_PDOC_portrait.jpg");
         assert!(cid_ebok.is_file(), "Content-ID EBOK thumbnail missing");
         assert!(cid_pdoc.is_file(), "Content-ID PDOC thumbnail missing");
 
         // 3. amazon-cover-bug backup directory
         let acb_dir = temp.path().join("amazon-cover-bug");
         assert!(acb_dir.is_dir(), "amazon-cover-bug directory missing");
-        assert!(acb_dir.join("thumbnail_B00TEST1234_PDOC_portrait.jpg").is_file());
+        assert!(
+            acb_dir
+                .join("thumbnail_B00TEST1234_PDOC_portrait.jpg")
+                .is_file()
+        );
 
         // 4. Companion .sdr directory covers
         let sdr_dir = docs.join("book.sdr");
         assert!(sdr_dir.is_dir(), ".sdr directory missing");
-        assert!(sdr_dir.join("cover.jpg").is_file(), "cover.jpg in .sdr missing");
-        assert!(sdr_dir.join("thumbnail_B00TEST1234_PDOC_portrait.jpg").is_file());
+        assert!(
+            sdr_dir.join("cover.jpg").is_file(),
+            "cover.jpg in .sdr missing"
+        );
+        assert!(
+            sdr_dir
+                .join("thumbnail_B00TEST1234_PDOC_portrait.jpg")
+                .is_file()
+        );
     }
 
     #[test]
@@ -420,7 +438,9 @@ mod tests {
 
         let status = child.wait().unwrap();
         assert!(!status.success());
-        let err_msg = stderr_thread.and_then(|t| t.join().ok()).unwrap_or_default();
+        let err_msg = stderr_thread
+            .and_then(|t| t.join().ok())
+            .unwrap_or_default();
         assert_eq!(err_msg.len(), 131072);
     }
 
@@ -439,7 +459,9 @@ mod tests {
         if let Ok(content) = std::fs::read_to_string(&source_path) {
             // Locate copy_file and write_bytes function bodies
             let copy_file_start = content.find("fn copy_file(").expect("fn copy_file found");
-            let copy_file_end = content[copy_file_start..].find("fn execute_gio_copy").expect("copy_file end found");
+            let copy_file_end = content[copy_file_start..]
+                .find("fn execute_gio_copy")
+                .expect("copy_file end found");
             let copy_file_code = &content[copy_file_start..copy_file_start + copy_file_end];
 
             assert!(
@@ -448,12 +470,17 @@ mod tests {
                  This triggers Kindle USB gadget resets."
             );
 
-            let write_bytes_start = content.find("fn write_bytes(").expect("fn write_bytes found");
-            let write_bytes_end = content[write_bytes_start..].find("#[cfg(test)]").expect("write_bytes end found");
+            let write_bytes_start = content
+                .find("fn write_bytes(")
+                .expect("fn write_bytes found");
+            let write_bytes_end = content[write_bytes_start..]
+                .find("#[cfg(test)]")
+                .expect("write_bytes end found");
             let write_bytes_code = &content[write_bytes_start..write_bytes_start + write_bytes_end];
 
             assert!(
-                !write_bytes_code.contains(".sync_data()") && !write_bytes_code.contains(".sync_all()"),
+                !write_bytes_code.contains(".sync_data()")
+                    && !write_bytes_code.contains(".sync_all()"),
                 "FATAL REGRESSION: write_bytes MUST NOT call sync_data() or sync_all() on file handles! \
                  This triggers Kindle USB gadget resets."
             );

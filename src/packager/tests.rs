@@ -96,7 +96,9 @@ fn test_atomic_package_to_file() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let dest = temp_dir.path().join("atomic_book.kfx");
-    let size = packager.package_to_file(&dest).expect("Atomic package failed");
+    let size = packager
+        .package_to_file(&dest)
+        .expect("Atomic package failed");
     assert!(size > 0);
     assert!(dest.is_file());
 }
@@ -230,19 +232,35 @@ fn test_yj_auxiliary_data_and_cem_and_location_pid_map_emitted() {
         .iter()
         .filter(|e| e.chunk_type == SYM_AUXILIARY_DATA)
         .collect();
-    assert_eq!(ad_entities.len(), 2, "Expected 2 auxiliary_data ($597) entities");
+    assert_eq!(
+        ad_entities.len(),
+        2,
+        "Expected 2 auxiliary_data ($597) entities"
+    );
 
     // 2. Check container_entity_map ($419)
-    let has_cem = packager.entities.iter().any(|e| e.chunk_type == SYM_CONTAINER_ENTITY_MAP);
+    let has_cem = packager
+        .entities
+        .iter()
+        .any(|e| e.chunk_type == SYM_CONTAINER_ENTITY_MAP);
     assert!(has_cem, "Missing container_entity_map ($419)");
 
     // 3. Check yj.location_pid_map ($621)
-    let has_loc_pid_map = packager.entities.iter().any(|e| e.chunk_type == SYM_YJ_LOCATION_PID_MAP);
+    let has_loc_pid_map = packager
+        .entities
+        .iter()
+        .any(|e| e.chunk_type == SYM_YJ_LOCATION_PID_MAP);
     assert!(has_loc_pid_map, "Missing yj.location_pid_map ($621)");
 
     // 4. Verify format_capabilities ($593) is NOT in entities table
-    let has_fcap_in_entities = packager.entities.iter().any(|e| e.chunk_type == SYM_FORMAT_CAPABILITIES);
-    assert!(!has_fcap_in_entities, "format_capabilities ($593) must NOT be in bcIndexTab entities");
+    let has_fcap_in_entities = packager
+        .entities
+        .iter()
+        .any(|e| e.chunk_type == SYM_FORMAT_CAPABILITIES);
+    assert!(
+        !has_fcap_in_entities,
+        "format_capabilities ($593) must NOT be in bcIndexTab entities"
+    );
 }
 
 #[test]
@@ -297,24 +315,41 @@ fn test_packager_emits_navigation_and_toc() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    let size = packager.package(&mut buffer).expect("Packaging with TOC failed");
+    let size = packager
+        .package(&mut buffer)
+        .expect("Packaging with TOC failed");
     assert!(size > 0);
 
     let sym_book_nav = symbol_id("book_navigation").unwrap_or(389);
 
     // Verify book_navigation ($389) singleton entity emitted
-    let book_nav_entity = packager.entities.iter().find(|e| e.chunk_type == sym_book_nav);
-    assert!(book_nav_entity.is_some(), "book_navigation ($389) entity was not emitted");
+    let book_nav_entity = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == sym_book_nav);
+    assert!(
+        book_nav_entity.is_some(),
+        "book_navigation ($389) entity was not emitted"
+    );
     assert_eq!(book_nav_entity.unwrap().entity_id, SINGLETON_ID);
 
     // Verify nav_container ($391) standalone entity emitted
     let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
-    let nav_container_entity = packager.entities.iter().find(|e| e.chunk_type == sym_nav_container);
-    assert!(nav_container_entity.is_some(), "nav_container ($391) entity was not emitted");
+    let nav_container_entity = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == sym_nav_container);
+    assert!(
+        nav_container_entity.is_some(),
+        "nav_container ($391) entity was not emitted"
+    );
     assert_ne!(nav_container_entity.unwrap().entity_id, SINGLETON_ID);
 
     // Verify document_data ($538) was emitted
-    let has_doc_data = packager.entities.iter().any(|e| e.chunk_type == SYM_DOCUMENT_DATA);
+    let has_doc_data = packager
+        .entities
+        .iter()
+        .any(|e| e.chunk_type == SYM_DOCUMENT_DATA);
     assert!(has_doc_data, "document_data ($538) was not emitted");
 }
 
@@ -345,7 +380,9 @@ fn test_packager_emits_page_list_navigation() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    let size = packager.package(&mut buffer).expect("Packaging with page_list failed");
+    let size = packager
+        .package(&mut buffer)
+        .expect("Packaging with page_list failed");
     assert!(size > 0);
 
     let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
@@ -353,12 +390,17 @@ fn test_packager_emits_page_list_navigation() {
         if e.chunk_type == sym_nav_container {
             let mut reader = crate::ion::IonReader::new(&e.data);
             if let Ok(crate::ion::IonValue::Struct(fields)) = reader.decode_value() {
-                return fields.iter().any(|(k, v)| *k == 235 && v == &crate::ion::IonValue::Symbol(237));
+                return fields
+                    .iter()
+                    .any(|(k, v)| *k == 235 && v == &crate::ion::IonValue::Symbol(237));
             }
         }
         false
     });
-    assert!(page_nav.is_some(), "page_list nav_container ($391) with nav_type=237 was not emitted");
+    assert!(
+        page_nav.is_some(),
+        "page_list nav_container ($391) with nav_type=237 was not emitted"
+    );
 }
 
 #[test]
@@ -431,12 +473,21 @@ fn test_packager_emits_styles_and_heading_formatting() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    let size = packager.package(&mut buffer).expect("Packaging with styles failed");
+    let size = packager
+        .package(&mut buffer)
+        .expect("Packaging with styles failed");
     assert!(size > 0);
 
     let sym_style = symbol_id("style").unwrap_or(157);
-    let style_entities: Vec<_> = packager.entities.iter().filter(|e| e.chunk_type == sym_style).collect();
-    assert!(!style_entities.is_empty(), "Expected referenced style ($157) entities in KFX container");
+    let style_entities: Vec<_> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == sym_style)
+        .collect();
+    assert!(
+        !style_entities.is_empty(),
+        "Expected referenced style ($157) entities in KFX container"
+    );
 }
 
 fn collect_symbols(v: &IonValue, out: &mut Vec<u32>) {
@@ -464,10 +515,30 @@ fn test_packager_emits_css_font_size_alignment_and_inherited_italic() {
         id: "ch1".to_string(),
         title: "Chapter 1".to_string(),
         blocks: vec![
-            Block::Heading { id: "h".to_string(), level: 1, spans: vec![span("1", None)], style: Some("align_center bold".to_string()) },
-            Block::Paragraph { id: "sub".to_string(), spans: vec![span("The Risky Business", None)], style: Some("align_center italic font_size_lg".to_string()) },
-            Block::Paragraph { id: "src".to_string(), spans: vec![span("George Bernard Shaw", None)], style: Some("align_center italic font_size_xs".to_string()) },
-            Block::Paragraph { id: "dc".to_string(), spans: vec![span("O", Some("dropcap")), span("n a cool fall evening", None)], style: None },
+            Block::Heading {
+                id: "h".to_string(),
+                level: 1,
+                spans: vec![span("1", None)],
+                style: Some("align_center bold".to_string()),
+            },
+            Block::Paragraph {
+                id: "sub".to_string(),
+                spans: vec![span("The Risky Business", None)],
+                style: Some("align_center italic font_size_lg".to_string()),
+            },
+            Block::Paragraph {
+                id: "src".to_string(),
+                spans: vec![span("George Bernard Shaw", None)],
+                style: Some("align_center italic font_size_xs".to_string()),
+            },
+            Block::Paragraph {
+                id: "dc".to_string(),
+                spans: vec![
+                    span("O", Some("dropcap")),
+                    span("n a cool fall evening", None),
+                ],
+                style: None,
+            },
         ],
     });
 
@@ -494,14 +565,29 @@ fn test_packager_emits_css_font_size_alignment_and_inherited_italic() {
     assert!(style_ids.contains(&fs_xs));
     assert!(style_ids.contains(&fs_lg));
 
-    let storyline = packager.entities.iter().find(|e| e.chunk_type == SYM_STORYLINE).expect("storyline");
-    let values = crate::ion::IonReader::new(&storyline.data).decode_all().expect("decode storyline");
+    let storyline = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .expect("storyline");
+    let values = crate::ion::IonReader::new(&storyline.data)
+        .decode_all()
+        .expect("decode storyline");
     let mut syms = Vec::new();
     values.iter().for_each(|v| collect_symbols(v, &mut syms));
 
-    assert!(syms.contains(&h1_center), "centered heading style must be referenced");
-    assert!(syms.contains(&align_center), "centered paragraph style must be referenced");
-    assert!(syms.contains(&italic), "paragraph-level italic must cascade to span style_events");
+    assert!(
+        syms.contains(&h1_center),
+        "centered heading style must be referenced"
+    );
+    assert!(
+        syms.contains(&align_center),
+        "centered paragraph style must be referenced"
+    );
+    assert!(
+        syms.contains(&italic),
+        "paragraph-level italic must cascade to span style_events"
+    );
     assert!(syms.contains(&fs_lg), "font_size_lg style event missing");
     assert!(syms.contains(&fs_xs), "font_size_xs style event missing");
     assert!(syms.contains(&dropcap), "dropcap style event missing");
@@ -509,8 +595,14 @@ fn test_packager_emits_css_font_size_alignment_and_inherited_italic() {
 
 #[test]
 fn test_inherited_text_tokens_filtering() {
-    assert_eq!(inherited_text_tokens(Some("p_first align_center italic font_size_sm"), true), "italic font_size_sm");
-    assert_eq!(inherited_text_tokens(Some("align_center bold font_size_lg"), false), "bold");
+    assert_eq!(
+        inherited_text_tokens(Some("p_first align_center italic font_size_sm"), true),
+        "italic font_size_sm"
+    );
+    assert_eq!(
+        inherited_text_tokens(Some("align_center bold font_size_lg"), false),
+        "bold"
+    );
     assert_eq!(inherited_text_tokens(None, true), "");
 }
 
@@ -600,11 +692,17 @@ fn test_packager_emits_comprehensive_formatting_styles() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    let size = packager.package(&mut buffer).expect("Packaging with comprehensive formatting failed");
+    let size = packager
+        .package(&mut buffer)
+        .expect("Packaging with comprehensive formatting failed");
     assert!(size > 0);
 
     let sym_style = symbol_id("style").unwrap_or(157);
-    let style_count = packager.entities.iter().filter(|e| e.chunk_type == sym_style).count();
+    let style_count = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == sym_style)
+        .count();
     assert!(style_count > 0, "Referenced styles must be emitted");
 }
 
@@ -634,11 +732,17 @@ fn test_yj_symbols_import_max_id_851() {
         _ => panic!("expected annotated or struct for symbol table"),
     };
     if let crate::ion::IonValue::Struct(fields) = struct_val {
-        let imports = fields.iter().find(|(k, _)| *k == 6).expect("missing imports field $6");
+        let imports = fields
+            .iter()
+            .find(|(k, _)| *k == 6)
+            .expect("missing imports field $6");
         if let crate::ion::IonValue::List(import_list) = &imports.1 {
             assert_eq!(import_list.len(), 1);
             if let crate::ion::IonValue::Struct(import_fields) = &import_list[0] {
-                let max_id = import_fields.iter().find(|(k, _)| *k == 8).expect("missing max_id field $8");
+                let max_id = import_fields
+                    .iter()
+                    .find(|(k, _)| *k == 8)
+                    .expect("missing max_id field $8");
                 assert_eq!(max_id.1, crate::ion::IonValue::Int(851));
             } else {
                 panic!("expected struct in import_list");
@@ -659,7 +763,8 @@ fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
     let make_png = |w: u32, h: u32| -> Vec<u8> {
         let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w, h);
         let mut bytes = Cursor::new(Vec::new());
-        img.write_to(&mut bytes, image::ImageFormat::Png).expect("Encode test png");
+        img.write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("Encode test png");
         bytes.into_inner()
     };
 
@@ -748,10 +853,15 @@ fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    packager.package(&mut buffer).expect("Packaging multi-image book failed");
+    packager
+        .package(&mut buffer)
+        .expect("Packaging multi-image book failed");
 
     // 1. Verify Ground Truth Symbol Offsets
-    assert_eq!(AMAZON_YJ_SYMBOLS_MAX_ID, 851, "Amazon Yellowjacket max_id MUST be 851");
+    assert_eq!(
+        AMAZON_YJ_SYMBOLS_MAX_ID, 851,
+        "Amazon Yellowjacket max_id MUST be 851"
+    );
     assert_eq!(FIRST_LOCAL_SYMBOL_ID, 852, "First local symbol MUST be 852");
 
     // 2. Locate Storylines (SYM_STORYLINE = 259)
@@ -761,7 +871,10 @@ fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
         .iter()
         .filter(|e| e.chunk_type == sym_storyline)
         .collect();
-    assert!(storylines.len() >= 2, "Expected at least 2 storyline entities");
+    assert!(
+        storylines.len() >= 2,
+        "Expected at least 2 storyline entities"
+    );
 
     // Parse each storyline and extract any sym_resource_name (175) symbols referenced
     let mut chapter_image_sids = Vec::new();
@@ -773,7 +886,8 @@ fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
                     match v {
                         crate::ion::IonValue::Struct(fields) => {
                             for (k, val) in fields {
-                                if *k == 175 { // resource_name
+                                if *k == 175 {
+                                    // resource_name
                                     if let crate::ion::IonValue::Symbol(s) = val {
                                         out.push(*s);
                                     }
@@ -797,18 +911,40 @@ fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
     }
 
     // Verify that cover + 2 chapter images were referenced (total 3)
-    assert_eq!(chapter_image_sids.len(), 3, "Expected 3 image references across storylines (cover + 2 chapters)");
+    assert_eq!(
+        chapter_image_sids.len(),
+        3,
+        "Expected 3 image references across storylines (cover + 2 chapters)"
+    );
     let cover_sid = chapter_image_sids[0];
     let ch1_sid = chapter_image_sids[1];
     let ch2_sid = chapter_image_sids[2];
 
     // Crucial Invariant: Cover, Chapter 1 and Chapter 2 must all have distinct image SIDs!
-    assert_ne!(cover_sid, ch1_sid, "Cover and Chapter 1 must have distinct image SIDs");
-    assert_ne!(cover_sid, ch2_sid, "Cover and Chapter 2 must have distinct image SIDs");
-    assert_ne!(ch1_sid, ch2_sid, "Chapter 1 and Chapter 2 must have distinct image SIDs");
-    assert!(cover_sid >= FIRST_LOCAL_SYMBOL_ID, "Cover SID must be in local symbol range");
-    assert!(ch1_sid >= FIRST_LOCAL_SYMBOL_ID, "Image SID must be in local symbol range");
-    assert!(ch2_sid >= FIRST_LOCAL_SYMBOL_ID, "Image SID must be in local symbol range");
+    assert_ne!(
+        cover_sid, ch1_sid,
+        "Cover and Chapter 1 must have distinct image SIDs"
+    );
+    assert_ne!(
+        cover_sid, ch2_sid,
+        "Cover and Chapter 2 must have distinct image SIDs"
+    );
+    assert_ne!(
+        ch1_sid, ch2_sid,
+        "Chapter 1 and Chapter 2 must have distinct image SIDs"
+    );
+    assert!(
+        cover_sid >= FIRST_LOCAL_SYMBOL_ID,
+        "Cover SID must be in local symbol range"
+    );
+    assert!(
+        ch1_sid >= FIRST_LOCAL_SYMBOL_ID,
+        "Image SID must be in local symbol range"
+    );
+    assert!(
+        ch2_sid >= FIRST_LOCAL_SYMBOL_ID,
+        "Image SID must be in local symbol range"
+    );
 }
 
 #[test]
@@ -819,7 +955,8 @@ fn test_packager_navigation_resolves_fragmented_sections() {
         blocks.push(Block::Paragraph {
             id: format!("p_{}", i),
             spans: vec![TextSpan {
-                text: "Extremely long text block that will trigger section fragmentation. ".repeat(20),
+                text: "Extremely long text block that will trigger section fragmentation. "
+                    .repeat(20),
                 style: None,
                 anchor_id: None,
                 href: None,
@@ -851,18 +988,32 @@ fn test_packager_navigation_resolves_fragmented_sections() {
     );
 
     let mut packager = KfxPackager::new(&book, "EBOK");
-    assert!(packager.sections.len() > 1, "Section should be fragmented into multiple parts");
+    assert!(
+        packager.sections.len() > 1,
+        "Section should be fragmented into multiple parts"
+    );
     assert_eq!(packager.sections[0].id, "chapter_one_p1");
 
     let mut buffer = Cursor::new(Vec::new());
-    let size = packager.package(&mut buffer).expect("Packaging with fragmented TOC failed");
+    let size = packager
+        .package(&mut buffer)
+        .expect("Packaging with fragmented TOC failed");
     assert!(size > 0);
 
     // Verify that book_navigation ($389) entity was created
     let sym_book_nav = symbol_id("book_navigation").unwrap_or(389);
-    let book_nav_entity = packager.entities.iter().find(|e| e.chunk_type == sym_book_nav);
-    assert!(book_nav_entity.is_some(), "book_navigation ($389) entity was not emitted");
-    assert!(!book_nav_entity.unwrap().data.is_empty(), "book_navigation entity data should not be empty");
+    let book_nav_entity = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == sym_book_nav);
+    assert!(
+        book_nav_entity.is_some(),
+        "book_navigation ($389) entity was not emitted"
+    );
+    assert!(
+        !book_nav_entity.unwrap().data.is_empty(),
+        "book_navigation entity data should not be empty"
+    );
 }
 
 #[test]
@@ -872,7 +1023,8 @@ fn test_image_rendering_storyline_and_resource_dimensions() {
     // Create a minimal 32x48 valid PNG image in memory
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(32, 48);
     let mut png_bytes = Cursor::new(Vec::new());
-    img.write_to(&mut png_bytes, image::ImageFormat::Png).expect("Encode test png");
+    img.write_to(&mut png_bytes, image::ImageFormat::Png)
+        .expect("Encode test png");
     let png_data = png_bytes.into_inner();
 
     let mut book = BookIR::default();
@@ -913,7 +1065,9 @@ fn test_image_rendering_storyline_and_resource_dimensions() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    packager.package(&mut buffer).expect("Packaging with image failed");
+    packager
+        .package(&mut buffer)
+        .expect("Packaging with image failed");
 
     // 1. Verify Storyline entity has resource_name ($175) encoded as Ion Symbol and alt_text ($584)
     let sym_storyline = SYM_STORYLINE; // 259
@@ -939,7 +1093,10 @@ fn test_image_rendering_storyline_and_resource_dimensions() {
     );
 
     assert!(
-        storyline_entity.data.windows(10).any(|w| w == b"Figure One"),
+        storyline_entity
+            .data
+            .windows(10)
+            .any(|w| w == b"Figure One"),
         "Storyline must include 'Figure One' alt text"
     );
 
@@ -1035,18 +1192,41 @@ fn test_cover_image_metadata_and_template_resolution() {
 
     // 1. Verify kindle_title_metadata includes "cover_image", "override_kindle_font", and "is_sample"
     let sym_book_meta = SYM_BOOK_METADATA;
-    let meta_ent = packager.entities.iter().find(|e| e.chunk_type == sym_book_meta).expect("Book metadata missing");
+    let meta_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == sym_book_meta)
+        .expect("Book metadata missing");
     let has_cover_key = meta_ent.data.windows(11).any(|w| w == b"cover_image");
-    assert!(has_cover_key, "kindle_title_metadata must contain 'cover_image' key");
+    assert!(
+        has_cover_key,
+        "kindle_title_metadata must contain 'cover_image' key"
+    );
     let has_cover_val = meta_ent.data.windows(14).any(|w| w == b"cover_asset_id");
-    assert!(has_cover_val, "kindle_title_metadata must contain cover resource value");
-    let has_override_font = meta_ent.data.windows(20).any(|w| w == b"override_kindle_font");
-    assert!(has_override_font, "kindle_title_metadata must contain 'override_kindle_font'");
+    assert!(
+        has_cover_val,
+        "kindle_title_metadata must contain cover resource value"
+    );
+    let has_override_font = meta_ent
+        .data
+        .windows(20)
+        .any(|w| w == b"override_kindle_font");
+    assert!(
+        has_override_font,
+        "kindle_title_metadata must contain 'override_kindle_font'"
+    );
 
     // 2. Verify entity $258 (SYM_METADATA) contains valid Yellowjacket reading_orders
     let sym_meta = SYM_METADATA;
-    let meta_258 = packager.entities.iter().find(|e| e.chunk_type == sym_meta).expect("Entity 258 metadata missing");
-    assert!(!meta_258.data.is_empty(), "Entity $258 metadata must not be empty");
+    let meta_258 = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == sym_meta)
+        .expect("Entity 258 metadata missing");
+    assert!(
+        !meta_258.data.is_empty(),
+        "Entity $258 metadata must not be empty"
+    );
 
     // 3. Verify cover raw media ($417) is emitted as the first raw media entity
     let sym_raw_media = symbol_id("bcRawMedia").unwrap_or(417);
@@ -1056,15 +1236,27 @@ fn test_cover_image_metadata_and_template_resolution() {
         .find(|e| e.chunk_type == sym_raw_media)
         .expect("Raw media entity missing");
     assert!(
-        first_raw_media.data.starts_with(b"\xFF\xD8\xFF\xE0MockJpegData"),
+        first_raw_media
+            .data
+            .starts_with(b"\xFF\xD8\xFF\xE0MockJpegData"),
         "First raw media entity must be the cover image"
     );
 
     // 4. Verify section 1 was recognized as cover container ($270)
     let sym_sec = SYM_SECTION;
-    let sec_ent = packager.entities.iter().find(|e| e.chunk_type == sym_sec).expect("Section entity missing");
-    let has_scale_fit = sec_ent.data.windows(2).any(|w| w == [0x72, 0x01, 0x46] || w == [0x71, 0x46]);
-    assert!(has_scale_fit || !sec_ent.data.is_empty(), "Cover section must emit container template");
+    let sec_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == sym_sec)
+        .expect("Section entity missing");
+    let has_scale_fit = sec_ent
+        .data
+        .windows(2)
+        .any(|w| w == [0x72, 0x01, 0x46] || w == [0x71, 0x46]);
+    assert!(
+        has_scale_fit || !sec_ent.data.is_empty(),
+        "Cover section must emit container template"
+    );
 }
 
 #[test]
@@ -1079,33 +1271,33 @@ fn test_packager_emits_yj_note_popup_footnotes() {
     book.sections.push(Section {
         id: "sec1".to_string(),
         title: "Chapter 1".to_string(),
-        blocks: vec![
-            Block::Paragraph {
-                id: "p1".to_string(),
-                spans: vec![
-                    TextSpan {
-                        text: "Quantum mechanics is fundamental".to_string(),
-                        style: None,
-                        anchor_id: None,
-                        href: None,
-                        ruby: None,
-                    },
-                    TextSpan {
-                        text: "[1]".to_string(),
-                        style: Some("noteref".to_string()),
-                        anchor_id: Some("fnref1".to_string()),
-                        href: Some("#fn1".to_string()),
-                        ruby: None,
-                    },
-                ],
-                style: None,
-            },
-        ],
+        blocks: vec![Block::Paragraph {
+            id: "p1".to_string(),
+            spans: vec![
+                TextSpan {
+                    text: "Quantum mechanics is fundamental".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "[1]".to_string(),
+                    style: Some("noteref".to_string()),
+                    anchor_id: Some("fnref1".to_string()),
+                    href: Some("#fn1".to_string()),
+                    ruby: None,
+                },
+            ],
+            style: None,
+        }],
     });
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    packager.package(&mut buffer).expect("Packaging with footnotes failed");
+    packager
+        .package(&mut buffer)
+        .expect("Packaging with footnotes failed");
 
     // Verify auxiliary_data entity ($597) contains IS_TARGET_SECTION
     let ad_entity = packager
@@ -1116,7 +1308,10 @@ fn test_packager_emits_yj_note_popup_footnotes() {
 
     let target_bytes = b"IS_TARGET_SECTION";
     assert!(
-        ad_entity.data.windows(target_bytes.len()).any(|w| w == target_bytes),
+        ad_entity
+            .data
+            .windows(target_bytes.len())
+            .any(|w| w == target_bytes),
         "Auxiliary data entity ($597) must encode IS_TARGET_SECTION"
     );
 }
@@ -1152,7 +1347,9 @@ fn test_packager_emits_ruby_style_and_content() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    let size = packager.package(&mut buffer).expect("Packaging with ruby failed");
+    let size = packager
+        .package(&mut buffer)
+        .expect("Packaging with ruby failed");
     assert!(size > 0);
 
     // 1. Verify style_ruby (symbol ID 852 + 20 = 872) is emitted
@@ -1162,7 +1359,10 @@ fn test_packager_emits_ruby_style_and_content() {
         .iter()
         .filter(|e| e.chunk_type == sym_style)
         .collect();
-    assert!(!style_entities.is_empty(), "Referenced styles must be emitted");
+    assert!(
+        !style_entities.is_empty(),
+        "Referenced styles must be emitted"
+    );
     let ruby_style_entity = style_entities
         .iter()
         .find(|e| e.entity_id == 852 + 20)
@@ -1177,7 +1377,10 @@ fn test_packager_emits_ruby_style_and_content() {
         .expect("Content ($145) entity missing");
     let base_text_bytes = "振仮名: 漢字".as_bytes();
     assert!(
-        content_entity.data.windows(base_text_bytes.len()).any(|w| w == base_text_bytes),
+        content_entity
+            .data
+            .windows(base_text_bytes.len())
+            .any(|w| w == base_text_bytes),
         "Content entity ($145) must contain base text"
     );
 
@@ -1189,7 +1392,10 @@ fn test_packager_emits_ruby_style_and_content() {
         .expect("Storyline ($259) entity missing");
     let furigana_bytes = "かんじ".as_bytes();
     assert!(
-        storyline_entity.data.windows(furigana_bytes.len()).any(|w| w == furigana_bytes),
+        storyline_entity
+            .data
+            .windows(furigana_bytes.len())
+            .any(|w| w == furigana_bytes),
         "Storyline entity ($259) must contain ruby_content furigana payload in style_events"
     );
 }
@@ -1206,7 +1412,9 @@ fn test_packager_advanced_dropcap_and_indentation_fidelity() {
             Block::Paragraph {
                 id: "p_biblio".to_string(),
                 spans: vec![TextSpan {
-                    text: "Grant, Adam. Originals: How Non-Conformists Move the World. Viking, 2016.".to_string(),
+                    text:
+                        "Grant, Adam. Originals: How Non-Conformists Move the World. Viking, 2016."
+                            .to_string(),
                     style: None,
                     anchor_id: None,
                     href: None,
@@ -1261,7 +1469,9 @@ fn test_packager_advanced_dropcap_and_indentation_fidelity() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    let size = packager.package(&mut buffer).expect("Packaging typography failed");
+    let size = packager
+        .package(&mut buffer)
+        .expect("Packaging typography failed");
     assert!(size > 0);
 
     // Check style entities emitted
@@ -1275,20 +1485,34 @@ fn test_packager_advanced_dropcap_and_indentation_fidelity() {
     // 31: dropcap_l2 (852 + 31 = 883)
     // 33: dropcap_l2_c2 (852 + 33 = 885)
     // 37: hanging_indent (852 + 37 = 889)
-    let dc_l2 = style_entities.iter().find(|e| e.entity_id == 852 + 31).expect("style_dropcap_l2");
-    let dc_l2_c2 = style_entities.iter().find(|e| e.entity_id == 852 + 33).expect("style_dropcap_l2_c2");
-    let hanging = style_entities.iter().find(|e| e.entity_id == 852 + 37).expect("style_hanging_indent");
+    let dc_l2 = style_entities
+        .iter()
+        .find(|e| e.entity_id == 852 + 31)
+        .expect("style_dropcap_l2");
+    let dc_l2_c2 = style_entities
+        .iter()
+        .find(|e| e.entity_id == 852 + 33)
+        .expect("style_dropcap_l2_c2");
+    let hanging = style_entities
+        .iter()
+        .find(|e| e.entity_id == 852 + 37)
+        .expect("style_hanging_indent");
 
     assert!(!dc_l2.data.is_empty());
     assert!(!dc_l2_c2.data.is_empty());
     assert!(!hanging.data.is_empty());
 
     // Decode dc_l2 and check dropcap_lines == 2 and no bold font_weight
-    let dc_l2_val = crate::ion::IonReader::new(&dc_l2.data).decode_all().expect("decode dc_l2");
+    let dc_l2_val = crate::ion::IonReader::new(&dc_l2.data)
+        .decode_all()
+        .expect("decode dc_l2");
     let mut syms = Vec::new();
     dc_l2_val.iter().for_each(|v| collect_symbols(v, &mut syms));
     let sym_bold = symbol_id("bold").unwrap_or(361);
-    assert!(!syms.contains(&sym_bold), "style_dropcap_l2 must not be bold");
+    assert!(
+        !syms.contains(&sym_bold),
+        "style_dropcap_l2 must not be bold"
+    );
 }
 
 #[test]
@@ -1312,7 +1536,9 @@ fn test_packager_font_size_cascade_child_precedence() {
 
     let mut packager = KfxPackager::new(&book, "EBOK");
     let mut buffer = Cursor::new(Vec::new());
-    packager.package(&mut buffer).expect("Packaging should succeed");
+    packager
+        .package(&mut buffer)
+        .expect("Packaging should succeed");
 
     let sym_storyline = symbol_id("storyline").unwrap_or(259);
     let story_entity = packager
@@ -1326,13 +1552,20 @@ fn test_packager_font_size_cascade_child_precedence() {
         .expect("Storyline ion should decode");
 
     let mut symbols_in_story = Vec::new();
-    vals.iter().for_each(|v| collect_symbols(v, &mut symbols_in_story));
+    vals.iter()
+        .for_each(|v| collect_symbols(v, &mut symbols_in_story));
 
     let sm_sym = 852 + 27;
     let xl_sym = 852 + 29;
 
-    assert!(symbols_in_story.contains(&sm_sym), "Storyline must contain child font_size_sm symbol (879)");
-    assert!(!symbols_in_story.contains(&xl_sym), "Storyline must NOT contain parent font_size_xl symbol (881)");
+    assert!(
+        symbols_in_story.contains(&sm_sym),
+        "Storyline must contain child font_size_sm symbol (879)"
+    );
+    assert!(
+        !symbols_in_story.contains(&xl_sym),
+        "Storyline must NOT contain parent font_size_xl symbol (881)"
+    );
 }
 
 #[test]

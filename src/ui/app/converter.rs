@@ -1,11 +1,15 @@
-use gpui::*;
+use super::KindleStudio;
 use crate::state::{ConverterMode, TaskStatus};
 use crate::theme::Theme;
-use super::KindleStudio;
+use gpui::*;
 
 impl KindleStudio {
     /// Renders the Local Conversion Pane (Dropzone, Settings, and Task Queue or Folder Browser).
-    pub(super) fn render_converter_pane(&self, cx: &mut Context<Self>, in_split: bool) -> impl IntoElement {
+    pub(super) fn render_converter_pane(
+        &self,
+        cx: &mut Context<Self>,
+        in_split: bool,
+    ) -> impl IntoElement {
         let is_folder = self.converter_mode == ConverterMode::FolderBrowser;
 
         if is_folder {
@@ -32,9 +36,7 @@ impl KindleStudio {
             .overflow_y_scroll()
             .p_4()
             .gap_4()
-            .drag_over::<ExternalPaths>(|style, _paths, _window, _cx| {
-                style
-            })
+            .drag_over::<ExternalPaths>(|style, _paths, _window, _cx| style)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                 for path in paths.paths() {
                     this.handle_incoming_path(path, cx);
@@ -86,26 +88,29 @@ impl KindleStudio {
                             multiple: true,
                             prompt: Some("Select EPUB books to convert".into()),
                         });
-                        cx.spawn(async move |this, cx| {
-                            match receiver.await {
-                                Ok(Ok(Some(paths))) => {
-                                    this.update(cx, |this, cx| {
-                                        for path in paths {
-                                            this.handle_incoming_path(&path, cx);
-                                        }
-                                    }).ok();
-                                }
-                                Ok(Ok(None)) => {}
-                                _ => {
-                                    let sample_path = std::path::PathBuf::from("../sample/Apocolocyntosis - Lucius Annaeus Seneca.epub");
-                                    if sample_path.exists() {
-                                        this.update(cx, |this, cx| {
-                                            this.handle_incoming_path(&sample_path, cx);
-                                        }).ok();
+                        cx.spawn(async move |this, cx| match receiver.await {
+                            Ok(Ok(Some(paths))) => {
+                                this.update(cx, |this, cx| {
+                                    for path in paths {
+                                        this.handle_incoming_path(&path, cx);
                                     }
+                                })
+                                .ok();
+                            }
+                            Ok(Ok(None)) => {}
+                            _ => {
+                                let sample_path = std::path::PathBuf::from(
+                                    "../sample/Apocolocyntosis - Lucius Annaeus Seneca.epub",
+                                );
+                                if sample_path.exists() {
+                                    this.update(cx, |this, cx| {
+                                        this.handle_incoming_path(&sample_path, cx);
+                                    })
+                                    .ok();
                                 }
                             }
-                        }).detach();
+                        })
+                        .detach();
                     })),
             )
             // 2. Settings Bar
@@ -137,11 +142,12 @@ impl KindleStudio {
                                     .text_color(Theme::text_primary())
                                     .child(format!("Format: {}", self.settings.content_type))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settings.content_type = if this.settings.content_type == "PDOC" {
-                                            "EBOK".into()
-                                        } else {
-                                            "PDOC".into()
-                                        };
+                                        this.settings.content_type =
+                                            if this.settings.content_type == "PDOC" {
+                                                "EBOK".into()
+                                            } else {
+                                                "PDOC".into()
+                                            };
                                         cx.notify();
                                     })),
                             )
@@ -152,11 +158,23 @@ impl KindleStudio {
                                     .py_0p5()
                                     .rounded_sm()
                                     .cursor_pointer()
-                                    .bg(if self.settings.word_wise { Theme::accent_purple() } else { Theme::border() })
+                                    .bg(if self.settings.word_wise {
+                                        Theme::accent_purple()
+                                    } else {
+                                        Theme::border()
+                                    })
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(if self.settings.word_wise { Theme::text_primary() } else { Theme::text_muted() })
-                                    .child(if self.settings.word_wise { "Word Wise ON" } else { "Word Wise OFF" })
+                                    .text_color(if self.settings.word_wise {
+                                        Theme::text_primary()
+                                    } else {
+                                        Theme::text_muted()
+                                    })
+                                    .child(if self.settings.word_wise {
+                                        "Word Wise ON"
+                                    } else {
+                                        "Word Wise OFF"
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.settings.word_wise = !this.settings.word_wise;
                                         cx.notify();
@@ -168,8 +186,16 @@ impl KindleStudio {
                             .id("toggle_auto_deploy")
                             .text_xs()
                             .cursor_pointer()
-                            .text_color(if self.settings.auto_deploy { Theme::accent_green() } else { Theme::text_muted() })
-                            .child(if self.settings.auto_deploy { "✓ Auto-send to Kindle" } else { "✗ Auto-send Off" })
+                            .text_color(if self.settings.auto_deploy {
+                                Theme::accent_green()
+                            } else {
+                                Theme::text_muted()
+                            })
+                            .child(if self.settings.auto_deploy {
+                                "✓ Auto-send to Kindle"
+                            } else {
+                                "✗ Auto-send Off"
+                            })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.settings.auto_deploy = !this.settings.auto_deploy;
                                 cx.notify();
@@ -193,29 +219,29 @@ impl KindleStudio {
                                 format!("Conversion Queue ({} tasks)", self.tasks.len())
                             }),
                     )
-                    .child(
-                        if !self.tasks.is_empty() {
-                            div()
-                                .id("btn_clear_completed")
-                                .cursor_pointer()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(Theme::bg_card_hover())
-                                .text_xs()
-                                .text_color(Theme::text_muted())
-                                .child("🗑 Clear")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.tasks.retain(|t| {
-                                        t.status == TaskStatus::Converting || t.status == TaskStatus::Syncing || t.status == TaskStatus::Queued
-                                    });
-                                    cx.notify();
-                                }))
-                                .into_any_element()
-                        } else {
-                            div().into_any_element()
-                        }
-                    ),
+                    .child(if !self.tasks.is_empty() {
+                        div()
+                            .id("btn_clear_completed")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .bg(Theme::bg_card_hover())
+                            .text_xs()
+                            .text_color(Theme::text_muted())
+                            .child("🗑 Clear")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.tasks.retain(|t| {
+                                    t.status == TaskStatus::Converting
+                                        || t.status == TaskStatus::Syncing
+                                        || t.status == TaskStatus::Queued
+                                });
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }),
             )
             // 4. Task Queue Cards
             .child(
@@ -262,7 +288,10 @@ impl KindleStudio {
                             ),
                         };
 
-                        let is_active = matches!(task.status, TaskStatus::Converting | TaskStatus::Syncing | TaskStatus::Queued);
+                        let is_active = matches!(
+                            task.status,
+                            TaskStatus::Converting | TaskStatus::Syncing | TaskStatus::Queued
+                        );
 
                         div()
                             .flex()
@@ -327,31 +356,28 @@ impl KindleStudio {
                                             ),
                                     ),
                             )
-                            .child(
-                                if is_active {
-                                    div()
-                                        .w_full()
-                                        .h_1p5()
-                                        .rounded_full()
-                                        .bg(Theme::border())
-                                        .child(
-                                            div()
-                                                .h_full()
-                                                .rounded_full()
-                                                .bg(badge_bg)
-                                                .w(DefiniteLength::Fraction(task.progress.clamp(0.08, 1.0))),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    div().into_any_element()
-                                }
-                            )
+                            .child(if is_active {
+                                div()
+                                    .w_full()
+                                    .h_1p5()
+                                    .rounded_full()
+                                    .bg(Theme::border())
+                                    .child(div().h_full().rounded_full().bg(badge_bg).w(
+                                        DefiniteLength::Fraction(task.progress.clamp(0.08, 1.0)),
+                                    ))
+                                    .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            })
                     })),
             )
             .into_any_element()
     }
 
-    pub(super) fn render_converter_header_and_mode_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_converter_header_and_mode_switcher(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let is_drop = self.converter_mode == ConverterMode::DropQueue;
         let is_folder = self.converter_mode == ConverterMode::FolderBrowser;
 
@@ -397,8 +423,16 @@ impl KindleStudio {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_center()
                             .cursor_pointer()
-                            .bg(if is_drop { Theme::bg_card_hover() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-                            .text_color(if is_drop { Theme::accent_amber() } else { Theme::text_muted() })
+                            .bg(if is_drop {
+                                Theme::bg_card_hover()
+                            } else {
+                                hsla(0.0, 0.0, 0.0, 0.0)
+                            })
+                            .text_color(if is_drop {
+                                Theme::accent_amber()
+                            } else {
+                                Theme::text_muted()
+                            })
                             .child("📥 Dropzone & Queue")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.converter_mode = ConverterMode::DropQueue;
@@ -415,8 +449,16 @@ impl KindleStudio {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_center()
                             .cursor_pointer()
-                            .bg(if is_folder { Theme::bg_card_hover() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-                            .text_color(if is_folder { Theme::accent_amber() } else { Theme::text_muted() })
+                            .bg(if is_folder {
+                                Theme::bg_card_hover()
+                            } else {
+                                hsla(0.0, 0.0, 0.0, 0.0)
+                            })
+                            .text_color(if is_folder {
+                                Theme::accent_amber()
+                            } else {
+                                Theme::text_muted()
+                            })
                             .child("📂 Folder Browser")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.converter_mode = ConverterMode::FolderBrowser;

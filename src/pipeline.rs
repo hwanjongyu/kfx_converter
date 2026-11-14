@@ -132,17 +132,19 @@ impl ConversionPipeline {
                     .map(|n| n.to_string_lossy().to_string());
                 ir.resources.iter().find_map(|(k, v)| {
                     if let Some(ref fn_str) = fn_opt
-                        && (k == fn_str || k.ends_with(fn_str)) {
-                            return Some(v);
-                        }
+                        && (k == fn_str || k.ends_with(fn_str))
+                    {
+                        return Some(v);
+                    }
                     None
                 })
             });
             if let Some(asset) = asset
-                && let Ok(optimized) = CoverOptimizer::optimize_thumbnail(&asset.data) {
-                    cover_jpeg = Some(optimized);
-                    cover_optimized = true;
-                }
+                && let Ok(optimized) = CoverOptimizer::optimize_thumbnail(&asset.data)
+            {
+                cover_jpeg = Some(optimized);
+                cover_optimized = true;
+            }
         }
 
         // 4. Generate Word Wise Sidecar (.kll) if enabled
@@ -152,14 +154,13 @@ impl ConversionPipeline {
             if let Some(ref cb) = progress {
                 cb(0.75, "Generating Word Wise lemma sidecar database...");
             }
-            let book_revision = content_id.chars().take(8).collect::<String>().to_lowercase();
-            let mut ww_builder = WordWiseBuilder::new(
-                &asin,
-                &container_id,
-                "en",
-                "en",
-                &book_revision,
-            );
+            let book_revision = content_id
+                .chars()
+                .take(8)
+                .collect::<String>()
+                .to_lowercase();
+            let mut ww_builder =
+                WordWiseBuilder::new(&asin, &container_id, "en", "en", &book_revision);
             let gloss_count = ww_builder.generate_from_book(&ir);
             word_wise_glosses = Some(gloss_count);
 
@@ -299,15 +300,21 @@ mod tests {
             std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
 
             zip.start_file("META-INF/container.xml", opts).unwrap();
-            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+            std::io::Write::write_all(
+                &mut zip,
+                br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
     <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
-</container>"#).unwrap();
+</container>"#,
+            )
+            .unwrap();
 
             zip.start_file("content.opf", opts).unwrap();
-            std::io::Write::write_all(&mut zip, br#"<?xml version="1.0"?>
+            std::io::Write::write_all(
+                &mut zip,
+                br#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>Vocabulary Test Book</dc:title>
@@ -317,7 +324,9 @@ mod tests {
     <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
   <spine><itemref idref="c1"/></spine>
-</package>"#).unwrap();
+</package>"#,
+            )
+            .unwrap();
 
             zip.start_file("c1.xhtml", opts).unwrap();
             std::io::Write::write_all(&mut zip, br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>This is an abstruse and chimerical test for Word Wise vocabulary glosses.</p></body></html>"#).unwrap();
@@ -334,15 +343,15 @@ mod tests {
             device_root: None,
         };
 
-        let report = ConversionPipeline::run(
-            &epub_path,
-            Some(&kfx_path),
-            &options,
-            None::<fn(f32, &str)>,
-        ).expect("Pipeline should succeed");
+        let report =
+            ConversionPipeline::run(&epub_path, Some(&kfx_path), &options, None::<fn(f32, &str)>)
+                .expect("Pipeline should succeed");
 
         assert!(kfx_path.is_file(), "KFX file must be created");
-        assert!(report.word_wise_glosses.is_some_and(|g| g > 0), "Should find vocabulary glosses");
+        assert!(
+            report.word_wise_glosses.is_some_and(|g| g > 0),
+            "Should find vocabulary glosses"
+        );
 
         // Verify .sdr directory and .kll database deployment
         let sdr_path = temp_dir.path().join("test_book.sdr");
@@ -354,9 +363,15 @@ mod tests {
             if name.ends_with(".kll") {
                 kll_count += 1;
                 let kll_data = std::fs::read(entry.path()).unwrap();
-                assert!(kll_data.starts_with(b"SQLite format 3\0"), "KLL must be valid SQLite database");
+                assert!(
+                    kll_data.starts_with(b"SQLite format 3\0"),
+                    "KLL must be valid SQLite database"
+                );
             }
         }
-        assert!(kll_count >= 1, "At least one .kll file must exist in the SDR directory");
+        assert!(
+            kll_count >= 1,
+            "At least one .kll file must exist in the SDR directory"
+        );
     }
 }

@@ -1,9 +1,9 @@
 //! External resource and raw media entity generation for KFX packaging.
 
+use super::{KfxPackager, symbols::LocalSymbols};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
 use crate::symbols::symbol_id;
-use super::{symbols::LocalSymbols, KfxPackager};
 
 impl<'a> KfxPackager<'a> {
     /// Builds external resource entities ($164) and raw binary payload entities ($417)
@@ -83,17 +83,22 @@ impl<'a> KfxPackager<'a> {
                 };
                 let is_png = asset.mime_type.contains("png") && opt_content.starts_with(b"\x89PNG");
                 let f_sym = if is_png { sym_png } else { sym_jpg };
-                let m_type = if is_png { "image/png".to_string() } else { "image/jpeg".to_string() };
+                let m_type = if is_png {
+                    "image/png".to_string()
+                } else {
+                    "image/jpeg".to_string()
+                };
                 (opt_content, f_sym, m_type)
             } else {
                 (asset.data.clone(), sym_jpg, asset.mime_type.clone())
             };
 
-            let dimensions = if mime_type.starts_with("image/") || asset.mime_type.starts_with("image/") {
-                crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
-            } else {
-                None
-            };
+            let dimensions =
+                if mime_type.starts_with("image/") || asset.mime_type.starts_with("image/") {
+                    crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
+                } else {
+                    None
+                };
 
             // 1. External Resource metadata entity ($164)
             let mut ext_field_vec = vec![

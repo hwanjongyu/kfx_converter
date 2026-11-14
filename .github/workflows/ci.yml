@@ -19,21 +19,59 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # =========================================================================
+  # 1. Code Quality Gate: Fast Lint & Formatting Check (< 30s)
+  # =========================================================================
+  lint-and-format:
+    name: Code Quality (fmt & clippy)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies (required for GPUI compilation)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - name: Check code formatting (cargo fmt)
+        run: cargo fmt -- --check
+
+      - name: Check Clippy lints (cargo clippy)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # =========================================================================
+  # 2. Multi-Platform Test Matrix: Linux & macOS (All Features)
+  # =========================================================================
   test:
-    name: Test & Check (${{ matrix.os }})
+    name: Test (${{ matrix.os }})
+    needs: lint-and-format
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
     steps:
-      - name: Checkout source code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -51,11 +89,94 @@ jobs:
             libwayland-dev \
             libfontconfig1-dev
 
-      - name: Run test suite (Core converter & CLI)
-        run: cargo test --workspace --verbose
+      - name: Run full test suite (All features, Unit + Integration)
+        run: cargo test --all-features --verbose
 
-      - name: Verify GPUI desktop frontend compilation
-        run: cargo check --features gui --verbose
+      - name: Verify library compilation without default features
+        run: cargo test --lib --no-default-features --verbose
 
-      - name: Run Clippy lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
+  # =========================================================================
+  # 3. Test Coverage: cargo-llvm-cov + Summary Report & Artifact Upload
+  # =========================================================================
+  coverage:
+    name: Test Coverage (cargo-llvm-cov)
+    needs: lint-and-format
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate LCOV and summary coverage report
+        run: |
+          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+          echo "### Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cargo llvm-cov --all-features --workspace --text >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 14
+
+  # =========================================================================
+  # 4. Build & Docs Verification: Release Binary & Rustdoc
+  # =========================================================================
+  build-and-docs:
+    name: Build & Docs Verification
+    needs: lint-and-format
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - name: Build release CLI binary
+        run: cargo build --release --bin kfx-conv
+
+      - name: Verify rustdoc generation
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --all-features

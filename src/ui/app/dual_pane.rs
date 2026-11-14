@@ -1,6 +1,6 @@
-use gpui::*;
-use crate::theme::Theme;
 use super::KindleStudio;
+use crate::theme::Theme;
+use gpui::*;
 
 impl KindleStudio {
     /// Renders the Unified Dual-Pane Split View:
@@ -20,12 +20,7 @@ impl KindleStudio {
                     .overflow_hidden()
                     .child(self.render_converter_pane(cx, true)),
             )
-            .child(
-                div()
-                    .w_px()
-                    .h_full()
-                    .bg(Theme::border()),
-            )
+            .child(div().w_px().h_full().bg(Theme::border()))
             .child(
                 div()
                     .id("right_pane_container")

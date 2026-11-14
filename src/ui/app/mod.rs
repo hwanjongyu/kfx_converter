@@ -10,13 +10,12 @@ mod folder_browser;
 mod header;
 mod kindle_explorer;
 
-use gpui::*;
-use crate::theme::Theme;
 use crate::state::{
-    detect_kindle_device, load_device_files, ConversionSettings, ConversionTask,
-    ConverterMode, DeviceStatus, EpubSortField, KindleFile, LocalFolderState,
-    SortDirection, StudioTab,
+    ConversionSettings, ConversionTask, ConverterMode, DeviceStatus, EpubSortField, KindleFile,
+    LocalFolderState, SortDirection, StudioTab, detect_kindle_device, load_device_files,
 };
+use crate::theme::Theme;
+use gpui::*;
 
 pub struct KindleStudio {
     pub(super) tab: StudioTab,
@@ -73,15 +72,25 @@ impl Render for KindleStudio {
             .child(self.render_header(cx))
             .child(self.render_tabs(cx))
             .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(match self.tab {
-                        StudioTab::DualPane => self.render_dual_pane_view(cx).into_any_element(),
-                        StudioTab::Convert => div().id("convert_pane_scroll").size_full().overflow_y_scroll().child(self.render_converter_pane(cx, false)).into_any_element(),
-                        StudioTab::LocalFolder => div().id("folder_pane_container").size_full().child(self.render_local_folder_full_tab(cx)).into_any_element(),
-                        StudioTab::Explorer => div().id("explorer_pane_container").size_full().child(self.render_kindle_pane(cx, false)).into_any_element(),
-                    }),
+                div().flex_1().overflow_hidden().child(match self.tab {
+                    StudioTab::DualPane => self.render_dual_pane_view(cx).into_any_element(),
+                    StudioTab::Convert => div()
+                        .id("convert_pane_scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .child(self.render_converter_pane(cx, false))
+                        .into_any_element(),
+                    StudioTab::LocalFolder => div()
+                        .id("folder_pane_container")
+                        .size_full()
+                        .child(self.render_local_folder_full_tab(cx))
+                        .into_any_element(),
+                    StudioTab::Explorer => div()
+                        .id("explorer_pane_container")
+                        .size_full()
+                        .child(self.render_kindle_pane(cx, false))
+                        .into_any_element(),
+                }),
             )
     }
 }

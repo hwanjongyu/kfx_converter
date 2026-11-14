@@ -87,7 +87,10 @@ impl KindleSync {
 
     /// Deletes an e-book file and its companion `.sdr` directory from the device safely.
     #[inline]
-    pub fn delete_book_file_safe(allowed_root: Option<&Path>, full_path: &Path) -> Result<(), std::io::Error> {
+    pub fn delete_book_file_safe(
+        allowed_root: Option<&Path>,
+        full_path: &Path,
+    ) -> Result<(), std::io::Error> {
         catalog::delete_book_file_safe(allowed_root, full_path)
     }
 

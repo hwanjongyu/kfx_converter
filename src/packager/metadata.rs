@@ -1,11 +1,13 @@
 //! Book metadata ($490), format capabilities ($593), content features ($585),
 //! reading orders ($258), and document data ($538) entity generation for KFX.
 
+use super::{
+    FIRST_LOCAL_SYMBOL_ID, KfxPackager, SINGLETON_ID, SectionPackData, symbols::LocalSymbols,
+};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
 use crate::ir::Block;
 use crate::symbols::*;
-use super::{symbols::LocalSymbols, KfxPackager, SectionPackData, FIRST_LOCAL_SYMBOL_ID, SINGLETON_ID};
 
 impl<'a> KfxPackager<'a> {
     pub(crate) fn build_format_capabilities(&self) -> Vec<u8> {
@@ -78,7 +80,13 @@ impl<'a> KfxPackager<'a> {
         // 1. reflow-section-size: Required by Kindle when section PID count exceeds 65536
         let max_section_pids = section_data
             .iter()
-            .map(|s| 1 + s.block_info.iter().map(|(_, len)| (*len).max(1)).sum::<usize>())
+            .map(|s| {
+                1 + s
+                    .block_info
+                    .iter()
+                    .map(|(_, len)| (*len).max(1))
+                    .sum::<usize>()
+            })
             .max()
             .unwrap_or(0);
 
@@ -106,10 +114,15 @@ impl<'a> KfxPackager<'a> {
         // 2. yj_jpg_rst_marker_present: Required when emitted JPEG images have restart markers
         let has_rst_marker = self.book.resources.values().any(|res| {
             res.mime_type.starts_with("image/jpeg")
-                && res.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+                && res
+                    .data
+                    .windows(2)
+                    .any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
         }) || self.entities.iter().any(|e| {
             e.chunk_type == 417
-                && e.data.windows(2).any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+                && e.data
+                    .windows(2)
+                    .any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
         });
         if has_rst_marker {
             feature_list.push(IonValue::Struct(vec![
@@ -117,7 +130,10 @@ impl<'a> KfxPackager<'a> {
                     sym_namespace,
                     IonValue::String("com.amazon.yjconversion".to_string()),
                 ),
-                (sym_key, IonValue::String("yj_jpg_rst_marker_present".to_string())),
+                (
+                    sym_key,
+                    IonValue::String("yj_jpg_rst_marker_present".to_string()),
+                ),
                 (
                     sym_ver_info,
                     IonValue::Struct(vec![(
@@ -132,9 +148,10 @@ impl<'a> KfxPackager<'a> {
         }
 
         // 3. yj_table and yj_table_viewer: Required when tables are present
-        let has_tables = self.sections.iter().any(|s| {
-            s.blocks.iter().any(|b| matches!(b, Block::Table { .. }))
-        });
+        let has_tables = self
+            .sections
+            .iter()
+            .any(|s| s.blocks.iter().any(|b| matches!(b, Block::Table { .. })));
         if has_tables {
             feature_list.push(IonValue::Struct(vec![
                 (
@@ -244,7 +261,10 @@ impl<'a> KfxPackager<'a> {
                 (sym_val, IonValue::Bool(false)),
             ]),
             IonValue::Struct(vec![
-                (sym_key, IonValue::String("override_kindle_font".to_string())),
+                (
+                    sym_key,
+                    IonValue::String("override_kindle_font".to_string()),
+                ),
                 (sym_val, IonValue::Bool(false)),
             ]),
         ];
@@ -378,9 +398,7 @@ impl<'a> KfxPackager<'a> {
 
         // In Yellowjacket specification, entity $258 (metadata) contains solely structural
         // reading_orders. Bibliographic data resides strictly in entity $490 (book_metadata).
-        let meta_fields = vec![
-            (sym_reading_orders, IonValue::List(vec![reading_order])),
-        ];
+        let meta_fields = vec![(sym_reading_orders, IonValue::List(vec![reading_order]))];
 
         let mut meta_writer = IonWriter::new();
         meta_writer.write_bvm();

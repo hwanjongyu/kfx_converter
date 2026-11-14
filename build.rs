@@ -38,7 +38,10 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         let mut res = winres::WindowsResource::new();
-        res.set("FileDescription", "Kindle Scribe Studio / EPUB to KFX Converter");
+        res.set(
+            "FileDescription",
+            "Kindle Scribe Studio / EPUB to KFX Converter",
+        );
         res.set("ProductName", "Kindle Scribe Studio");
         res.set("OriginalFilename", "kfx-studio.exe");
         res.set("LegalCopyright", "Copyright (c) 2026 hwanjongyu");

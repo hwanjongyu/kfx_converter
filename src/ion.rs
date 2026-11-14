@@ -13,7 +13,9 @@ pub const MAGIC_ENTY: &[u8; 4] = b"ENTY";
 
 /// Pre-serialized Ion Header for ENTY: BVM + Struct {$410: 0, $411: 0}
 /// 410 = bcComprType (0 = none), 411 = bcDRMScheme (0 = none)
-pub const ENTY_HEADER_ION: [u8; 11] = [0xe0, 0x01, 0x00, 0xea, 0xd6, 0x03, 0x9a, 0x20, 0x03, 0x9b, 0x20];
+pub const ENTY_HEADER_ION: [u8; 11] = [
+    0xe0, 0x01, 0x00, 0xea, 0xd6, 0x03, 0x9a, 0x20, 0x03, 0x9b, 0x20,
+];
 
 /// Fixed total header length for ENTY wrapper (10 bytes header + 11 bytes Ion = 21 bytes)
 pub const ENTY_HEADER_LEN: u32 = 10 + ENTY_HEADER_ION.len() as u32;
@@ -82,7 +84,8 @@ pub fn wrap_enty_header(payload: &[u8], version: u16) -> Vec<u8> {
     let mut out = Vec::with_capacity(ENTY_HEADER_LEN as usize + payload.len());
     out.extend_from_slice(MAGIC_ENTY);
     out.write_u16::<LittleEndian>(version).expect("write u16");
-    out.write_u32::<LittleEndian>(ENTY_HEADER_LEN).expect("write u32");
+    out.write_u32::<LittleEndian>(ENTY_HEADER_LEN)
+        .expect("write u32");
     out.extend_from_slice(&ENTY_HEADER_ION);
     out.extend_from_slice(payload);
     out
@@ -273,7 +276,11 @@ impl IonWriter {
                 payload.push(if is_neg_coef { 0x80 } else { 0x00 });
                 payload.extend_from_slice(mag_bytes);
             } else {
-                let first = if is_neg_coef { mag_bytes[0] | 0x80 } else { mag_bytes[0] };
+                let first = if is_neg_coef {
+                    mag_bytes[0] | 0x80
+                } else {
+                    mag_bytes[0]
+                };
                 payload.push(first);
                 payload.extend_from_slice(&mag_bytes[1..]);
             }
@@ -451,7 +458,9 @@ pub fn decode_varint_slice(buf: &[u8], offset: &mut usize) -> Result<i64, IonErr
     while *offset < buf.len() {
         count += 1;
         if count > 10 || (count == 10 && mag > (u64::MAX >> 7)) {
-            return Err(IonError::MalformedIon("VarInt exceeds 10 bytes or overflows".into()));
+            return Err(IonError::MalformedIon(
+                "VarInt exceeds 10 bytes or overflows".into(),
+            ));
         }
         let b = buf[*offset];
         *offset += 1;
@@ -495,7 +504,11 @@ impl<'a> IonReader<'a> {
         if buf.starts_with(&ION_BVM) {
             offset = 4;
         }
-        Self { buf, offset, depth: 0 }
+        Self {
+            buf,
+            offset,
+            depth: 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -523,7 +536,9 @@ impl<'a> IonReader<'a> {
     /// Decodes a single Ion value strictly bounded within `limit` bytes.
     fn decode_value_bounded(&mut self, limit: usize) -> Result<IonValue, IonError> {
         if self.depth > Self::MAX_RECURSION_DEPTH {
-            return Err(IonError::MalformedIon("Recursion depth limit exceeded".into()));
+            return Err(IonError::MalformedIon(
+                "Recursion depth limit exceeded".into(),
+            ));
         }
         if self.offset >= limit {
             return Err(IonError::UnexpectedEof(self.offset));
@@ -640,7 +655,9 @@ impl<'a> IonReader<'a> {
                     }
                     let mantissa_bytes = &self.buf[cur..payload_end];
                     if mantissa_bytes.len() > 8 {
-                        return Err(IonError::MalformedIon("Mantissa length exceeds 8 bytes".into()));
+                        return Err(IonError::MalformedIon(
+                            "Mantissa length exceeds 8 bytes".into(),
+                        ));
                     }
                     let mut mantissa: i64 = 0;
                     if !mantissa_bytes.is_empty() {
@@ -673,7 +690,9 @@ impl<'a> IonReader<'a> {
                             IonError::MalformedIon("Decimal exponent negation overflow".into())
                         })? as usize;
                         if shift > 64 {
-                            return Err(IonError::MalformedIon("Decimal shift exceeds bound".into()));
+                            return Err(IonError::MalformedIon(
+                                "Decimal shift exceeds bound".into(),
+                            ));
                         }
                         let m_str = format!("{}", mantissa.unsigned_abs());
                         let sign = if mantissa < 0 { "-" } else { "" };
@@ -682,11 +701,18 @@ impl<'a> IonReader<'a> {
                             IonValue::Decimal(format!("{}0.{}{}", sign, zeros, m_str))
                         } else {
                             let split_pos = m_str.len() - shift;
-                            IonValue::Decimal(format!("{}{}.{}", sign, &m_str[..split_pos], &m_str[split_pos..]))
+                            IonValue::Decimal(format!(
+                                "{}{}.{}",
+                                sign,
+                                &m_str[..split_pos],
+                                &m_str[split_pos..]
+                            ))
                         }
                     } else {
                         if exp > 1000 {
-                            return Err(IonError::MalformedIon("Decimal positive exponent exceeds bound".into()));
+                            return Err(IonError::MalformedIon(
+                                "Decimal positive exponent exceeds bound".into(),
+                            ));
                         }
                         IonValue::Decimal(format!("{}e{}", mantissa, exp))
                     }
@@ -749,7 +775,9 @@ impl<'a> IonReader<'a> {
             0xE => {
                 self.offset = payload_start;
                 let annot_length = decode_varuint(self.buf, &mut self.offset)? as usize;
-                let annot_end = self.offset.checked_add(annot_length)
+                let annot_end = self
+                    .offset
+                    .checked_add(annot_length)
                     .filter(|&end| end <= payload_end)
                     .ok_or(IonError::UnexpectedEof(payload_end))?;
                 let mut annotations = Vec::new();
@@ -982,7 +1010,9 @@ mod tests {
         // Must not panic with debug integer negation overflow!
         let min_neg_int = [0x38, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         let mut r3 = IonReader::new(&min_neg_int);
-        let val = r3.decode_value().expect("Should decode i64::MIN without negation panic");
+        let val = r3
+            .decode_value()
+            .expect("Should decode i64::MIN without negation panic");
         assert_eq!(val, IonValue::Int(i64::MIN));
     }
 
@@ -1148,7 +1178,10 @@ mod tests {
 
         let mut reader = IonReader::new(&malformed);
         let result = reader.decode_value();
-        assert!(result.is_err(), "Child element exceeding parent container bounds must return Err");
+        assert!(
+            result.is_err(),
+            "Child element exceeding parent container bounds must return Err"
+        );
     }
 
     #[test]
@@ -1158,6 +1191,8 @@ mod tests {
         let mut reader = IonReader::new(&malformed);
         let result = reader.decode_value();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), IonError::MalformedIon(msg) if msg.contains("Invalid Ion float length")));
+        assert!(
+            matches!(result.unwrap_err(), IonError::MalformedIon(msg) if msg.contains("Invalid Ion float length"))
+        );
     }
 }

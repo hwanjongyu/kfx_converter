@@ -46,13 +46,22 @@ fn main() {
                 println!("Valid KFX Container:");
                 println!("  Version: {}", container.header.version);
                 println!("  Header Length: {} bytes", container.header.header_length);
-                println!("  ContainerInfo Offset: {} bytes", container.header.info_offset);
-                println!("  ContainerInfo Length: {} bytes", container.header.info_length);
+                println!(
+                    "  ContainerInfo Offset: {} bytes",
+                    container.header.info_offset
+                );
+                println!(
+                    "  ContainerInfo Length: {} bytes",
+                    container.header.info_length
+                );
                 println!("  Total Chunks: {}", container.chunks.len());
                 for (i, c) in container.chunks.iter().take(10).enumerate() {
-                    let type_name = kfx_converter::symbol_name(c.chunk_type as u64).unwrap_or("unknown");
-                    println!("    [{}] ID: {}, Type: {} ($), Offset: {}, Length: {} bytes",
-                        i, c.entity_id, type_name, c.offset, c.length);
+                    let type_name =
+                        kfx_converter::symbol_name(c.chunk_type as u64).unwrap_or("unknown");
+                    println!(
+                        "    [{}] ID: {}, Type: {} ($), Offset: {}, Length: {} bytes",
+                        i, c.entity_id, type_name, c.offset, c.length
+                    );
                 }
                 if container.chunks.len() > 10 {
                     println!("    ... and {} more chunks", container.chunks.len() - 10);
@@ -99,23 +108,39 @@ fn main() {
                     println!("  [ENHANCEMENT] Cover normalized to baseline JPEG");
                 }
                 if let Some(gloss_count) = report.word_wise_glosses {
-                    println!("  [ENHANCEMENT] Word Wise sidecar generated ({} glosses)", gloss_count);
+                    println!(
+                        "  [ENHANCEMENT] Word Wise sidecar generated ({} glosses)",
+                        gloss_count
+                    );
                 }
                 if report.synced_to_device {
                     if let Some(dest) = report.synced_device_path {
-                        println!("-> [SYNC SUCCESS] Sideloaded to Kindle with lockscreen cover: {:?}", dest);
+                        println!(
+                            "-> [SYNC SUCCESS] Sideloaded to Kindle with lockscreen cover: {:?}",
+                            dest
+                        );
                     }
                 } else if args.sync {
                     if let Some(err) = report.sync_error {
                         eprintln!("-> [SYNC WARNING] Failed to transfer to device: {}", err);
-                    } else if let Some(usb) = kfx_converter::KindleSync::probe_unmounted_usb_kindle() {
-                        eprintln!("-> [SYNC NOTICE] Amazon Kindle USB hardware (1949:{}, '{}') detected, but no active filesystem mount was found.", usb.product_id, usb.product_name);
-                        eprintln!("-> [TIP] In headless Linux or Docker, mount with 'jmtpfs /media/Kindle' or specify 'KINDLE_ROOT=/path/to/mount'.");
+                    } else if let Some(usb) =
+                        kfx_converter::KindleSync::probe_unmounted_usb_kindle()
+                    {
+                        eprintln!(
+                            "-> [SYNC NOTICE] Amazon Kindle USB hardware (1949:{}, '{}') detected, but no active filesystem mount was found.",
+                            usb.product_id, usb.product_name
+                        );
+                        eprintln!(
+                            "-> [TIP] In headless Linux or Docker, mount with 'jmtpfs /media/Kindle' or specify 'KINDLE_ROOT=/path/to/mount'."
+                        );
                     } else {
                         println!("-> [SYNC NOTICE] No Kindle device detected (USB / MTP).");
                     }
                 } else if let Some(root) = kfx_converter::KindleSync::detect_kindle_root() {
-                    println!("-> [TIP] Connected Kindle detected at {:?}. Use '--sync' ('-s') to automatically install with lockscreen cover thumbnails.", root);
+                    println!(
+                        "-> [TIP] Connected Kindle detected at {:?}. Use '--sync' ('-s') to automatically install with lockscreen cover thumbnails.",
+                        root
+                    );
                 }
             }
             Err(e) => {

@@ -1,7 +1,7 @@
 //! Packager error definitions.
 
-use thiserror::Error;
 use crate::container::ContainerError;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum PackagerError {

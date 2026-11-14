@@ -1,8 +1,8 @@
 //! Local symbols and ID generators for Amazon KFX packaging.
 
-use std::collections::HashMap;
-use sha1::{Digest, Sha1};
 use crate::ion::{IonValue, IonWriter};
+use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 
 pub const SINGLETON_ID: u32 = 348; // $null in KFX symbol table
 pub const AMAZON_YJ_SYMBOLS_MAX_ID: u32 = 851;
@@ -45,20 +45,15 @@ impl LocalSymbols {
     pub fn to_ion_symbol_table(&self) -> Vec<u8> {
         let import_entry = IonValue::Struct(vec![
             (4, IonValue::String("YJ_symbols".to_string())), // $4 = name
-            (5, IonValue::Int(10)),                         // $5 = version
+            (5, IonValue::Int(10)),                          // $5 = version
             (8, IonValue::Int(AMAZON_YJ_SYMBOLS_MAX_ID as i64)), // $8 = max_id in YJ_symbols shared table
         ]);
-        let sym_values: Vec<IonValue> = self
-            .names
-            .iter()
-            .cloned()
-            .map(IonValue::String)
-            .collect();
+        let sym_values: Vec<IonValue> = self.names.iter().cloned().map(IonValue::String).collect();
         let max_sid = AMAZON_YJ_SYMBOLS_MAX_ID as i64 + self.names.len() as i64;
         let symtab_struct = IonValue::Struct(vec![
-            (8, IonValue::Int(max_sid)),             // $8 = max_id of this document symbol table
+            (8, IonValue::Int(max_sid)), // $8 = max_id of this document symbol table
             (6, IonValue::List(vec![import_entry])), // $6 = imports
-            (7, IonValue::List(sym_values)),         // $7 = symbols
+            (7, IonValue::List(sym_values)), // $7 = symbols
         ]);
 
         let mut sym_writer = IonWriter::new();
@@ -139,7 +134,8 @@ pub fn generate_book_id(seed: &str) -> String {
     raw.push(0x05);
     raw.extend_from_slice(&digest[..16]);
 
-    const URL_SAFE_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const URL_SAFE_CHARS: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut result = String::with_capacity(23);
     let mut i = 0;
     while i + 3 <= raw.len() {

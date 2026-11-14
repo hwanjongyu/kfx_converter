@@ -20,7 +20,9 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
 
     // Case A: An explicit dropcap span already exists (e.g. <span class="dropcap">“</span>).
     // If it contains only an opening quotation mark, borrow the first character from the next non-empty span.
-    let explicit_dropcap_idx = spans.iter().position(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
+    let explicit_dropcap_idx = spans
+        .iter()
+        .position(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
     if let Some(dc_idx) = explicit_dropcap_idx {
         let dc_trimmed = spans[dc_idx].text.trim().to_string();
         let mut dc_chars = dc_trimmed.chars();
@@ -28,7 +30,10 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
             && is_opening_quote(first_ch)
             && dc_chars.next().is_none()
         {
-            let next_pos = spans[dc_idx + 1..].iter().position(|s| !s.text.trim().is_empty()).map(|p| dc_idx + 1 + p);
+            let next_pos = spans[dc_idx + 1..]
+                .iter()
+                .position(|s| !s.text.trim().is_empty())
+                .map(|p| dc_idx + 1 + p);
             if let Some(n_idx) = next_pos {
                 let next_span = &mut spans[n_idx];
                 let next_trimmed = next_span.text.trim_start();
@@ -50,9 +55,7 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
     }
 
     // Case B: Automatic dropcap extraction from paragraph styling (e.g. <p class="has-dropcap">)
-    if p_dropcap
-        && let Some(first_idx) = spans.iter().position(|s| !s.text.trim().is_empty())
-    {
+    if p_dropcap && let Some(first_idx) = spans.iter().position(|s| !s.text.trim().is_empty()) {
         let orig_text = spans[first_idx].text.clone();
         let mut char_indices = orig_text.char_indices().peekable();
 
@@ -124,13 +127,16 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
             spans[first_idx].text = drop_text;
             spans[first_idx].style = Some(drop_style);
             if !rest_text.is_empty() {
-                spans.insert(first_idx + 1, TextSpan {
-                    text: rest_text,
-                    style: orig_style,
-                    anchor_id: None,
-                    href: None,
-                    ruby: None,
-                });
+                spans.insert(
+                    first_idx + 1,
+                    TextSpan {
+                        text: rest_text,
+                        style: orig_style,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                );
             }
         }
     }

@@ -3,9 +3,9 @@
 //! Transcodes cover images to Kindle OS baseline JPEG format (RGB, no progressive scan,
 //! standard thumbnail dimensions max 440x660) to guarantee lockscreen cover compatibility.
 
-use std::io::Cursor;
-use image::imageops::FilterType;
 use image::DynamicImage;
+use image::imageops::FilterType;
+use std::io::Cursor;
 use thiserror::Error;
 
 pub const KINDLE_THUMB_MAX_WIDTH: u32 = 440;
@@ -40,12 +40,13 @@ impl CoverOptimizer {
             }
         } else {
             return Err(CoverError::Decode(image::ImageError::Decoding(
-                image::error::DecodingError::from_format_hint(image::error::ImageFormatHint::Unknown),
+                image::error::DecodingError::from_format_hint(
+                    image::error::ImageFormatHint::Unknown,
+                ),
             )));
         }
 
-        let mut reader = image::ImageReader::new(Cursor::new(data))
-            .with_guessed_format()?;
+        let mut reader = image::ImageReader::new(Cursor::new(data)).with_guessed_format()?;
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(MAX_SAFE_IMAGE_DIMENSION);
         limits.max_image_height = Some(MAX_SAFE_IMAGE_DIMENSION);
@@ -235,7 +236,9 @@ mod tests {
         // 1. Image already within bounds (500x500) -> bytes returned untouched
         let small_img = RgbaImage::new(500, 500);
         let mut small_bytes = Cursor::new(Vec::new());
-        small_img.write_to(&mut small_bytes, ImageFormat::Png).unwrap();
+        small_img
+            .write_to(&mut small_bytes, ImageFormat::Png)
+            .unwrap();
         let small_raw = small_bytes.into_inner();
         let result = CoverOptimizer::optimize_content_image(&small_raw, 2560).unwrap();
         assert_eq!(result, small_raw);
@@ -244,7 +247,8 @@ mod tests {
         let big_img = RgbaImage::new(3000, 2000);
         let mut big_bytes = Cursor::new(Vec::new());
         big_img.write_to(&mut big_bytes, ImageFormat::Png).unwrap();
-        let result_big = CoverOptimizer::optimize_content_image(&big_bytes.into_inner(), 2560).unwrap();
+        let result_big =
+            CoverOptimizer::optimize_content_image(&big_bytes.into_inner(), 2560).unwrap();
         let decoded_big = image::load_from_memory(&result_big).unwrap();
         assert!(decoded_big.width() <= 2560);
         assert!(decoded_big.height() <= 2560);
@@ -254,7 +258,28 @@ mod tests {
     fn test_optimize_content_image_progressive_jpeg_converted_to_baseline() {
         // A minimal valid Progressive JPEG (SOF2 marker [0xFF, 0xC2])
         let prog_jpeg: [u8; 521] = [
-            255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67, 0, 8, 6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18, 19, 15, 20, 29, 26, 31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40, 55, 41, 44, 48, 49, 52, 52, 52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 219, 0, 67, 1, 9, 9, 9, 12, 11, 12, 24, 13, 13, 24, 50, 33, 28, 33, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 255, 194, 0, 17, 8, 0, 10, 0, 10, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 21, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 255, 196, 0, 21, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6, 255, 218, 0, 12, 3, 1, 0, 2, 16, 3, 16, 0, 0, 1, 138, 12, 184, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 5, 2, 31, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 1, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 1, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 6, 63, 2, 31, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 63, 33, 31, 255, 218, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 0, 16, 7, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 16, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 16, 127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 63, 16, 31, 255, 217
+            255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0,
+            67, 0, 8, 6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18,
+            19, 15, 20, 29, 26, 31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40,
+            55, 41, 44, 48, 49, 52, 52, 52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 219,
+            0, 67, 1, 9, 9, 9, 12, 11, 12, 24, 13, 13, 24, 50, 33, 28, 33, 50, 50, 50, 50, 50, 50,
+            50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+            50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+            255, 194, 0, 17, 8, 0, 10, 0, 10, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 21, 0,
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 255, 196, 0, 21, 1, 1, 1, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6, 255, 218, 0, 12, 3, 1, 0, 2, 16, 3, 16, 0, 0,
+            1, 138, 12, 184, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            32, 255, 218, 0, 8, 1, 1, 0, 1, 5, 2, 31, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 1, 127, 255, 196, 0, 20, 17,
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 1,
+            127, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218,
+            0, 8, 1, 1, 0, 6, 63, 2, 31, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 63, 33, 31, 255, 218, 0, 12, 3, 1, 0, 2, 0,
+            3, 0, 0, 0, 16, 7, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 255, 218, 0, 8, 1, 3, 1, 1, 63, 16, 127, 255, 196, 0, 20, 17, 1, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 218, 0, 8, 1, 2, 1, 1, 63, 16, 127, 255, 196, 0, 20,
+            16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 255, 218, 0, 8, 1, 1, 0, 1, 63,
+            16, 31, 255, 217,
         ];
         assert!(prog_jpeg.windows(2).any(|w| w == [0xff, 0xc2]));
 
@@ -269,9 +294,9 @@ mod tests {
     fn test_image_bomb_dimension_rejection() {
         // Minimal valid PNG (65 bytes) with 10,000 x 10,000 dimensions
         let png_bytes: [u8; 65] = [
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 39, 16, 0, 0,
-            39, 16, 8, 0, 0, 0, 0, 159, 37, 61, 251, 0, 0, 0, 8, 73, 68, 65, 84, 120, 156, 3,
-            0, 0, 0, 0, 1, 72, 6, 137, 210, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 39, 16, 0, 0, 39,
+            16, 8, 0, 0, 0, 0, 159, 37, 61, 251, 0, 0, 0, 8, 73, 68, 65, 84, 120, 156, 3, 0, 0, 0,
+            0, 1, 72, 6, 137, 210, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
         ];
 
         let res = CoverOptimizer::optimize_content_image(&png_bytes, 2560);
@@ -287,7 +312,8 @@ mod tests {
         let mut png_bytes = Cursor::new(Vec::new());
         rgba.write_to(&mut png_bytes, ImageFormat::Png).unwrap();
 
-        let cover_jpeg = CoverOptimizer::optimize_cover_image(&png_bytes.into_inner(), 2560).unwrap();
+        let cover_jpeg =
+            CoverOptimizer::optimize_cover_image(&png_bytes.into_inner(), 2560).unwrap();
         println!("Cover JPEG header: {:02x?}", &cover_jpeg[..20]);
         assert_eq!(&cover_jpeg[0..2], b"\xff\xd8"); // Baseline JPEG SOI
         let decoded = image::load_from_memory(&cover_jpeg).unwrap();
@@ -312,11 +338,41 @@ mod tests {
 
         // Also test thumbnail optimization with opaque image
         let mut jpeg_bytes = Cursor::new(Vec::new());
-        dynamic.write_to(&mut jpeg_bytes, ImageFormat::Jpeg).unwrap();
+        dynamic
+            .write_to(&mut jpeg_bytes, ImageFormat::Jpeg)
+            .unwrap();
         let thumb_bytes = CoverOptimizer::optimize_thumbnail(&jpeg_bytes.into_inner()).unwrap();
         assert_eq!(&thumb_bytes[0..2], b"\xff\xd8");
         let decoded_thumb = image::load_from_memory(&thumb_bytes).unwrap();
         assert!(decoded_thumb.width() <= KINDLE_THUMB_MAX_WIDTH);
         assert!(decoded_thumb.height() <= KINDLE_THUMB_MAX_HEIGHT as u32);
+    }
+
+    #[test]
+    fn test_cover_optimizer_empty_and_corrupt_data() {
+        assert!(matches!(
+            CoverOptimizer::optimize_thumbnail(&[]),
+            Err(CoverError::EmptyData)
+        ));
+        assert!(matches!(
+            CoverOptimizer::optimize_cover_image(&[], 2560),
+            Err(CoverError::EmptyData)
+        ));
+        assert!(matches!(
+            CoverOptimizer::optimize_content_image(&[], 2560),
+            Err(CoverError::EmptyData)
+        ));
+        assert_eq!(CoverOptimizer::get_image_dimensions(&[]), None);
+        assert_eq!(
+            CoverOptimizer::get_image_dimensions(b"NOT_A_JPEG_OR_PNG"),
+            None
+        );
+
+        // Corrupted random bytes
+        let corrupt = b"CORRUPTED_IMAGE_RANDOM_DATA_HEADER";
+        assert!(matches!(
+            CoverOptimizer::optimize_thumbnail(corrupt),
+            Err(CoverError::Decode(_))
+        ));
     }
 }

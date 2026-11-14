@@ -1,7 +1,7 @@
-use gpui::*;
+use super::KindleStudio;
 use crate::state::StudioTab;
 use crate::theme::Theme;
-use super::KindleStudio;
+use gpui::*;
 
 impl KindleStudio {
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -53,7 +53,11 @@ impl KindleStudio {
                             .px_3()
                             .py_0p5()
                             .rounded_md()
-                            .bg(if *is_err { Theme::accent_red() } else { Theme::accent_green() })
+                            .bg(if *is_err {
+                                Theme::accent_red()
+                            } else {
+                                Theme::accent_green()
+                            })
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
                             .text_color(Theme::text_primary())
@@ -79,41 +83,46 @@ impl KindleStudio {
                                     .child(self.device.model.clone()),
                             ),
                     )
-                    .child(
-                        if self.device.connected {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .w_16()
-                                        .h_1p5()
-                                        .rounded_full()
-                                        .bg(Theme::border())
-                                        .child(
-                                            div()
-                                                .h_full()
-                                                .rounded_full()
-                                                .bg(if used_fraction > 0.85 { Theme::accent_red() } else { Theme::accent_green() })
-                                                .w(DefiniteLength::Fraction(used_fraction)),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(Theme::text_muted())
-                                        .child(format!("{:.1}G/{:.1}G", self.device.used_gb, self.device.total_gb)),
-                                )
-                                .into_any_element()
-                        } else {
-                            div()
-                                .text_xs()
-                                .text_color(Theme::text_muted())
-                                .child("Device Required")
-                                .into_any_element()
-                        }
-                    )
+                    .child(if self.device.connected {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w_16()
+                                    .h_1p5()
+                                    .rounded_full()
+                                    .bg(Theme::border())
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .rounded_full()
+                                            .bg(if used_fraction > 0.85 {
+                                                Theme::accent_red()
+                                            } else {
+                                                Theme::accent_green()
+                                            })
+                                            .w(DefiniteLength::Fraction(used_fraction)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .child(format!(
+                                        "{:.1}G/{:.1}G",
+                                        self.device.used_gb, self.device.total_gb
+                                    )),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_xs()
+                            .text_color(Theme::text_muted())
+                            .child("Device Required")
+                            .into_any_element()
+                    })
                     .children(if self.device.connected {
                         Some(
                             div()
@@ -175,8 +184,16 @@ impl KindleStudio {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
-                    .bg(if is_dual { Theme::bg_card() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-                    .text_color(if is_dual { Theme::accent_amber() } else { Theme::text_muted() })
+                    .bg(if is_dual {
+                        Theme::bg_card()
+                    } else {
+                        hsla(0.0, 0.0, 0.0, 0.0)
+                    })
+                    .text_color(if is_dual {
+                        Theme::accent_amber()
+                    } else {
+                        Theme::text_muted()
+                    })
                     .child("⚡ Dual-Pane")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::DualPane;
@@ -192,8 +209,16 @@ impl KindleStudio {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
-                    .bg(if is_convert { Theme::bg_card() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-                    .text_color(if is_convert { Theme::accent_amber() } else { Theme::text_muted() })
+                    .bg(if is_convert {
+                        Theme::bg_card()
+                    } else {
+                        hsla(0.0, 0.0, 0.0, 0.0)
+                    })
+                    .text_color(if is_convert {
+                        Theme::accent_amber()
+                    } else {
+                        Theme::text_muted()
+                    })
                     .child("📥 Converter Queue")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::Convert;
@@ -209,8 +234,16 @@ impl KindleStudio {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
-                    .bg(if is_folder { Theme::bg_card() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-                    .text_color(if is_folder { Theme::accent_amber() } else { Theme::text_muted() })
+                    .bg(if is_folder {
+                        Theme::bg_card()
+                    } else {
+                        hsla(0.0, 0.0, 0.0, 0.0)
+                    })
+                    .text_color(if is_folder {
+                        Theme::accent_amber()
+                    } else {
+                        Theme::text_muted()
+                    })
                     .child("📂 Local Folder")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::LocalFolder;
@@ -226,8 +259,16 @@ impl KindleStudio {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
-                    .bg(if is_explorer { Theme::bg_card() } else { hsla(0.0, 0.0, 0.0, 0.0) })
-                    .text_color(if is_explorer { Theme::accent_amber() } else { Theme::text_muted() })
+                    .bg(if is_explorer {
+                        Theme::bg_card()
+                    } else {
+                        hsla(0.0, 0.0, 0.0, 0.0)
+                    })
+                    .text_color(if is_explorer {
+                        Theme::accent_amber()
+                    } else {
+                        Theme::text_muted()
+                    })
                     .child("📚 Kindle Explorer")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::Explorer;

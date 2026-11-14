@@ -23,7 +23,11 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
             }
             let p_lc = p_trim.to_ascii_lowercase();
             let p = crate::css::intern_css_property(&p_lc);
-            let v = val.trim().trim_end_matches("!important").trim().to_ascii_lowercase();
+            let v = val
+                .trim()
+                .trim_end_matches("!important")
+                .trim()
+                .to_ascii_lowercase();
             if let Some(existing) = merged.iter_mut().find(|(k, _)| *k == p) {
                 existing.1 = v;
             } else {
@@ -71,7 +75,12 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
             }
             "text-indent" => {
                 let trimmed = v.trim();
-                if trimmed == "0" || trimmed == "0em" || trimmed == "0px" || trimmed == "0%" || trimmed == "0pt" {
+                if trimmed == "0"
+                    || trimmed == "0em"
+                    || trimmed == "0px"
+                    || trimmed == "0%"
+                    || trimmed == "0pt"
+                {
                     tokens.push("indent_none".to_string());
                 } else if trimmed.starts_with('-') {
                     tokens.push("hanging_indent".to_string());
@@ -115,7 +124,10 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
                 if v.contains('-') {
                     let bytes = v.as_bytes();
                     for i in 0..bytes.len() {
-                        if bytes[i] == b'-' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.') {
+                        if bytes[i] == b'-'
+                            && i + 1 < bytes.len()
+                            && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.')
+                        {
                             has_negative_margin = true;
                             break;
                         }
@@ -126,7 +138,10 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
                 if v.contains('-') {
                     let bytes = v.as_bytes();
                     for i in 0..bytes.len() {
-                        if bytes[i] == b'-' && i + 1 < bytes.len() && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.') {
+                        if bytes[i] == b'-'
+                            && i + 1 < bytes.len()
+                            && (bytes[i + 1].is_ascii_digit() || bytes[i + 1] == b'.')
+                        {
                             has_negative_margin = true;
                             break;
                         }
@@ -156,7 +171,10 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
                     || v.replace(' ', "") == "rgb(0,0,0)"
                     || v.replace(' ', "") == "rgba(0,0,0,1)";
                 if !is_pure_black {
-                    tokens.push(format!("color_{}", v.replace(['#', ' ', '(', ')', ','], "_")));
+                    tokens.push(format!(
+                        "color_{}",
+                        v.replace(['#', ' ', '(', ')', ','], "_")
+                    ));
                 }
             }
             "page-break-before" | "break-before" => {

@@ -1,13 +1,22 @@
-use gpui::*;
+use super::KindleStudio;
 use crate::state::{BatchProgressState, EpubSortField, LocalEpubItem, LocalEpubStatus};
 use crate::theme::Theme;
-use super::KindleStudio;
+use gpui::*;
 
 impl KindleStudio {
     /// Renders the Local Folder EPUB Browser View (Path selector, Filter/Selection bar, Table, Batch actions).
-    pub(super) fn render_folder_browser_view(&self, cx: &mut Context<Self>, in_split: bool) -> impl IntoElement {
+    pub(super) fn render_folder_browser_view(
+        &self,
+        cx: &mut Context<Self>,
+        in_split: bool,
+    ) -> impl IntoElement {
         let _ = in_split;
-        let selected_count = self.folder_state.items.iter().filter(|i| i.is_selected).count();
+        let selected_count = self
+            .folder_state
+            .items
+            .iter()
+            .filter(|i| i.is_selected)
+            .count();
         let total_count = self.folder_state.items.len();
 
         let filtered_indices = self.folder_state.sorted_and_filtered_indices();
@@ -442,60 +451,50 @@ impl KindleStudio {
                     .child("☐"),
             )
             // 1. Title Column Header
-            .child(
-                self.render_sort_column_cell(
-                    "Title",
-                    EpubSortField::Title,
-                    sort_field,
-                    sort_dir,
-                    div().flex_1().min_w_0(),
-                    cx,
-                )
-            )
+            .child(self.render_sort_column_cell(
+                "Title",
+                EpubSortField::Title,
+                sort_field,
+                sort_dir,
+                div().flex_1().min_w_0(),
+                cx,
+            ))
             // 2. Author Column Header
-            .child(
-                self.render_sort_column_cell(
-                    "Author",
-                    EpubSortField::Author,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(140.0)).flex_shrink_0().min_w_0(),
-                    cx,
-                )
-            )
+            .child(self.render_sort_column_cell(
+                "Author",
+                EpubSortField::Author,
+                sort_field,
+                sort_dir,
+                div().w(px(140.0)).flex_shrink_0().min_w_0(),
+                cx,
+            ))
             // 3. Size Column Header
-            .child(
-                self.render_sort_column_cell(
-                    "Size",
-                    EpubSortField::FileSize,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(70.0)).flex_shrink_0(),
-                    cx,
-                )
-            )
+            .child(self.render_sort_column_cell(
+                "Size",
+                EpubSortField::FileSize,
+                sort_field,
+                sort_dir,
+                div().w(px(70.0)).flex_shrink_0(),
+                cx,
+            ))
             // 4. Date Column Header
-            .child(
-                self.render_sort_column_cell(
-                    "Date",
-                    EpubSortField::DateModified,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(85.0)).flex_shrink_0(),
-                    cx,
-                )
-            )
+            .child(self.render_sort_column_cell(
+                "Date",
+                EpubSortField::DateModified,
+                sort_field,
+                sort_dir,
+                div().w(px(85.0)).flex_shrink_0(),
+                cx,
+            ))
             // 5. Status Column Header
-            .child(
-                self.render_sort_column_cell(
-                    "Status",
-                    EpubSortField::Status,
-                    sort_field,
-                    sort_dir,
-                    div().w(px(160.0)).flex_shrink_0(),
-                    cx,
-                )
-            )
+            .child(self.render_sort_column_cell(
+                "Status",
+                EpubSortField::Status,
+                sort_field,
+                sort_dir,
+                div().w(px(160.0)).flex_shrink_0(),
+                cx,
+            ))
             // Scrollbar spacer (14px)
             .child(div().w(px(14.0)).flex_shrink_0())
     }
@@ -513,24 +512,60 @@ impl KindleStudio {
         };
 
         let status_badge = match &item.status {
-            LocalEpubStatus::Unconverted => {
-                div().px_2().py_0p5().rounded_md().bg(Theme::bg_card_hover()).text_xs().text_color(Theme::text_muted()).child("⚪ Unconverted")
-            }
-            LocalEpubStatus::InQueue => {
-                div().px_2().py_0p5().rounded_md().bg(Theme::bg_card_hover()).border_1().border_color(Theme::border()).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(Theme::text_muted()).child("⏳ In Queue")
-            }
-            LocalEpubStatus::Processing { stage, progress } => {
-                div().px_2().py_0p5().rounded_md().bg(Theme::accent_amber()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child(format!("🟡 {} ({}%)", stage, progress))
-            }
-            LocalEpubStatus::ConvertedLocal => {
-                div().px_2().py_0p5().rounded_md().bg(Theme::accent_blue()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::text_primary()).child("🔵 Local KFX")
-            }
-            LocalEpubStatus::OnDevice => {
-                div().px_2().py_0p5().rounded_md().bg(Theme::accent_green()).text_xs().font_weight(FontWeight::BOLD).text_color(Theme::bg_root()).child("🟢 On Kindle")
-            }
-            LocalEpubStatus::Error(err) => {
-                div().px_2().py_0p5().rounded_md().bg(Theme::accent_red()).text_xs().text_color(Theme::text_primary()).child(format!("Error: {}", err))
-            }
+            LocalEpubStatus::Unconverted => div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(Theme::bg_card_hover())
+                .text_xs()
+                .text_color(Theme::text_muted())
+                .child("⚪ Unconverted"),
+            LocalEpubStatus::InQueue => div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(Theme::bg_card_hover())
+                .border_1()
+                .border_color(Theme::border())
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(Theme::text_muted())
+                .child("⏳ In Queue"),
+            LocalEpubStatus::Processing { stage, progress } => div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(Theme::accent_amber())
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(Theme::bg_root())
+                .child(format!("🟡 {} ({}%)", stage, progress)),
+            LocalEpubStatus::ConvertedLocal => div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(Theme::accent_blue())
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(Theme::text_primary())
+                .child("🔵 Local KFX"),
+            LocalEpubStatus::OnDevice => div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(Theme::accent_green())
+                .text_xs()
+                .font_weight(FontWeight::BOLD)
+                .text_color(Theme::bg_root())
+                .child("🟢 On Kindle"),
+            LocalEpubStatus::Error(err) => div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(Theme::accent_red())
+                .text_xs()
+                .text_color(Theme::text_primary())
+                .child(format!("Error: {}", err)),
         };
 
         let quick_btn = if item.status == LocalEpubStatus::Unconverted {
@@ -550,10 +585,12 @@ impl KindleStudio {
                     .child("⚡ Convert")
                     .on_click(move |_ev, _window, cx| {
                         cx.stop_propagation();
-                        view_quick.update(cx, |this, cx| {
-                            this.convert_single_epub(p.clone(), false, cx);
-                        }).ok();
-                    })
+                        view_quick
+                            .update(cx, |this, cx| {
+                                this.convert_single_epub(p.clone(), false, cx);
+                            })
+                            .ok();
+                    }),
             )
         } else {
             None
@@ -576,30 +613,40 @@ impl KindleStudio {
                     .h(px(62.0))
                     .px_3()
                     .rounded_xl()
-                    .bg(if is_sel { Theme::bg_card_hover() } else { Theme::bg_card() })
+                    .bg(if is_sel {
+                        Theme::bg_card_hover()
+                    } else {
+                        Theme::bg_card()
+                    })
                     .border_1()
-                    .border_color(if is_sel { Theme::accent_amber() } else { Theme::border() })
+                    .border_color(if is_sel {
+                        Theme::accent_amber()
+                    } else {
+                        Theme::border()
+                    })
                     .cursor_pointer()
                     .gap_2()
                     .on_click(move |_ev, _window, cx| {
-                        view_select.update(cx, |this, cx| {
-                            this.toggle_item_selection(item_id, cx);
-                        }).ok();
+                        view_select
+                            .update(cx, |this, cx| {
+                                this.toggle_item_selection(item_id, cx);
+                            })
+                            .ok();
                     })
-                    .child(
-                        if is_processing {
-                            div()
-                                .absolute()
-                                .bottom_0()
-                                .left_0()
-                                .h(px(3.0))
-                                .bg(Theme::accent_amber())
-                                .w(DefiniteLength::Fraction((progress_val as f32 / 100.0).clamp(0.08, 1.0)))
-                                .into_any_element()
-                        } else {
-                            div().into_any_element()
-                        }
-                    )
+                    .child(if is_processing {
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .h(px(3.0))
+                            .bg(Theme::accent_amber())
+                            .w(DefiniteLength::Fraction(
+                                (progress_val as f32 / 100.0).clamp(0.08, 1.0),
+                            ))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
                     // Checkbox
                     .child(
                         div()
@@ -614,8 +661,16 @@ impl KindleStudio {
                                     .h_5()
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(if is_sel { Theme::accent_amber() } else { Theme::border() })
-                                    .bg(if is_sel { Theme::accent_amber() } else { hsla(0.0, 0.0, 0.0, 0.0) })
+                                    .border_color(if is_sel {
+                                        Theme::accent_amber()
+                                    } else {
+                                        Theme::border()
+                                    })
+                                    .bg(if is_sel {
+                                        Theme::accent_amber()
+                                    } else {
+                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                    })
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -668,27 +723,21 @@ impl KindleStudio {
                     )
                     // 3. Size Column
                     .child(
-                        div()
-                            .w(px(70.0))
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(Theme::text_muted())
-                                    .child(item.file_size_str.clone()),
-                            ),
+                        div().w(px(70.0)).flex_shrink_0().child(
+                            div()
+                                .text_xs()
+                                .text_color(Theme::text_muted())
+                                .child(item.file_size_str.clone()),
+                        ),
                     )
                     // 4. Date Column
                     .child(
-                        div()
-                            .w(px(85.0))
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(Theme::text_muted())
-                                    .child(item.modified_str.clone()),
-                            ),
+                        div().w(px(85.0)).flex_shrink_0().child(
+                            div()
+                                .text_xs()
+                                .text_color(Theme::text_muted())
+                                .child(item.modified_str.clone()),
+                        ),
                     )
                     // 5. Status & Actions Column
                     .child(
@@ -706,10 +755,15 @@ impl KindleStudio {
             .into_any_element()
     }
 
-    pub(super) fn render_batch_progress_bar(&self, bp: &BatchProgressState, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_batch_progress_bar(
+        &self,
+        bp: &BatchProgressState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let pct = bp.overall_percentage();
         let frac = bp.overall_progress();
-        let is_done = (bp.completed_tasks + bp.failed_tasks >= bp.total_tasks || bp.is_cancelled) && bp.active_tasks == 0;
+        let is_done = (bp.completed_tasks + bp.failed_tasks >= bp.total_tasks || bp.is_cancelled)
+            && bp.active_tasks == 0;
         let is_sync = bp.is_sync;
 
         div()

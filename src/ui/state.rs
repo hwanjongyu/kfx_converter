@@ -155,7 +155,8 @@ impl LocalFolderState {
         let search_query = self.search_query.to_lowercase();
         let filter_status = self.filter_status.as_deref();
 
-        let mut indices: Vec<usize> = self.items
+        let mut indices: Vec<usize> = self
+            .items
             .iter()
             .enumerate()
             .filter(|(_, item)| {
@@ -322,12 +323,8 @@ where
         device_root: None,
     };
 
-    let report = kfx_converter::ConversionPipeline::run(
-        input_path,
-        None,
-        &options,
-        progress,
-    ).map_err(|e| e.to_string())?;
+    let report = kfx_converter::ConversionPipeline::run(input_path, None, &options, progress)
+        .map_err(|e| e.to_string())?;
 
     Ok(ConversionResult {
         output_path: report.output_path,
@@ -395,7 +392,11 @@ pub fn scan_local_epub_directory(
     let mut items = Vec::new();
 
     for (id_counter, path) in (1u64..).zip(files) {
-        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let (file_size_bytes, file_size_str) = match std::fs::metadata(&path) {
             Ok(meta) => {
                 let bytes = meta.len();
@@ -409,31 +410,35 @@ pub fn scan_local_epub_directory(
             Err(_) => (0, "0 KB".into()),
         };
 
-        let (modified_timestamp, modified_str) = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-            Ok(time) => {
-                let ts = time
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let duration = time.elapsed().unwrap_or_default();
-                let s = if duration.as_secs() < 60 {
-                    "Just now".into()
-                } else if duration.as_secs() < 3600 {
-                    format!("{}m ago", duration.as_secs() / 60)
-                } else if duration.as_secs() < 86400 {
-                    format!("{}h ago", duration.as_secs() / 3600)
-                } else {
-                    format!("{}d ago", duration.as_secs() / 86400)
-                };
-                (ts, s)
-            }
-            Err(_) => (0, "Unknown".into()),
-        };
+        let (modified_timestamp, modified_str) =
+            match std::fs::metadata(&path).and_then(|m| m.modified()) {
+                Ok(time) => {
+                    let ts = time
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let duration = time.elapsed().unwrap_or_default();
+                    let s = if duration.as_secs() < 60 {
+                        "Just now".into()
+                    } else if duration.as_secs() < 3600 {
+                        format!("{}m ago", duration.as_secs() / 60)
+                    } else if duration.as_secs() < 86400 {
+                        format!("{}h ago", duration.as_secs() / 3600)
+                    } else {
+                        format!("{}d ago", duration.as_secs() / 86400)
+                    };
+                    (ts, s)
+                }
+                Err(_) => (0, "Unknown".into()),
+            };
 
         let (title, author) = match kfx_converter::EpubReader::read_metadata_from_file(&path) {
             Ok(meta) => {
                 let t = if meta.title.trim().is_empty() {
-                    path.file_stem().unwrap_or_default().to_string_lossy().to_string()
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
                 } else {
                     meta.title
                 };
@@ -445,7 +450,11 @@ pub fn scan_local_epub_directory(
                 (t, a)
             }
             Err(_) => {
-                let t = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let t = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 (t, "Unknown".to_string())
             }
         };
@@ -453,7 +462,9 @@ pub fn scan_local_epub_directory(
         // Determine status
         let local_kfx_exists = path.with_extension("kfx").exists();
         let mut on_kindle = false;
-        if device.connected && let Some(ref doc_dir) = device.path {
+        if device.connected
+            && let Some(ref doc_dir) = device.path
+        {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
             let kindle_kfx = doc_dir.join(format!("{}.kfx", stem));
             let kindle_title_kfx = doc_dir.join(format!("{}.kfx", title));
@@ -526,7 +537,11 @@ mod tests {
 
         let sdr_path = docs_dir.join("TestBook.sdr");
         std::fs::create_dir_all(&sdr_path).expect("Create test sdr dir");
-        std::fs::write(sdr_path.join("LanguageLayer.en.B00TEST.kll"), b"dummy kll db").expect("Write test kll");
+        std::fs::write(
+            sdr_path.join("LanguageLayer.en.B00TEST.kll"),
+            b"dummy kll db",
+        )
+        .expect("Write test kll");
 
         let dev = DeviceStatus {
             connected: true,
@@ -568,7 +583,10 @@ mod tests {
             has_sdr: false,
         };
         let err_res = delete_device_file(dev.path.as_deref(), &outside_f);
-        assert!(err_res.is_err(), "Must reject deletion outside allowed_root");
+        assert!(
+            err_res.is_err(),
+            "Must reject deletion outside allowed_root"
+        );
         assert!(outside_book.exists(), "Outside file must not be deleted");
 
         let files_after = load_device_files(&dev);
@@ -585,7 +603,8 @@ mod tests {
 
         let book1 = author_dir.join("WayOfKings.azw3");
         std::fs::write(&book1, b"azw3 content").expect("Write nested azw3");
-        std::fs::write(nested_sdr.join("LanguageLayer.en.B00WAY.kll"), b"kll db").expect("Write kll");
+        std::fs::write(nested_sdr.join("LanguageLayer.en.B00WAY.kll"), b"kll db")
+            .expect("Write kll");
 
         let store_dir = docs_dir.join("Downloads").join("Items01");
         std::fs::create_dir_all(&store_dir).expect("Create store dir");
@@ -642,10 +661,16 @@ mod tests {
         let items_rec = scan_local_epub_directory(&epub_dir, true, &dummy_dev);
         assert_eq!(items_rec.len(), 2);
 
-        let item1 = items_rec.iter().find(|i| i.filename == "BookOne.epub").unwrap();
+        let item1 = items_rec
+            .iter()
+            .find(|i| i.filename == "BookOne.epub")
+            .unwrap();
         assert_eq!(item1.status, LocalEpubStatus::ConvertedLocal);
 
-        let item2 = items_rec.iter().find(|i| i.filename == "BookTwo.epub").unwrap();
+        let item2 = items_rec
+            .iter()
+            .find(|i| i.filename == "BookTwo.epub")
+            .unwrap();
         assert_eq!(item2.status, LocalEpubStatus::Unconverted);
 
         // 2. Recursive scan = false
@@ -677,7 +702,10 @@ mod tests {
             stage: "Ingesting EPUB".into(),
             progress: 15,
         };
-        assert!(matches!(proc_status, LocalEpubStatus::Processing { progress: 15, .. }));
+        assert!(matches!(
+            proc_status,
+            LocalEpubStatus::Processing { progress: 15, .. }
+        ));
     }
 
     #[test]
@@ -768,4 +796,3 @@ mod tests {
         assert_eq!(filtered, vec![1]);
     }
 }
-
