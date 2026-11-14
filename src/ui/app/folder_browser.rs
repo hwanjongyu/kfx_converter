@@ -1,6 +1,9 @@
 use super::KindleStudio;
-use crate::state::{BatchProgressState, EpubSortField, LocalEpubItem, LocalEpubStatus};
+use crate::state::{
+    BatchProgressState, EpubSortField, LocalEpubItem, LocalEpubStatus, ScanPhase, ScanProgressState,
+};
 use crate::theme::Theme;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 impl KindleStudio {
@@ -101,6 +104,14 @@ impl KindleStudio {
                                     })),
                             ),
                     )
+            )
+            .when(
+                self.folder_state.is_scanning && !self.folder_state.items.is_empty(),
+                |this| {
+                    let fallback = ScanProgressState::discovering();
+                    let sp = self.folder_state.scan_progress.as_ref().unwrap_or(&fallback);
+                    this.child(self.render_scan_progress_banner(sp, cx))
+                },
             )
             // 2. Selection & Filter Toolbar
             .child(
@@ -307,7 +318,11 @@ impl KindleStudio {
                                     .h_full()
                                     .overflow_hidden()
                                     .child(
-                                        if filtered_indices.is_empty() {
+                                        if self.folder_state.is_scanning && self.folder_state.items.is_empty() {
+                                            let fallback = ScanProgressState::discovering();
+                                            let sp = self.folder_state.scan_progress.as_ref().unwrap_or(&fallback);
+                                            self.render_scan_progress_card(sp, cx)
+                                        } else if filtered_indices.is_empty() {
                                             div()
                                                 .size_full()
                                                 .flex()
@@ -750,6 +765,224 @@ impl KindleStudio {
                             .gap_2()
                             .child(status_badge)
                             .children(quick_btn),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn scan_progress_summary(sp: &ScanProgressState) -> (&'static str, String, String, f32) {
+        match &sp.phase {
+            ScanPhase::Discovering { found_files } => (
+                "🔍",
+                "Scanning folders for EPUB files...".to_string(),
+                format!("{} found", found_files),
+                0.12,
+            ),
+            ScanPhase::ReadingMetadata {
+                processed,
+                total,
+                current_file,
+            } => {
+                let pct = sp.percentage();
+                let frac = sp.fraction().clamp(0.04, 1.0);
+                let detail = if current_file.is_empty() {
+                    format!("Loading metadata: {} / {}", processed, total)
+                } else {
+                    format!(
+                        "Loading metadata: {} / {} — {}",
+                        processed, total, current_file
+                    )
+                };
+                ("📚", detail, format!("{}%", pct), frac)
+            }
+        }
+    }
+
+    fn render_scan_progress_card(
+        &self,
+        sp: &ScanProgressState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (icon, detail, badge, frac) = Self::scan_progress_summary(sp);
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .child(
+                div()
+                    .w(px(420.0))
+                    .p_5()
+                    .rounded_xl()
+                    .bg(Theme::bg_card())
+                    .border_1()
+                    .border_color(Theme::border())
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_base().child(icon))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(Theme::text_primary())
+                                            .child("Loading EPUB Folder"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(Theme::bg_root())
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::accent_amber())
+                                    .child(badge),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(8.0))
+                            .rounded_full()
+                            .bg(Theme::bg_root())
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(Theme::accent_amber())
+                                    .w(DefiniteLength::Fraction(frac)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .child(detail),
+                            )
+                            .child(
+                                div()
+                                    .id("btn_cancel_scan_card")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(Theme::bg_card_hover())
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(Theme::text_primary())
+                                    .cursor_pointer()
+                                    .child("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_folder_scan(cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_scan_progress_banner(
+        &self,
+        sp: &ScanProgressState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (icon, detail, badge, frac) = Self::scan_progress_summary(sp);
+
+        div()
+            .relative()
+            .overflow_hidden()
+            .w_full()
+            .h(px(34.0))
+            .rounded_lg()
+            .bg(Theme::bg_card())
+            .border_1()
+            .border_color(Theme::border())
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .h_full()
+                    .bg(hsla(38.0 / 360.0, 0.92, 0.50, 0.20))
+                    .w(DefiniteLength::Fraction(frac)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(div().text_xs().child(icon))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(Theme::text_primary())
+                                    .child(detail),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::accent_amber())
+                                    .child(badge),
+                            )
+                            .child(
+                                div()
+                                    .id("btn_cancel_scan_banner")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(Theme::bg_card_hover())
+                                    .text_xs()
+                                    .text_color(Theme::text_primary())
+                                    .cursor_pointer()
+                                    .child("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_folder_scan(cx);
+                                    })),
+                            ),
                     ),
             )
             .into_any_element()

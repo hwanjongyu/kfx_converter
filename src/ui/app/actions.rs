@@ -6,9 +6,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::KindleStudio;
 use crate::state::{
-    BatchProgressState, ConversionTask, DeviceStatus, EpubSortField, LocalEpubStatus,
-    SortDirection, TaskStatus, convert_epub_file, delete_device_file, detect_kindle_device,
-    eject_kindle_device, load_device_files, scan_local_epub_directory,
+    BatchProgressState, ConversionTask, DeviceStatus, EpubSortField, LocalEpubItem,
+    LocalEpubStatus, ScanProgressState, SortDirection, TaskStatus, convert_epub_file,
+    delete_device_file, detect_kindle_device, eject_kindle_device, load_device_files,
+    scan_local_epub_directory_with_progress,
 };
 use gpui::*;
 use kfx_converter::KindleBookFile;
@@ -162,26 +163,111 @@ impl KindleStudio {
         .detach();
     }
 
+    pub fn cancel_folder_scan(&mut self, cx: &mut Context<Self>) {
+        if let Some(token) = self.scan_cancel_token.take() {
+            token.store(true, Ordering::Release);
+        }
+        self.folder_state.scan_generation = self.folder_state.scan_generation.wrapping_add(1);
+        self.folder_state.is_scanning = false;
+        self.folder_state.scan_progress = None;
+        cx.notify();
+    }
+
     pub fn rescan_folder(&mut self, cx: &mut Context<Self>) {
         let Some(folder) = self.folder_state.current_folder.clone() else {
             return;
         };
 
+        if let Some(prev_token) = self.scan_cancel_token.take() {
+            prev_token.store(true, Ordering::Release);
+        }
+
+        self.folder_state.scan_generation = self.folder_state.scan_generation.wrapping_add(1);
+        let generation = self.folder_state.scan_generation;
+
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        self.scan_cancel_token = Some(cancel_token.clone());
+
         self.folder_state.is_scanning = true;
+        self.folder_state.scan_progress = Some(ScanProgressState::discovering());
         cx.notify();
 
         let recursive = self.folder_state.recursive_scan;
         let device = self.device.clone();
 
+        let shared_progress = Arc::new(Mutex::new(ScanProgressState::discovering()));
+        let result_slot: Arc<Mutex<Option<Vec<LocalEpubItem>>>> = Arc::new(Mutex::new(None));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let progress_bg = shared_progress.clone();
+        let result_bg = result_slot.clone();
+        let done_bg = done.clone();
+        let cancel_bg = cancel_token.clone();
+
+        cx.background_executor()
+            .spawn(async move {
+                let items = scan_local_epub_directory_with_progress(
+                    &folder,
+                    recursive,
+                    &device,
+                    Some(&progress_bg),
+                    Some(&cancel_bg),
+                );
+                if let Ok(mut guard) = result_bg.lock() {
+                    *guard = Some(items);
+                }
+                done_bg.store(true, Ordering::Release);
+            })
+            .detach();
+
         cx.spawn(async move |this, cx| {
-            let items = cx
-                .background_executor()
-                .spawn(async move { scan_local_epub_directory(&folder, recursive, &device) })
-                .await;
+            while !done.load(Ordering::Acquire) {
+                cx.background_executor()
+                    .timer(Duration::from_millis(80))
+                    .await;
+
+                if cancel_token.load(Ordering::Acquire) {
+                    return;
+                }
+
+                let snapshot = match shared_progress.lock() {
+                    Ok(g) => g.clone(),
+                    Err(p) => p.into_inner().clone(),
+                };
+
+                let mut still_active = true;
+                this.update(cx, |this, cx| {
+                    if this.folder_state.scan_generation != generation {
+                        still_active = false;
+                        return;
+                    }
+                    this.folder_state.scan_progress = Some(snapshot);
+                    cx.notify();
+                })
+                .ok();
+
+                if !still_active {
+                    return;
+                }
+            }
+
+            if cancel_token.load(Ordering::Acquire) {
+                return;
+            }
+
+            let items = match result_slot.lock() {
+                Ok(mut g) => g.take().unwrap_or_default(),
+                Err(p) => p.into_inner().take().unwrap_or_default(),
+            };
 
             this.update(cx, |this, cx| {
+                if this.folder_state.scan_generation != generation {
+                    return;
+                }
                 this.folder_state.items = items;
                 this.folder_state.is_scanning = false;
+                this.folder_state.scan_progress = None;
+                this.scan_cancel_token = None;
                 cx.notify();
             })
             .ok();
@@ -472,7 +558,10 @@ impl KindleStudio {
                                                 modified: "Just now".into(),
                                                 modified_timestamp: now_ts,
                                                 full_path: dev_path,
-                                                has_word_wise: true,
+                                                has_word_wise: r
+                                                    .word_wise_glosses
+                                                    .is_some_and(|g| g > 0)
+                                                    && r.word_wise_error.is_none(),
                                                 has_sdr: true,
                                             });
                                         }
@@ -597,6 +686,9 @@ impl KindleStudio {
                     t.progress = 1.0;
                     match res {
                         Ok(res) => {
+                            if let Some(ref ww_err) = res.word_wise_error {
+                                this.status_message = Some((ww_err.clone(), true));
+                            }
                             if res.synced_to_device {
                                 t.status = TaskStatus::Completed;
                             } else if let Some(err) = res.sync_error {
@@ -642,7 +734,8 @@ impl KindleStudio {
                                         modified: "Just now".into(),
                                         modified_timestamp: now_ts,
                                         full_path: dev_path,
-                                        has_word_wise: true,
+                                        has_word_wise: res.word_wise_glosses.is_some_and(|g| g > 0)
+                                            && res.word_wise_error.is_none(),
                                         has_sdr: true,
                                     });
                                 }

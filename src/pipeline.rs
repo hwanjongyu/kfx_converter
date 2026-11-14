@@ -4,9 +4,68 @@
 //! generating companion Word Wise SQLite sidecars, normalizing baseline covers, and deploying
 //! to physical Kindle hardware via USB Mass Storage (UMS) or MTP.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+static LOG_LOCK: Mutex<()> = Mutex::new(());
+
+/// Returns the default persistent conversion log file path.
+pub fn conversion_log_path() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("kfx-converter")
+            .join("conversion.log");
+    }
+
+    if let Some(xdg_data) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg_data)
+            .join("kfx-converter")
+            .join("conversion.log");
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("kfx-converter")
+            .join("conversion.log");
+    }
+
+    std::env::temp_dir()
+        .join("kfx-converter")
+        .join("conversion.log")
+}
+
+fn append_conversion_log(message: &str) {
+    let _guard = match LOG_LOCK.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let path = conversion_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() > 2 * 1024 * 1024
+    {
+        let _ = std::fs::rename(&path, path.with_extension("log.old"));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{}] {}", ts, message);
+    }
+}
 
 use crate::enhancements::{CoverOptimizer, WordWiseBuilder};
 use crate::epub::{EpubError, EpubReader};
@@ -60,6 +119,7 @@ pub struct ConversionReport {
     pub duration: Duration,
     pub cover_optimized: bool,
     pub word_wise_glosses: Option<usize>,
+    pub word_wise_error: Option<String>,
     pub synced_to_device: bool,
     pub synced_device_path: Option<PathBuf>,
     pub sync_error: Option<String>,
@@ -150,6 +210,17 @@ impl ConversionPipeline {
         // 4. Generate Word Wise Sidecar (.kll) if enabled
         let mut kll_bytes = None;
         let mut word_wise_glosses = None;
+        let mut word_wise_error = None;
+        append_conversion_log(&format!(
+            "START input=\"{}\" output=\"{}\" word_wise={} content_type={} auto_deploy={} lang=\"{}\"",
+            input_path.display(),
+            output_path.display(),
+            options.word_wise,
+            options.content_type,
+            options.auto_deploy,
+            ir.metadata.language
+        ));
+
         if options.word_wise {
             if let Some(ref cb) = progress {
                 cb(0.75, "Generating Word Wise lemma sidecar database...");
@@ -164,14 +235,33 @@ impl ConversionPipeline {
             let gloss_count = ww_builder.generate_from_book(&ir);
             word_wise_glosses = Some(gloss_count);
 
-            if let Ok(bytes) = ww_builder.to_bytes() {
-                kll_bytes = Some(bytes);
+            if gloss_count == 0 {
+                append_conversion_log(&format!(
+                    "WARN Word Wise enabled but 0 glosses matched (asin={}, lang=\"{}\")",
+                    asin, ir.metadata.language
+                ));
+            }
+
+            match ww_builder.to_bytes() {
+                Ok(bytes) => {
+                    append_conversion_log(&format!(
+                        "WORD_WISE generated glosses={} kll_bytes={}",
+                        gloss_count,
+                        bytes.len()
+                    ));
+                    kll_bytes = Some(bytes);
+                }
+                Err(e) => {
+                    let msg = format!("Word Wise KLL serialization failed: {}", e);
+                    append_conversion_log(&format!("ERROR {}", msg));
+                    word_wise_error = Some(msg);
+                }
             }
         }
 
         // 4b. Always deploy companion .sdr directory and sidecars alongside output_path
         let sdr_path = output_path.with_extension("sdr");
-        let _ = crate::enhancements::SdrDeployer::deploy(
+        if let Err(e) = crate::enhancements::SdrDeployer::deploy(
             &sdr_path,
             &asin,
             Some(&content_id),
@@ -179,7 +269,19 @@ impl ConversionPipeline {
             Some(&ir.metadata.language),
             cover_jpeg.as_deref(),
             kll_bytes.as_deref(),
-        );
+        ) {
+            let msg = format!("SDR sidecar deploy failed ({}): {}", sdr_path.display(), e);
+            append_conversion_log(&format!("ERROR {}", msg));
+            if word_wise_error.is_none() {
+                word_wise_error = Some(msg);
+            }
+        } else {
+            append_conversion_log(&format!(
+                "SDR deployed path=\"{}\" has_kll={}",
+                sdr_path.display(),
+                kll_bytes.is_some()
+            ));
+        }
 
         // 5. Automatic Device Sync if enabled or if destination is inside a Kindle drive
         let mut synced_to_device = false;
@@ -226,10 +328,16 @@ impl ConversionPipeline {
                 kll_bytes.as_deref(),
             ) {
                 Ok(sdr_path) => {
+                    append_conversion_log(&format!(
+                        "SYNC ok sdr_path=\"{}\" has_kll={}",
+                        sdr_path.display(),
+                        kll_bytes.is_some()
+                    ));
                     synced_to_device = true;
                     synced_device_path = Some(sdr_path);
                 }
                 Err(e) => {
+                    append_conversion_log(&format!("ERROR SYNC failed: {}", e));
                     sync_error = Some(e.to_string());
                 }
             }
@@ -239,6 +347,16 @@ impl ConversionPipeline {
             cb(1.0, "Conversion completed successfully.");
         }
 
+        let duration = start_time.elapsed();
+        append_conversion_log(&format!(
+            "DONE output=\"{}\" bytes={} duration_ms={} word_wise_glosses={:?} synced={}",
+            output_path.display(),
+            total_bytes,
+            duration.as_millis(),
+            word_wise_glosses,
+            synced_to_device
+        ));
+
         Ok(ConversionReport {
             input_path,
             output_path,
@@ -247,9 +365,10 @@ impl ConversionPipeline {
             sections_count,
             resources_count,
             total_bytes,
-            duration: start_time.elapsed(),
+            duration,
             cover_optimized,
             word_wise_glosses,
+            word_wise_error,
             synced_to_device,
             synced_device_path,
             sync_error,

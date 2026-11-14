@@ -21,9 +21,40 @@ impl SdrDeployer {
         }
     }
 
+    /// Ensures a target directory exists, falling back to `gio mkdir -p` on Linux GVFS MTP mounts.
+    fn ensure_dir_exists(dir: &Path) -> std::io::Result<()> {
+        if dir.is_dir() {
+            return Ok(());
+        }
+        match std::fs::create_dir_all(dir) {
+            Ok(()) => Ok(()),
+            Err(err) if dir.to_string_lossy().contains("/gvfs/mtp:") => {
+                let status = std::process::Command::new("gio")
+                    .arg("mkdir")
+                    .arg("-p")
+                    .arg("--")
+                    .arg(dir)
+                    .status()?;
+                if status.success() || dir.is_dir() {
+                    Ok(())
+                } else {
+                    Err(err)
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Safely writes bytes to a file inside the `.sdr` directory, handling pre-existing read-only permissions
-    /// and performing atomic file persistence via a staged temporary file to prevent corruption on USB disconnect.
+    /// and performing atomic file persistence via a staged temporary file (or `gio copy` on GVFS MTP).
     fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        if path.to_string_lossy().contains("/gvfs/mtp:") {
+            return crate::sync::transfer::write_bytes(path, bytes).map_err(|e| match e {
+                crate::sync::SyncError::Io(io_err) => io_err,
+                other => std::io::Error::other(other.to_string()),
+            });
+        }
+
         Self::prepare_for_overwrite(path);
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let mut tmp_file = tempfile::Builder::new()
@@ -45,7 +76,7 @@ impl SdrDeployer {
         cover_jpeg: Option<&[u8]>,
         kll_bytes: Option<&[u8]>,
     ) -> std::io::Result<()> {
-        std::fs::create_dir_all(sdr_dir)?;
+        Self::ensure_dir_exists(sdr_dir)?;
 
         let safe_asin = crate::sync::KindleSync::sanitize_asin(asin);
         let safe_cid = content_id.map(crate::sync::KindleSync::sanitize_asin);

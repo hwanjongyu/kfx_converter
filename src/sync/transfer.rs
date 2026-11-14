@@ -148,7 +148,7 @@ pub fn sync_to_device(
         )));
     }
     // 3. Deploy companion .sdr folder, Word Wise sidecars, and thumbnails
-    let _ = crate::enhancements::SdrDeployer::deploy(
+    crate::enhancements::SdrDeployer::deploy(
         &sdr_dir,
         &safe_asin,
         content_id,
@@ -156,7 +156,7 @@ pub fn sync_to_device(
         book_language,
         cover_jpeg,
         kll_bytes,
-    );
+    )?;
 
     let purge_ww = kll_bytes.is_none();
     clean_stale_sdr_files(&sdr_dir, Some(&safe_asin), purge_ww);

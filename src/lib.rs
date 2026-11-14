@@ -21,7 +21,9 @@ pub use ir::{
     BlockStyle, BookIR, DropCapStyle, FontSizeBucket, SpanStyles, TextAlignment, TextFormatFlags,
 };
 pub use packager::{KfxPackager, PackagerError};
-pub use pipeline::{ConversionOptions, ConversionPipeline, ConversionReport, PipelineError};
+pub use pipeline::{
+    ConversionOptions, ConversionPipeline, ConversionReport, PipelineError, conversion_log_path,
+};
 pub use symbols::{KFX_SYMBOL_TABLE, KfxSymbol, symbol_id, symbol_name};
 pub use sync::{KindleBookFile, KindleSync, SyncError};
 pub use validator::{KfxPreflightValidator, ValidationError, ValidationReport};

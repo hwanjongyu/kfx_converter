@@ -29,6 +29,7 @@ pub struct KindleStudio {
     pub(super) search_query: String,
     pub(super) status_message: Option<(String, bool)>, // (text, is_error)
     pub(super) batch_cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) scan_cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(super) folder_scroll_handle: UniformListScrollHandle,
     pub(super) explorer_scroll_handle: UniformListScrollHandle,
     pub(super) explorer_sort_field: EpubSortField,
@@ -53,6 +54,7 @@ impl KindleStudio {
             search_query: String::new(),
             status_message: None,
             batch_cancel_token: None,
+            scan_cancel_token: None,
             folder_scroll_handle: UniformListScrollHandle::new(),
             explorer_scroll_handle: UniformListScrollHandle::new(),
             explorer_sort_field: EpubSortField::Title,

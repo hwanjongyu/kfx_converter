@@ -114,6 +114,50 @@ pub struct LocalEpubItem {
     pub status: LocalEpubStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanPhase {
+    Discovering {
+        found_files: usize,
+    },
+    ReadingMetadata {
+        processed: usize,
+        total: usize,
+        current_file: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanProgressState {
+    pub phase: ScanPhase,
+}
+
+impl ScanProgressState {
+    pub fn discovering() -> Self {
+        Self {
+            phase: ScanPhase::Discovering { found_files: 0 },
+        }
+    }
+
+    pub fn fraction(&self) -> f32 {
+        match &self.phase {
+            ScanPhase::Discovering { .. } => 0.0,
+            ScanPhase::ReadingMetadata {
+                processed, total, ..
+            } => {
+                if *total == 0 {
+                    1.0
+                } else {
+                    (*processed as f32 / *total as f32).clamp(0.0, 1.0)
+                }
+            }
+        }
+    }
+
+    pub fn percentage(&self) -> u8 {
+        (self.fraction() * 100.0).round() as u8
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalFolderState {
     pub current_folder: Option<PathBuf>,
@@ -122,6 +166,8 @@ pub struct LocalFolderState {
     pub search_query: String,
     pub filter_status: Option<String>,
     pub is_scanning: bool,
+    pub scan_progress: Option<ScanProgressState>,
+    pub scan_generation: u64,
     pub batch_progress: Option<BatchProgressState>,
     pub sort_field: EpubSortField,
     pub sort_direction: SortDirection,
@@ -136,6 +182,8 @@ impl Default for LocalFolderState {
             search_query: String::new(),
             filter_status: None,
             is_scanning: false,
+            scan_progress: None,
+            scan_generation: 0,
             batch_progress: None,
             sort_field: EpubSortField::Title,
             sort_direction: SortDirection::Ascending,
@@ -303,6 +351,8 @@ pub struct ConversionResult {
     pub output_path: PathBuf,
     pub synced_to_device: bool,
     pub sync_error: Option<String>,
+    pub word_wise_glosses: Option<usize>,
+    pub word_wise_error: Option<String>,
 }
 
 /// Executes the complete EPUB to KFX conversion pipeline, including optional
@@ -330,6 +380,8 @@ where
         output_path: report.output_path,
         synced_to_device: report.synced_to_device,
         sync_error: report.sync_error,
+        word_wise_glosses: report.word_wise_glosses,
+        word_wise_error: report.word_wise_error,
     })
 }
 
@@ -349,6 +401,19 @@ pub fn delete_device_file(allowed_root: Option<&Path>, file: &KindleFile) -> Res
         .map_err(|e| format!("Failed to delete book file: {}", e))
 }
 
+fn update_scan_progress(
+    progress: Option<&std::sync::Arc<std::sync::Mutex<ScanProgressState>>>,
+    phase: ScanPhase,
+) {
+    if let Some(p) = progress {
+        let mut guard = match p.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.phase = phase;
+    }
+}
+
 /// Recursively collects .epub files within dir up to max_depth.
 fn collect_epub_files(
     dir: &std::path::Path,
@@ -356,9 +421,18 @@ fn collect_epub_files(
     depth: usize,
     max_depth: usize,
     out: &mut Vec<PathBuf>,
+    progress: Option<&std::sync::Arc<std::sync::Mutex<ScanProgressState>>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) {
+        return;
+    }
+
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
+            if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) {
+                return;
+            }
             let path = entry.path();
             if path.is_file() {
                 if path
@@ -368,11 +442,27 @@ fn collect_epub_files(
                     .unwrap_or(false)
                 {
                     out.push(path);
+                    if out.len() == 1 || out.len().is_multiple_of(10) {
+                        update_scan_progress(
+                            progress,
+                            ScanPhase::Discovering {
+                                found_files: out.len(),
+                            },
+                        );
+                    }
                 }
             } else if recursive && path.is_dir() && depth < max_depth {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 if !name.starts_with('.') && !name.ends_with(".sdr") {
-                    collect_epub_files(&path, recursive, depth + 1, max_depth, out);
+                    collect_epub_files(
+                        &path,
+                        recursive,
+                        depth + 1,
+                        max_depth,
+                        out,
+                        progress,
+                        cancel,
+                    );
                 }
             }
         }
@@ -385,18 +475,53 @@ pub fn scan_local_epub_directory(
     recursive: bool,
     device: &DeviceStatus,
 ) -> Vec<LocalEpubItem> {
+    scan_local_epub_directory_with_progress(folder, recursive, device, None, None)
+}
+
+/// Scans a local directory for EPUB files while reporting progress and honoring cancellation.
+pub fn scan_local_epub_directory_with_progress(
+    folder: &std::path::Path,
+    recursive: bool,
+    device: &DeviceStatus,
+    progress: Option<&std::sync::Arc<std::sync::Mutex<ScanProgressState>>>,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Vec<LocalEpubItem> {
     let mut files = Vec::new();
-    collect_epub_files(folder, recursive, 0, 5, &mut files);
+    collect_epub_files(folder, recursive, 0, 5, &mut files, progress, cancel);
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) {
+        return Vec::new();
+    }
     files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
-    let mut items = Vec::new();
+    let total = files.len();
+    update_scan_progress(
+        progress,
+        ScanPhase::ReadingMetadata {
+            processed: 0,
+            total,
+            current_file: String::new(),
+        },
+    );
 
-    for (id_counter, path) in (1u64..).zip(files) {
+    let mut items = Vec::with_capacity(total);
+
+    for (idx, (id_counter, path)) in (1u64..).zip(files).enumerate() {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) {
+            return Vec::new();
+        }
         let filename = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        update_scan_progress(
+            progress,
+            ScanPhase::ReadingMetadata {
+                processed: idx,
+                total,
+                current_file: filename.clone(),
+            },
+        );
         let (file_size_bytes, file_size_str) = match std::fs::metadata(&path) {
             Ok(meta) => {
                 let bytes = meta.len();
@@ -794,5 +919,63 @@ mod tests {
         state.filter_status = Some("unconverted".into());
         let filtered = state.sorted_and_filtered_indices();
         assert_eq!(filtered, vec![1]);
+    }
+
+    #[test]
+    fn test_scan_progress_state_and_cancellation() {
+        let sp = ScanProgressState::discovering();
+        assert_eq!(sp.percentage(), 0);
+        assert_eq!(sp.fraction(), 0.0);
+
+        let sp_meta = ScanProgressState {
+            phase: ScanPhase::ReadingMetadata {
+                processed: 2,
+                total: 4,
+                current_file: "book.epub".into(),
+            },
+        };
+        assert_eq!(sp_meta.percentage(), 50);
+        assert!((sp_meta.fraction() - 0.5).abs() < 1e-5);
+
+        let temp_dir = tempfile::tempdir().expect("Create temp dir");
+        std::fs::write(temp_dir.path().join("A.epub"), b"dummy1").unwrap();
+        std::fs::write(temp_dir.path().join("B.epub"), b"dummy2").unwrap();
+
+        let dummy_dev = DeviceStatus {
+            connected: false,
+            model: "None".into(),
+            used_gb: 0.0,
+            total_gb: 0.0,
+            path: None,
+            root_path: None,
+        };
+
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(ScanProgressState::discovering()));
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let items = scan_local_epub_directory_with_progress(
+            temp_dir.path(),
+            true,
+            &dummy_dev,
+            Some(&progress),
+            Some(&cancel),
+        );
+        assert_eq!(items.len(), 2);
+
+        let final_phase = progress.lock().unwrap().phase.clone();
+        assert!(matches!(
+            final_phase,
+            ScanPhase::ReadingMetadata { total: 2, .. }
+        ));
+
+        // Pre-cancelled scan returns empty immediately
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        let cancelled_items = scan_local_epub_directory_with_progress(
+            temp_dir.path(),
+            true,
+            &dummy_dev,
+            Some(&progress),
+            Some(&cancel),
+        );
+        assert!(cancelled_items.is_empty());
     }
 }
