@@ -348,6 +348,7 @@ impl KindleStudio {
                                         } else {
                                             let view = cx.entity().downgrade();
                                             let indices = filtered_indices.clone();
+                                            let actions_disabled = self.is_batch_active() || self.eject_in_progress;
                                             uniform_list(
                                                 "folder_epub_uniform_list",
                                                 indices.len(),
@@ -356,7 +357,7 @@ impl KindleStudio {
                                                         .map(|r_idx| {
                                                              let item_idx = indices[r_idx];
                                                              let item = &this.folder_state.items[item_idx];
-                                                             Self::render_epub_card(item, &view)
+                                                             Self::render_epub_card(item, &view, actions_disabled)
                                                         })
                                                         .collect()
                                                 }),
@@ -379,6 +380,10 @@ impl KindleStudio {
                 if let Some(ref bp) = self.folder_state.batch_progress {
                     self.render_batch_progress_bar(bp, cx)
                 } else {
+                    let batch_busy = self.is_batch_active() || self.eject_in_progress;
+                    let can_batch_convert = selected_count > 0 && !batch_busy;
+                    let can_batch_sync = can_batch_convert && self.device.connected;
+
                     div()
                         .flex()
                         .gap_3()
@@ -389,18 +394,19 @@ impl KindleStudio {
                                 .flex_1()
                                 .py_2p5()
                                 .rounded_xl()
-                                .bg(if selected_count > 0 { Theme::accent_amber() } else { Theme::bg_card_hover() })
+                                .bg(if can_batch_convert { Theme::accent_amber() } else { Theme::bg_card_hover() })
                                 .text_sm()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(if selected_count > 0 { Theme::bg_root() } else { Theme::text_muted() })
-                                .cursor_pointer()
+                                .text_color(if can_batch_convert { Theme::bg_root() } else { Theme::text_muted() })
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .child(format!("⚡ Convert Selected ({})", selected_count))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.convert_selected_epubs(false, cx);
-                                })),
+                                .when(can_batch_convert, |el| {
+                                    el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                        this.convert_selected_epubs(false, cx);
+                                    }))
+                                }),
                         )
                         .child(
                             div()
@@ -408,18 +414,19 @@ impl KindleStudio {
                                 .flex_1()
                                 .py_2p5()
                                 .rounded_xl()
-                                .bg(if selected_count > 0 && self.device.connected { Theme::accent_green() } else { Theme::bg_card_hover() })
+                                .bg(if can_batch_sync { Theme::accent_green() } else { Theme::bg_card_hover() })
                                 .text_sm()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(if selected_count > 0 && self.device.connected { Theme::bg_root() } else { Theme::text_muted() })
-                                .cursor_pointer()
+                                .text_color(if can_batch_sync { Theme::bg_root() } else { Theme::text_muted() })
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .child(format!("📲 Transfer to Kindle ({})", selected_count))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.convert_selected_epubs(true, cx);
-                                })),
+                                .when(can_batch_sync, |el| {
+                                    el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                        this.convert_selected_epubs(true, cx);
+                                    }))
+                                }),
                         )
                         .into_any_element()
                 }
@@ -515,7 +522,11 @@ impl KindleStudio {
     }
 
     /// Renders a single EPUB item card with strict 68px height for virtualization.
-    pub(super) fn render_epub_card(item: &LocalEpubItem, view: &WeakEntity<Self>) -> AnyElement {
+    pub(super) fn render_epub_card(
+        item: &LocalEpubItem,
+        view: &WeakEntity<Self>,
+        actions_disabled: bool,
+    ) -> AnyElement {
         let item_id = item.id;
         let item_path = item.path.clone();
         let is_sel = item.is_selected;
@@ -592,19 +603,28 @@ impl KindleStudio {
                     .px_2()
                     .py_0p5()
                     .rounded_md()
-                    .bg(Theme::accent_amber())
+                    .bg(if actions_disabled {
+                        Theme::bg_card_hover()
+                    } else {
+                        Theme::accent_amber()
+                    })
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(Theme::bg_root())
-                    .cursor_pointer()
+                    .text_color(if actions_disabled {
+                        Theme::text_muted()
+                    } else {
+                        Theme::bg_root()
+                    })
                     .child("⚡ Convert")
-                    .on_click(move |_ev, _window, cx| {
-                        cx.stop_propagation();
-                        view_quick
-                            .update(cx, |this, cx| {
-                                this.convert_single_epub(p.clone(), false, cx);
-                            })
-                            .ok();
+                    .when(!actions_disabled, |el| {
+                        el.cursor_pointer().on_click(move |_ev, _window, cx| {
+                            cx.stop_propagation();
+                            view_quick
+                                .update(cx, |this, cx| {
+                                    this.convert_single_epub(p.clone(), false, cx);
+                                })
+                                .ok();
+                        })
                     }),
             )
         } else {
@@ -995,7 +1015,8 @@ impl KindleStudio {
     ) -> AnyElement {
         let pct = bp.overall_percentage();
         let frac = bp.overall_progress();
-        let is_done = (bp.completed_tasks + bp.failed_tasks >= bp.total_tasks || bp.is_cancelled)
+        let is_cancelled = bp.is_cancelled;
+        let is_done = (bp.completed_tasks + bp.failed_tasks >= bp.total_tasks || is_cancelled)
             && bp.active_tasks == 0;
         let is_sync = bp.is_sync;
 
@@ -1011,14 +1032,26 @@ impl KindleStudio {
                     .rounded_xl()
                     .bg(Theme::bg_card())
                     .border_1()
-                    .border_color(if is_done { Theme::accent_green() } else { Theme::border() })
+                    .border_color(if is_done && is_cancelled {
+                        Theme::accent_amber()
+                    } else if is_done && bp.failed_tasks > 0 {
+                        Theme::accent_red()
+                    } else if is_done {
+                        Theme::accent_green()
+                    } else {
+                        Theme::border()
+                    })
                     .child(
                         div()
                             .absolute()
                             .top_0()
                             .left_0()
                             .h_full()
-                            .bg(if is_done {
+                            .bg(if is_done && is_cancelled {
+                                hsla(38.0 / 360.0, 0.92, 0.50, 0.25)
+                            } else if is_done && bp.failed_tasks > 0 {
+                                hsla(0.0, 0.84, 0.60, 0.22)
+                            } else if is_done {
                                 hsla(142.0 / 360.0, 0.70, 0.45, 0.25)
                             } else if is_sync {
                                 hsla(160.0 / 360.0, 0.84, 0.39, 0.25)
@@ -1043,7 +1076,17 @@ impl KindleStudio {
                                     .child(
                                         div()
                                             .text_base()
-                                            .child(if is_done { "✓" } else if is_sync { "📲" } else { "⚡" }),
+                                            .child(if is_done && is_cancelled {
+                                                "⏹"
+                                            } else if is_done && bp.failed_tasks > 0 {
+                                                "⚠"
+                                            } else if is_done {
+                                                "✓"
+                                            } else if is_sync {
+                                                "📲"
+                                            } else {
+                                                "⚡"
+                                            }),
                                     )
                                     .child(
                                         div()
@@ -1060,7 +1103,24 @@ impl KindleStudio {
                                                             .text_xs()
                                                             .font_weight(FontWeight::BOLD)
                                                             .text_color(Theme::text_primary())
-                                                            .child(if is_done {
+                                                            .child(if is_done && is_cancelled {
+                                                                format!(
+                                                                    "Batch cancelled ({} completed, {} cancelled/failed)",
+                                                                    bp.completed_tasks,
+                                                                    bp.failed_tasks
+                                                                )
+                                                            } else if is_cancelled {
+                                                                format!(
+                                                                    "Cancelling batch... ({} active remaining)",
+                                                                    bp.active_tasks
+                                                                )
+                                                            } else if is_done && bp.failed_tasks > 0 {
+                                                                format!(
+                                                                    "Finished processing {} of {} books",
+                                                                    bp.completed_tasks,
+                                                                    bp.total_tasks
+                                                                )
+                                                            } else if is_done {
                                                                 format!("Finished processing {} books successfully!", bp.completed_tasks)
                                                             } else if is_sync {
                                                                 format!("Transferring to Kindle: {} of {} done ({}%)", bp.completed_tasks, bp.total_tasks, pct)
@@ -1069,7 +1129,7 @@ impl KindleStudio {
                                                             }),
                                                     )
                                                     .child(
-                                                        if bp.failed_tasks > 0 {
+                                                        if bp.failed_tasks > 0 && !is_cancelled {
                                                             div()
                                                                 .text_xs()
                                                                 .text_color(Theme::accent_red())
@@ -1084,7 +1144,9 @@ impl KindleStudio {
                                                 div()
                                                     .text_xs()
                                                     .text_color(Theme::text_muted())
-                                                    .child(if is_done {
+                                                    .child(if is_done && is_cancelled {
+                                                        "Batch conversion cancelled. Click Dismiss to close.".to_string()
+                                                    } else if is_done {
                                                         "All tasks finished. Click Dismiss to close.".to_string()
                                                     } else if !bp.current_filename.is_empty() {
                                                         format!("Active: {} ({})", bp.current_filename, bp.current_stage)
@@ -1102,11 +1164,15 @@ impl KindleStudio {
                                         .px_3()
                                         .py_1p5()
                                         .rounded_lg()
-                                        .bg(Theme::accent_green())
+                                        .bg(if is_cancelled {
+                                            Theme::accent_amber()
+                                        } else {
+                                            Theme::accent_green()
+                                        })
                                         .text_xs()
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(Theme::bg_root())
-                                        .child("✓ Dismiss")
+                                        .child(if is_cancelled { "Dismiss" } else { "✓ Dismiss" })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.folder_state.batch_progress = None;
                                             cx.notify();

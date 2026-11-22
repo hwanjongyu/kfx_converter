@@ -48,12 +48,17 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
             "font-style" => {
                 if v.contains("italic") || v.contains("oblique") {
                     tokens.push("italic".to_string());
+                } else if v == "normal" {
+                    tokens.push("font_style_normal".to_string());
                 }
             }
             "font-weight" => {
                 let numeric_bold = v.parse::<u32>().is_ok_and(|w| w >= 600);
+                let numeric_normal = v.parse::<u32>().is_ok_and(|w| w < 600);
                 if v.contains("bold") || numeric_bold {
                     tokens.push("bold".to_string());
+                } else if v == "normal" || v == "lighter" || numeric_normal {
+                    tokens.push("font_weight_normal".to_string());
                 }
             }
             "font-size" => {

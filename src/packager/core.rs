@@ -1,5 +1,6 @@
 //! Core packaging pipeline lifecycle coordinator.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Seek, Write};
 use std::path::Path;
 
@@ -21,6 +22,10 @@ pub struct KfxPackager<'a> {
     pub book_id: String,
     pub entities: Vec<KfxEntity>,
     pub(crate) next_eid: u32,
+    pub(crate) image_block_eids: HashSet<u32>,
+    pub(crate) anchor_targets: HashMap<(String, String), (u32, usize, usize)>,
+    pub(crate) global_anchor_targets: HashMap<String, (u32, usize, usize)>,
+    pub(crate) section_pid_starts: HashMap<u32, usize>,
 }
 
 impl<'a> KfxPackager<'a> {
@@ -86,7 +91,56 @@ impl<'a> KfxPackager<'a> {
             book_id,
             entities: Vec::new(),
             next_eid: FIRST_LOCAL_SYMBOL_ID,
+            image_block_eids: HashSet::new(),
+            anchor_targets: HashMap::new(),
+            global_anchor_targets: HashMap::new(),
+            section_pid_starts: HashMap::new(),
         }
+    }
+
+    pub(crate) fn normalize_ir_path(raw: &str) -> String {
+        let decoded = crate::epub::archive::decode_percent(raw.trim());
+        crate::epub::archive::resolve_zip_path("", &decoded)
+    }
+
+    pub(crate) fn resolve_resource_key(&self, resource_id: &str) -> Option<String> {
+        if self.book.resources.contains_key(resource_id) {
+            return Some(resource_id.to_string());
+        }
+        let norm_target = Self::normalize_ir_path(resource_id);
+        if norm_target.is_empty() {
+            return None;
+        }
+        let mut keys: Vec<&String> = self.book.resources.keys().collect();
+        keys.sort();
+
+        for key in &keys {
+            if Self::normalize_ir_path(key) == norm_target {
+                return Some((*key).clone());
+            }
+        }
+        for key in &keys {
+            if Self::normalize_ir_path(key).eq_ignore_ascii_case(&norm_target) {
+                return Some((*key).clone());
+            }
+        }
+        let target_file = Path::new(&norm_target)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if !target_file.is_empty() {
+            for key in &keys {
+                let norm_key = Self::normalize_ir_path(key);
+                let key_file = Path::new(&norm_key)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if !key_file.is_empty() && key_file.eq_ignore_ascii_case(target_file) {
+                    return Some((*key).clone());
+                }
+            }
+        }
+        None
     }
 
     pub fn container_id(&self) -> &str {
@@ -129,41 +183,45 @@ impl<'a> KfxPackager<'a> {
     /// Assembles all entities and writes to a stream.
     pub fn package<W: Write + Seek>(&mut self, writer: &mut W) -> Result<u64, PackagerError> {
         self.entities.clear();
+        self.next_eid = FIRST_LOCAL_SYMBOL_ID;
+        self.image_block_eids.clear();
+        self.anchor_targets.clear();
+        self.global_anchor_targets.clear();
+        self.section_pid_starts.clear();
         let mut symbols = LocalSymbols::new();
 
-        // 2. Build book metadata ($490)
+        // 1. Build book metadata ($490)
         self.build_book_metadata();
 
-        // 3. Build typography and text styles ($157)
+        // 2. Build typography and text styles ($157) - MUST be first symbol-interning step (SIDs 852..=889)
         let (styles, style_list) = self.build_styles(&mut symbols);
 
-        // 4. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
+        // 3. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
         let (section_data, used_styles) = self.build_storylines_and_sections(&mut symbols, &styles);
 
-        // 5. Emit only referenced style entities ($157) to prevent unreferenced fragment errors
+        // 4. Emit only referenced style entities ($157) to prevent unreferenced fragment errors
         self.emit_used_styles(style_list, &used_styles);
 
-        // 6. Build content features ($585) with dynamic section size & image flags
+        // 5. Build resource entities ($164 external_resource and $417 bcRawMedia) before content_features ($585)
+        self.build_resources(&mut symbols);
+
+        // 6. Build content features ($585) with dynamic section size, table, & emitted image flags
         self.build_content_features(&section_data);
 
         // 7. Build navigation ($389 book_navigation and $391 nav_container)
         self.build_navigation(&mut symbols, &section_data);
 
-        // 7. Build metadata ($258) with synchronized reading_orders
+        // 8. Build metadata ($258) with synchronized reading_orders
         self.build_metadata(&section_data);
-
-        // 8. Build resource entities ($164 external_resource and $417 bcRawMedia)
-        // Must be built before document_data so all media symbols and EIDs are interned
-        self.build_resources(&mut symbols);
 
         // 9. Build Kindle OS position maps ($609, $264, $265, $550, $621)
         self.build_position_maps(&section_data);
 
-        // 10. Build document data ($538) with Decimal font_size & line_height
-        self.build_document_data(&section_data, &symbols);
-
-        // 11. Build container_entity_map ($419) annotated entity with entity_dependencies ($253)
+        // 10. Build container_entity_map ($419) BEFORE document_data ($538) so max_id covers all symbols
         self.build_container_entity_map(&section_data, &mut symbols);
+
+        // 11. Build document data ($538) with Decimal font_size & line_height
+        self.build_document_data(&section_data, &symbols);
 
         // 12. Build $ion_symbol_table document symbols data
         let doc_sym_data = symbols.to_ion_symbol_table();
@@ -171,10 +229,10 @@ impl<'a> KfxPackager<'a> {
         // 13. Build format capabilities ($593) - emitted into container header based on actual post-optimization chunks
         let format_caps_data = self.build_format_capabilities();
 
-        // 9. Pre-flight reference validation to ensure 100% referential integrity
+        // 14. Pre-flight container and reference validation to ensure 100% integrity
         let validator =
             crate::validator::KfxPreflightValidator::new(&self.entities, Some(&symbols));
-        validator.validate()?;
+        validator.validate_container()?;
 
         // Sort entities by Yellowjacket preferred fragment type order, then by entity_id
         fn fragment_type_order(chunk_type: u32) -> u32 {

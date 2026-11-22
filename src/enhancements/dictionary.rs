@@ -345,7 +345,7 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("remonstrate", 1, 49647),
     ("reprobate", 1, 72853),
     ("repudiate", 1, 66867),
-    ("ruinous", 1, 69463),
+    ("ruinous", 4, 69462),
     ("sagacious", 1, 68514),
     ("salubrious", 1, 73480),
     ("sangfroid", 1, 49391),
@@ -389,7 +389,7 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("vociferous", 1, 71268),
     ("voluble", 1, 57348),
     ("winsome", 1, 43950),
-    ("wry", 1, 51966),
+    ("wry", 5, 51965),
     ("xenophobia", 1, 76471),
     ("zealot", 1, 60529),
     ("zeitgeist", 1, 59724),
@@ -621,7 +621,7 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("impartial", 3, 30009),
     ("implicit", 3, 9022),
     ("inadvertent", 3, 17579),
-    ("incapable", 3, 9),
+    ("incapable", 5, 37554),
     ("indigenous", 3, 5574),
     ("inept", 3, 31343),
     ("inert", 3, 15858),
@@ -631,8 +631,8 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("lament", 3, 23604),
     ("latent", 3, 13423),
     ("lethargic", 3, 541),
-    ("lever", 3, 25),
-    ("mansion", 3, 9),
+    ("lever", 5, 4712),
+    ("mansion", 5, 9074),
     ("negligent", 3, 72001),
     ("nocturnal", 3, 57714),
     ("noxious", 3, 56506),
@@ -658,8 +658,8 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("scarcely", 3, 55533),
     ("scrutinize", 3, 55161),
     ("servile", 3, 58840),
-    ("shiver", 3, 10),
-    ("splendid", 3, 29354),
+    ("shiver", 5, 65814),
+    ("splendid", 5, 54385),
     ("substantiate", 3, 77572),
     // Difficulty 4 (Intermediate CEFR B2 Vocabulary)
     ("abundant", 4, 6756),
@@ -776,7 +776,7 @@ pub const BUILTIN_VOCABULARY: &[(&str, u8, u32)] = &[
     ("wistful", 4, 65423),
     // Difficulty 5 (Foundational Academic Vocabulary - shown on highest slider 'More Hints')
     ("cease", 5, 2688),
-    ("click", 5, 42955),
+    ("click", 5, 42952),
     ("conceal", 5, 31359),
     ("consent", 5, 12349),
     ("daunting", 5, 37877),
@@ -820,15 +820,9 @@ static WORDWISE_DICT_BYTES: &[u8] = include_bytes!("wordwise_dict.bin");
 static STOPWORDS_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
 static VOCAB_MAP: OnceLock<HashMap<&'static str, (u8, u32)>> = OnceLock::new();
 
-fn parse_builtin_and_ground_truth_vocab() -> HashMap<&'static str, (u8, u32)> {
+/// Parses the embedded `WWK1` binary dataset into a map of `lemma -> (difficulty, sense_id)`.
+fn parse_wwk1_entries() -> HashMap<&'static str, (u8, u32)> {
     let mut map = HashMap::with_capacity(55_000);
-
-    // 1. Load curated baseline overrides
-    for &(w, d, s) in BUILTIN_VOCABULARY {
-        map.insert(w, (d, s));
-    }
-
-    // 2. Parse Amazon Ground Truth binary dataset (52,000+ lemmas with native sense IDs)
     if WORDWISE_DICT_BYTES.len() >= 8
         && &WORDWISE_DICT_BYTES[0..4] == b"WWK1"
         && let Some(count_bytes) = WORDWISE_DICT_BYTES
@@ -864,6 +858,16 @@ fn parse_builtin_and_ground_truth_vocab() -> HashMap<&'static str, (u8, u32)> {
                 offset += len + 5;
             }
         }
+    }
+    map
+}
+
+fn parse_builtin_and_ground_truth_vocab() -> HashMap<&'static str, (u8, u32)> {
+    let mut map = parse_wwk1_entries();
+
+    // Apply curated baseline difficulty overrides on top of WWK1 entries
+    for &(w, d, s) in BUILTIN_VOCABULARY {
+        map.insert(w, (d, s));
     }
 
     map
@@ -1096,5 +1100,22 @@ mod tests {
             dict.lookup("ameliorating", 3).is_some(),
             "Lookup for 'ameliorating' should return Some"
         );
+    }
+
+    #[test]
+    fn test_builtin_vocabulary_sense_ids_match_wordwise_dict_bin() {
+        let wwk1 = parse_wwk1_entries();
+        assert!(!wwk1.is_empty());
+
+        for &(lemma, _diff, sense_id) in BUILTIN_VOCABULARY {
+            let (_ww_diff, ww_sense_id) = wwk1.get(lemma).copied().unwrap_or_else(|| {
+                panic!("BUILTIN_VOCABULARY entry {:?} missing from WWK1", lemma)
+            });
+            assert_eq!(
+                sense_id, ww_sense_id,
+                "BUILTIN_VOCABULARY sense_id mismatch for {:?}: expected {}, got {}",
+                lemma, ww_sense_id, sense_id
+            );
+        }
     }
 }

@@ -10,12 +10,26 @@ mod folder_browser;
 mod header;
 mod kindle_explorer;
 
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
 use crate::state::{
     ConversionSettings, ConversionTask, ConverterMode, DeviceStatus, EpubSortField, KindleFile,
-    LocalFolderState, SortDirection, StudioTab, detect_kindle_device, load_device_files,
+    LocalFolderState, SortDirection, StudioTab,
 };
 use crate::theme::Theme;
 use gpui::*;
+
+#[derive(Debug, Clone)]
+pub(super) struct DropJob {
+    pub task_id: u64,
+    pub path: PathBuf,
+    pub settings: ConversionSettings,
+}
+
+pub(super) type BatchQueue = Arc<Mutex<VecDeque<(u64, PathBuf)>>>;
 
 pub struct KindleStudio {
     pub(super) tab: StudioTab,
@@ -24,43 +38,77 @@ pub struct KindleStudio {
     pub(super) device: DeviceStatus,
     pub(super) settings: ConversionSettings,
     pub(super) tasks: Vec<ConversionTask>,
+    pub(super) next_task_id: u64,
     pub(super) files: Vec<KindleFile>,
     pub(super) filter_format: Option<String>,
     pub(super) search_query: String,
     pub(super) status_message: Option<(String, bool)>, // (text, is_error)
-    pub(super) batch_cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    pub(super) scan_cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) batch_cancel_token: Option<Arc<AtomicBool>>,
+    pub(super) batch_generation: u64,
+    pub(super) batch_active_workers: usize,
+    pub(super) batch_queue: Option<BatchQueue>,
+    pub(super) drop_queue: Arc<Mutex<VecDeque<DropJob>>>,
+    pub(super) drop_active_workers: usize,
+    pub(super) scan_cancel_token: Option<Arc<AtomicBool>>,
+    pub(super) device_refresh_generation: u64,
+    pub(super) eject_in_progress: bool,
+    pub(super) delete_in_progress: bool,
+    pub(super) last_output_path: Option<PathBuf>,
     pub(super) folder_scroll_handle: UniformListScrollHandle,
     pub(super) explorer_scroll_handle: UniformListScrollHandle,
     pub(super) explorer_sort_field: EpubSortField,
     pub(super) explorer_sort_direction: SortDirection,
-    pub(super) confirm_delete_file: Option<String>,
+    pub(super) confirm_delete_file: Option<PathBuf>,
 }
 
 impl KindleStudio {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
-        let device = detect_kindle_device();
-        let files = load_device_files(&device);
-
+    fn new_unconnected() -> Self {
         Self {
             tab: StudioTab::DualPane,
             converter_mode: ConverterMode::DropQueue,
             folder_state: LocalFolderState::default(),
-            device,
+            device: DeviceStatus::default(),
             settings: ConversionSettings::default(),
             tasks: Vec::new(),
-            files,
+            next_task_id: 1,
+            files: Vec::new(),
             filter_format: None,
             search_query: String::new(),
             status_message: None,
             batch_cancel_token: None,
+            batch_generation: 0,
+            batch_active_workers: 0,
+            batch_queue: None,
+            drop_queue: Arc::new(Mutex::new(VecDeque::new())),
+            drop_active_workers: 0,
             scan_cancel_token: None,
+            device_refresh_generation: 0,
+            eject_in_progress: false,
+            delete_in_progress: false,
+            last_output_path: None,
             folder_scroll_handle: UniformListScrollHandle::new(),
             explorer_scroll_handle: UniformListScrollHandle::new(),
             explorer_sort_field: EpubSortField::Title,
             explorer_sort_direction: SortDirection::Ascending,
             confirm_delete_file: None,
         }
+    }
+
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let mut studio = Self::new_unconnected();
+        studio.refresh_device_internal(false, cx);
+        studio
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_for_test() -> Self {
+        Self::new_unconnected()
+    }
+
+    pub(super) fn allocate_task_id(&mut self) -> u64 {
+        let id = self.next_task_id;
+        self.next_task_id = self.next_task_id.saturating_add(1);
+        id
     }
 }
 

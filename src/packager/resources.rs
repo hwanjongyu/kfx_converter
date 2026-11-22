@@ -24,7 +24,6 @@ impl<'a> KfxPackager<'a> {
         let sym_resource_width = symbol_id("resource_width").unwrap_or(422);
         let sym_resource_height = symbol_id("resource_height").unwrap_or(423);
         let sym_jpg = symbol_id("jpg").unwrap_or(285);
-        let sym_png = symbol_id("png").unwrap_or(284);
 
         let cover_id = self.resolve_cover_resource_id();
         let mut sorted_resources: Vec<_> = self.book.resources.iter().collect();
@@ -46,59 +45,105 @@ impl<'a> KfxPackager<'a> {
             let raw_sym_id = symbols.intern(&raw_path);
 
             let is_cover_res = cover_id.as_deref() == Some(res_id.as_str());
+            let ext_hint = std::path::Path::new(res_id)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or(asset.mime_type.as_str());
 
-            // For the book cover, always transcode to a Kindle-compliant baseline RGB JPEG (JFIF).
-            // Kindle OS lockscreen ("Display Cover") and extractors require standard baseline JPEG.
-            // For general content images, downscale oversized images (> 2560x2560) to protect 512MB Kindle OS.
-            let (payload_data, format_sym, mime_type) = if is_cover_res {
-                let opt_cover = match crate::enhancements::CoverOptimizer::optimize_cover_image(
+            // For the book cover, transcode to a Kindle-compliant baseline RGB JPEG (JFIF).
+            // For oversized / limit-exceeding images, substitute a valid 1x1 baseline placeholder JPEG
+            // rather than emitting empty $417 payloads or raw multi-megabyte image bombs.
+            let (payload_data, format_sym, mime_type, forced_dims) = if is_cover_res {
+                match crate::enhancements::CoverOptimizer::optimize_cover_image(
                     &asset.data,
                     crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
                 ) {
-                    Ok(data) => data,
+                    Ok(data) => {
+                        let (_, f_sym, m_type) =
+                            crate::enhancements::detect_image_format(&data, "jpg");
+                        (data, f_sym, m_type.to_string(), None)
+                    }
                     Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
                         eprintln!(
-                            "Warning: Cover image dimensions ({}x{}) exceed safe limits; skipping payload.",
+                            "Warning: Cover image dimensions ({}x{}) exceed safe limits; substituting 1x1 placeholder JPEG.",
                             w, h
                         );
-                        Vec::new()
+                        (
+                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+                            sym_jpg,
+                            "image/jpeg".to_string(),
+                            Some((1, 1)),
+                        )
                     }
-                    Err(_) => asset.data.clone(),
-                };
-                (opt_cover, sym_jpg, "image/jpeg".to_string())
+                    Err(crate::enhancements::CoverError::LimitExceeded(reason)) => {
+                        eprintln!(
+                            "Warning: Cover image limit exceeded ({}); substituting 1x1 placeholder JPEG.",
+                            reason
+                        );
+                        (
+                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+                            sym_jpg,
+                            "image/jpeg".to_string(),
+                            Some((1, 1)),
+                        )
+                    }
+                    Err(_) => {
+                        let (_, f_sym, m_type) =
+                            crate::enhancements::detect_image_format(&asset.data, ext_hint);
+                        (asset.data.clone(), f_sym, m_type.to_string(), None)
+                    }
+                }
             } else if asset.mime_type.starts_with("image/") {
-                let opt_content = match crate::enhancements::CoverOptimizer::optimize_content_image(
+                match crate::enhancements::CoverOptimizer::optimize_content_image(
                     &asset.data,
                     crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
                 ) {
-                    Ok(data) => data,
+                    Ok(data) => {
+                        let (_, f_sym, m_type) =
+                            crate::enhancements::detect_image_format(&data, ext_hint);
+                        (data, f_sym, m_type.to_string(), None)
+                    }
                     Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
                         eprintln!(
-                            "Warning: Image resource '{}' dimensions ({}x{}) exceed safe limits; skipping payload.",
+                            "Warning: Image resource '{}' dimensions ({}x{}) exceed safe limits; substituting 1x1 placeholder JPEG.",
                             res_id, w, h
                         );
-                        Vec::new()
+                        (
+                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+                            sym_jpg,
+                            "image/jpeg".to_string(),
+                            Some((1, 1)),
+                        )
                     }
-                    Err(_) => asset.data.clone(),
-                };
-                let is_png = asset.mime_type.contains("png") && opt_content.starts_with(b"\x89PNG");
-                let f_sym = if is_png { sym_png } else { sym_jpg };
-                let m_type = if is_png {
-                    "image/png".to_string()
-                } else {
-                    "image/jpeg".to_string()
-                };
-                (opt_content, f_sym, m_type)
+                    Err(crate::enhancements::CoverError::LimitExceeded(reason)) => {
+                        eprintln!(
+                            "Warning: Image resource '{}' limit exceeded ({}); substituting 1x1 placeholder JPEG.",
+                            res_id, reason
+                        );
+                        (
+                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+                            sym_jpg,
+                            "image/jpeg".to_string(),
+                            Some((1, 1)),
+                        )
+                    }
+                    Err(_) => {
+                        let (_, f_sym, m_type) =
+                            crate::enhancements::detect_image_format(&asset.data, ext_hint);
+                        (asset.data.clone(), f_sym, m_type.to_string(), None)
+                    }
+                }
             } else {
-                (asset.data.clone(), sym_jpg, asset.mime_type.clone())
+                (asset.data.clone(), sym_jpg, asset.mime_type.clone(), None)
             };
 
-            let dimensions =
+            let dimensions = forced_dims.or_else(|| {
                 if mime_type.starts_with("image/") || asset.mime_type.starts_with("image/") {
                     crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
                 } else {
                     None
-                };
+                }
+            });
 
             // 1. External Resource metadata entity ($164)
             let mut ext_field_vec = vec![

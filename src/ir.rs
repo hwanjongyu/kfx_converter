@@ -95,9 +95,10 @@ pub struct SpanStyles {
 impl SpanStyles {
     pub fn from_tokens(tokens: &str) -> Self {
         let mut styles = Self::default();
-        let is_l2 = tokens.contains("dropcap_l2");
-        let is_c2 = tokens.contains("dropcap_2");
-        let is_dc = tokens.contains("dropcap");
+        let has_tok = |tok: &str| tokens.split_whitespace().any(|t| t == tok);
+        let is_l2 = has_tok("dropcap_l2");
+        let is_c2 = has_tok("dropcap_2");
+        let is_dc = has_tok("dropcap");
 
         if is_dc || is_c2 {
             styles.dropcap = match (is_l2, is_c2) {
@@ -111,7 +112,9 @@ impl SpanStyles {
         for tok in tokens.split_whitespace() {
             match tok {
                 "bold" => styles.format.bold = true,
+                "font_weight_normal" => styles.format.bold = false,
                 "italic" => styles.format.italic = true,
+                "font_style_normal" => styles.format.italic = false,
                 "underline" => styles.format.underline = true,
                 "strike" | "strikethrough" => styles.format.strikethrough = true,
                 "code" => styles.format.code = true,
@@ -125,7 +128,9 @@ impl SpanStyles {
                 "font_size_lg" => styles.font_size = FontSizeBucket::Large,
                 "font_size_xl" => styles.font_size = FontSizeBucket::ExtraLarge,
                 "font_size_xxl" => styles.font_size = FontSizeBucket::ExtraExtraLarge,
-                t if !t.starts_with("dropcap") && !styles.custom_classes.iter().any(|c| c == t) => {
+                t if !matches!(t, "dropcap" | "dropcap_2" | "dropcap_l2")
+                    && !styles.custom_classes.iter().any(|c| c == t) =>
+                {
                     styles.custom_classes.push(t.to_string());
                 }
                 _ => {}
@@ -209,6 +214,7 @@ impl BlockStyle {
         let mut style = Self::default();
         for tok in tokens.split_whitespace() {
             match tok {
+                "align_left" => style.alignment = TextAlignment::Left,
                 "align_center" => style.alignment = TextAlignment::Center,
                 "align_right" => style.alignment = TextAlignment::Right,
                 "align_justify" => style.alignment = TextAlignment::Justify,
@@ -437,10 +443,10 @@ impl Block {
         match self {
             Block::Paragraph {
                 style: Some(st), ..
-            } => st.contains("page_break_before"),
-            Block::Heading {
+            }
+            | Block::Heading {
                 style: Some(st), ..
-            } => st.contains("page_break_before"),
+            } => st.split_whitespace().any(|t| t == "page_break_before"),
             _ => false,
         }
     }
@@ -449,10 +455,10 @@ impl Block {
         match self {
             Block::Paragraph {
                 style: Some(st), ..
-            } => st.contains("page_break_after"),
-            Block::Heading {
+            }
+            | Block::Heading {
                 style: Some(st), ..
-            } => st.contains("page_break_after"),
+            } => st.split_whitespace().any(|t| t == "page_break_after"),
             _ => false,
         }
     }
@@ -753,12 +759,28 @@ impl BookIR {
 }
 
 fn extract_anchors_from_block(block: &Block) -> Vec<String> {
-    match block {
-        Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
-            spans.iter().filter_map(|s| s.anchor_id.clone()).collect()
+    let mut anchors = Vec::new();
+    let mut stack = vec![block];
+    while let Some(current) = stack.pop() {
+        match current {
+            Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+                for s in spans {
+                    if let Some(ref anchor) = s.anchor_id {
+                        anchors.push(anchor.clone());
+                    }
+                }
+            }
+            Block::List { items, .. } => {
+                for item in items.iter().rev() {
+                    for child in item.iter().rev() {
+                        stack.push(child);
+                    }
+                }
+            }
+            Block::Image { .. } | Block::HorizontalRule | Block::Table { .. } => {}
         }
-        _ => Vec::new(),
     }
+    anchors
 }
 
 #[cfg(test)]
@@ -1342,5 +1364,84 @@ mod tests {
         };
         assert_eq!(nested.plain_text(), "x\ny\nz\nw");
         assert_eq!(nested.plain_text(), reference_recursive_plain_text(&nested));
+    }
+
+    #[test]
+    fn test_extract_anchors_from_list_block_and_exact_style_tokens() {
+        let list_block = Block::List {
+            id: "l_anchors".to_string(),
+            ordered: false,
+            items: vec![vec![
+                Block::Paragraph {
+                    id: "li_p".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Item".to_string(),
+                        style: None,
+                        anchor_id: Some("list_item_anchor".to_string()),
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                },
+                Block::List {
+                    id: "l_inner".to_string(),
+                    ordered: true,
+                    items: vec![vec![Block::Heading {
+                        id: "li_h".to_string(),
+                        level: 3,
+                        spans: vec![TextSpan {
+                            text: "Nested".to_string(),
+                            style: None,
+                            anchor_id: Some("nested_list_anchor".to_string()),
+                            href: None,
+                            ruby: None,
+                        }],
+                        style: None,
+                    }]],
+                },
+            ]],
+        };
+
+        let anchors = extract_anchors_from_block(&list_block);
+        assert_eq!(anchors, vec!["list_item_anchor", "nested_list_anchor"]);
+
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "sec_1".to_string(),
+            title: "Sec".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "p0".to_string(),
+                    spans: vec![TextSpan {
+                        text: "First".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                },
+                list_block,
+            ],
+        });
+        book.toc.push(TocItem {
+            title: "Nested Target".to_string(),
+            target_section: "sec_1".to_string(),
+            target_anchor: Some("nested_list_anchor".to_string()),
+            children: Vec::new(),
+        });
+        book.fragment_large_sections(100_000, 1);
+        assert_eq!(book.toc[0].target_section, "sec_1_p2");
+
+        // Exact token matching and overrides
+        let span_styles =
+            SpanStyles::from_tokens("bold italic font_weight_normal font_style_normal subject");
+        assert!(!span_styles.format.bold);
+        assert!(!span_styles.format.italic);
+        assert!(!span_styles.format.subscript);
+        assert_eq!(span_styles.custom_classes, vec!["subject"]);
+
+        let block_style = BlockStyle::from_tokens("align_center align_left");
+        assert_eq!(block_style.alignment, TextAlignment::Left);
     }
 }

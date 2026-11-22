@@ -17,10 +17,8 @@ pub struct WordWiseGloss {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WordWisePacingConfig {
-    /// Minimum vocabulary difficulty threshold: 1 (easy) to 5 (advanced).
-    pub min_difficulty: u8,
-    /// Target preferred difficulty level: typically 5.
-    pub target_difficulty: u8,
+    /// Maximum vocabulary difficulty level to retain: `1` (hardest/fewest hints) to `5` (easiest/most hints).
+    pub max_difficulty_level: u8,
     /// Minimum physical character distance between consecutive gloss annotations.
     pub min_distance: usize,
     /// Maximum allowed gloss annotations within a single reading window.
@@ -36,8 +34,7 @@ pub struct WordWisePacingConfig {
 impl Default for WordWisePacingConfig {
     fn default() -> Self {
         Self {
-            min_difficulty: 1,
-            target_difficulty: 3,
+            max_difficulty_level: 3,
             min_distance: 20,
             max_glosses_per_window: 4,
             window_size: 800,
@@ -137,7 +134,7 @@ impl WordWiseBuilder {
         sense_id: u32,
         low_confidence: bool,
     ) -> bool {
-        if difficulty < self.pacing.min_difficulty {
+        if difficulty < 1 || difficulty > self.pacing.max_difficulty_level {
             return false;
         }
         if start < self.pacing.frontmatter_skip_chars {
@@ -174,7 +171,7 @@ impl WordWiseBuilder {
     /// 1. Higher-difficulty words (difficulty 1 > 2 > 3 > 4 > 5) are prioritized over easier words.
     /// 2. If two words are within `min_distance`, the harder word wins (or earlier word if equal).
     /// 3. In any `window_size` (default 800 chars), at most `max_glosses_per_window` (default 4) words are kept.
-    /// 4. Respects `min_difficulty`, `frontmatter_skip_chars`, and `max_total_glosses`.
+    /// 4. Respects `max_difficulty_level`, `frontmatter_skip_chars`, and `max_total_glosses`.
     pub fn filter_candidates_priority_paced(
         candidates: &[WordWiseGloss],
         pacing: &WordWisePacingConfig,
@@ -186,7 +183,9 @@ impl WordWiseBuilder {
         let mut valid: Vec<&WordWiseGloss> = candidates
             .iter()
             .filter(|c| {
-                c.difficulty >= pacing.min_difficulty && c.start >= pacing.frontmatter_skip_chars
+                c.difficulty >= 1
+                    && c.difficulty <= pacing.max_difficulty_level
+                    && c.start >= pacing.frontmatter_skip_chars
             })
             .collect();
 
@@ -573,8 +572,7 @@ mod tests {
     fn test_word_wise_pacing() {
         let mut builder = WordWiseBuilder::new("TESTASIN", "CR!TESTACR", "en", "en", "1")
             .with_pacing(WordWisePacingConfig {
-                min_difficulty: 4,
-                target_difficulty: 5,
+                max_difficulty_level: 2,
                 min_distance: 25,
                 max_glosses_per_window: 2,
                 window_size: 100,
@@ -583,25 +581,25 @@ mod tests {
             });
 
         // 1. Frontmatter skip: start < 50 should be rejected
-        assert!(!builder.add_gloss_paced(20, None, 4, 101, false));
+        assert!(!builder.add_gloss_paced(20, None, 1, 101, false));
 
-        // 2. Difficulty check: difficulty 3 < min_difficulty 4 rejected
+        // 2. Difficulty check: difficulty 3 > max_difficulty_level 2 rejected (too easy)
         assert!(!builder.add_gloss_paced(60, None, 3, 102, false));
 
-        // 3. Valid first gloss: start = 60, diff = 4
-        assert!(builder.add_gloss_paced(60, None, 4, 103, false));
+        // 3. Valid first gloss: start = 60, diff = 1 (hardest word retained)
+        assert!(builder.add_gloss_paced(60, None, 1, 103, false));
 
         // 4. Distance pacing: start = 70 (dist = 10 < 25) rejected
-        assert!(!builder.add_gloss_paced(70, None, 4, 104, false));
+        assert!(!builder.add_gloss_paced(70, None, 2, 104, false));
 
-        // 5. Valid second gloss: start = 90 (dist = 30 >= 25)
-        assert!(builder.add_gloss_paced(90, None, 5, 105, false));
+        // 5. Valid second gloss: start = 90 (dist = 30 >= 25), diff = 2 <= 2
+        assert!(builder.add_gloss_paced(90, None, 2, 105, false));
 
         // 6. Window cap: start = 110 (window 110-100=10 contains 60 and 90, so already 2) rejected
-        assert!(!builder.add_gloss_paced(110, None, 4, 106, false));
+        assert!(!builder.add_gloss_paced(110, None, 1, 106, false));
 
         // 7. Outside window: start = 180 (window 180-100=80 only contains 90, so 1 item) accepted
-        assert!(builder.add_gloss_paced(180, None, 4, 107, false));
+        assert!(builder.add_gloss_paced(180, None, 2, 107, false));
 
         assert_eq!(builder.gloss_count(), 3);
     }
@@ -636,8 +634,7 @@ mod tests {
 
         let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
             WordWisePacingConfig {
-                min_difficulty: 1,
-                target_difficulty: 5,
+                max_difficulty_level: 5,
                 min_distance: 10,
                 max_glosses_per_window: 5,
                 window_size: 500,
@@ -685,8 +682,7 @@ mod tests {
 
         let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
             WordWisePacingConfig {
-                min_difficulty: 1,
-                target_difficulty: 5,
+                max_difficulty_level: 5,
                 min_distance: 1,
                 max_glosses_per_window: 10,
                 window_size: 500,
@@ -739,8 +735,7 @@ mod tests {
 
         let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
             WordWisePacingConfig {
-                min_difficulty: 1,
-                target_difficulty: 5,
+                max_difficulty_level: 5,
                 min_distance: 1,
                 max_glosses_per_window: 10,
                 window_size: 500,
@@ -812,8 +807,7 @@ mod tests {
     #[test]
     fn test_word_wise_priority_pacing_retains_hard_words() {
         let pacing = WordWisePacingConfig {
-            min_difficulty: 1,
-            target_difficulty: 5,
+            max_difficulty_level: 5,
             min_distance: 20,
             max_glosses_per_window: 4,
             window_size: 800,
@@ -882,8 +876,7 @@ mod tests {
     #[test]
     fn test_word_wise_priority_proximity_conflict() {
         let pacing = WordWisePacingConfig {
-            min_difficulty: 1,
-            target_difficulty: 5,
+            max_difficulty_level: 5,
             min_distance: 20,
             max_glosses_per_window: 4,
             window_size: 800,
@@ -917,5 +910,68 @@ mod tests {
         // The harder word (start 110, diff 2) must win over the easier word (start 100, diff 5)
         assert_eq!(selected[0].start, 110);
         assert_eq!(selected[0].difficulty, 2);
+    }
+
+    #[test]
+    fn test_word_wise_max_difficulty_level_scaling() {
+        assert_eq!(WordWisePacingConfig::default().max_difficulty_level, 3);
+
+        let candidates: Vec<WordWiseGloss> = (1u8..=5)
+            .map(|diff| WordWiseGloss {
+                start: (diff as usize) * 100,
+                end: None,
+                difficulty: diff,
+                sense_id: diff as u32 * 10,
+                low_confidence: false,
+            })
+            .collect();
+
+        let level1 = WordWiseBuilder::filter_candidates_priority_paced(
+            &candidates,
+            &WordWisePacingConfig {
+                max_difficulty_level: 1,
+                min_distance: 1,
+                max_glosses_per_window: 10,
+                window_size: 1000,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 100,
+            },
+        );
+        assert_eq!(
+            level1.iter().map(|g| g.difficulty).collect::<Vec<_>>(),
+            vec![1]
+        );
+
+        let level3 = WordWiseBuilder::filter_candidates_priority_paced(
+            &candidates,
+            &WordWisePacingConfig {
+                max_difficulty_level: 3,
+                min_distance: 1,
+                max_glosses_per_window: 10,
+                window_size: 1000,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 100,
+            },
+        );
+        assert_eq!(
+            level3.iter().map(|g| g.difficulty).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        let level5 = WordWiseBuilder::filter_candidates_priority_paced(
+            &candidates,
+            &WordWisePacingConfig {
+                max_difficulty_level: 5,
+                min_distance: 1,
+                max_glosses_per_window: 10,
+                window_size: 1000,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 100,
+            },
+        );
+        assert_eq!(
+            level5.iter().map(|g| g.difficulty).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
     }
 }

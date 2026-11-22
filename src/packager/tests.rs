@@ -1613,3 +1613,631 @@ fn test_packager_emits_yj_jpg_rst_marker_content_feature() {
         "Content features entity $585 must declare 'yj_jpg_rst_marker_present' when restart markers exist in resources"
     );
 }
+
+#[test]
+fn test_packager_oversized_image_fallback_and_magic_sniffing() {
+    use image::{ImageBuffer, Rgb};
+
+    // 1. Minimal valid 10,000x10,000 PNG bomb header (triggers CoverError::ImageTooLarge)
+    let bomb_png: [u8; 65] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 39, 16, 0, 0, 39, 16,
+        8, 0, 0, 0, 0, 159, 37, 61, 251, 0, 0, 0, 8, 73, 68, 65, 84, 120, 156, 3, 0, 0, 0, 0, 1,
+        72, 6, 137, 210, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    // 2. Real small 10x10 PNG spoofed with ".jpg" extension and "image/jpeg" MIME
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(10, 10);
+    let mut real_png_buf = Cursor::new(Vec::new());
+    img.write_to(&mut real_png_buf, image::ImageFormat::Png)
+        .unwrap();
+    let real_png = real_png_buf.into_inner();
+
+    let mut book = BookIR::default();
+    book.metadata.title = "Image Sniff & Bomb Fallback".to_string();
+    book.resources.insert(
+        "bomb.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "bomb.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: bomb_png.to_vec(),
+        },
+    );
+    book.resources.insert(
+        "spoofed.jpg".to_string(),
+        crate::ir::ResourceAsset {
+            id: "spoofed.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            data: real_png,
+        },
+    );
+    book.sections.push(Section {
+        id: "sec_1".to_string(),
+        title: "Images".to_string(),
+        blocks: vec![
+            Block::Image {
+                id: "img_bomb".to_string(),
+                resource_id: "bomb.png".to_string(),
+                alt: Some("Bomb".to_string()),
+                width: None,
+                height: None,
+            },
+            Block::Image {
+                id: "img_spoof".to_string(),
+                resource_id: "spoofed.jpg".to_string(),
+                alt: Some("Spoof".to_string()),
+                width: None,
+                height: None,
+            },
+        ],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("Packaging must succeed cleanly");
+
+    // Verify oversized image got FALLBACK_PLACEHOLDER_JPEG (631 bytes, 1x1)
+    let raw_417s: Vec<_> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == 417)
+        .collect();
+    assert!(
+        raw_417s
+            .iter()
+            .any(|e| e.data == crate::enhancements::FALLBACK_PLACEHOLDER_JPEG),
+        "Oversized image must be substituted with FALLBACK_PLACEHOLDER_JPEG"
+    );
+
+    // Verify spoofed.jpg was detected as PNG (format SID 284, mime "image/png")
+    let ext_164s: Vec<_> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == 164)
+        .collect();
+    let has_detected_png = ext_164s.iter().any(|e| {
+        let vals = crate::ion::IonReader::new(&e.data).decode_all().unwrap();
+        if let IonValue::Struct(fields) = &vals[0] {
+            let is_spoof = fields.iter().any(|(k, v)| {
+                *k == 165 && *v == IonValue::String("resource/spoofed.jpg".to_string())
+            });
+            let is_png_fmt = fields
+                .iter()
+                .any(|(k, v)| *k == 161 && *v == IonValue::Symbol(284));
+            let is_png_mime = fields
+                .iter()
+                .any(|(k, v)| *k == 162 && *v == IonValue::String("image/png".to_string()));
+            return is_spoof && is_png_fmt && is_png_mime;
+        }
+        false
+    });
+    assert!(
+        has_detected_png,
+        "Magic-byte sniffing must override spoofed .jpg extension with PNG (284 / image/png)"
+    );
+}
+
+#[test]
+fn test_packager_missing_image_fallback_and_duplicate_section_dedup() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Fallback & Dedup".to_string();
+    book.sections.push(Section {
+        id: "dup".to_string(),
+        title: "First".to_string(),
+        blocks: vec![Block::Image {
+            id: "img_missing".to_string(),
+            resource_id: "does_not_exist.png".to_string(),
+            alt: Some("Missing Diagram".to_string()),
+            width: None,
+            height: None,
+        }],
+    });
+    book.sections.push(Section {
+        id: "dup".to_string(),
+        title: "Second".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p2".to_string(),
+            spans: vec![TextSpan {
+                text: "Second section content".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("Missing image and duplicate section IDs must package cleanly");
+
+    // Verify content ($145) contains "Missing Diagram" alt-text fallback
+    let content_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_CONTENT)
+        .expect("Content entity missing");
+    assert!(
+        content_ent
+            .data
+            .windows(b"Missing Diagram".len())
+            .any(|w| w == b"Missing Diagram")
+    );
+}
+
+#[test]
+fn test_packager_metadata_completeness_and_no_cover_omits_cover_landmark() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Metadata Complete".to_string();
+    book.metadata.creators = vec!["Alice Author".to_string(), "Bob Coauthor".to_string()];
+    book.metadata.language = "en_us".to_string();
+    book.metadata.publisher = Some("Kindle Press".to_string());
+    book.metadata.date = Some("2026-01-15".to_string());
+    book.metadata.identifier = "urn:isbn:978-0-12-345678-9".to_string();
+    book.sections.push(Section {
+        id: "chap1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p1".to_string(),
+            spans: vec![TextSpan {
+                text: "Chapter body".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        }],
+    });
+    book.toc.push(crate::ir::TocItem {
+        title: "Chapter 1".to_string(),
+        target_section: "chap1".to_string(),
+        target_anchor: None,
+        children: Vec::new(),
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager.package(&mut buffer).expect("Packaging failed");
+
+    let meta_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_BOOK_METADATA)
+        .expect("$490 missing");
+    assert!(meta_ent.data.windows(12).any(|w| w == b"Alice Author"));
+    assert!(meta_ent.data.windows(12).any(|w| w == b"Bob Coauthor"));
+    assert!(meta_ent.data.windows(5).any(|w| w == b"en-US"));
+    assert!(meta_ent.data.windows(12).any(|w| w == b"Kindle Press"));
+    assert!(meta_ent.data.windows(10).any(|w| w == b"2026-01-15"));
+    assert!(meta_ent.data.windows(13).any(|w| w == b"9780123456789"));
+    assert!(
+        !meta_ent.data.windows(11).any(|w| w == b"cover_image"),
+        "cover_image metadata must NOT be emitted without a cover resource"
+    );
+
+    // Ensure no $233 cover_page landmark was emitted without cover resource
+    let has_cover_landmark = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == 391)
+        .any(|e| {
+            let vals = crate::ion::IonReader::new(&e.data).decode_all().unwrap();
+            let mut syms = Vec::new();
+            vals.iter().for_each(|v| collect_symbols(v, &mut syms));
+            syms.contains(&233)
+        });
+    assert!(
+        !has_cover_landmark,
+        "cover_page ($233) landmark must NOT be emitted when no cover resource exists"
+    );
+}
+
+#[test]
+fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
+    use image::{ImageBuffer, Rgb};
+
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(16, 16);
+    let mut png_bytes = Cursor::new(Vec::new());
+    img.write_to(&mut png_bytes, image::ImageFormat::Png)
+        .unwrap();
+
+    let mut book = BookIR::default();
+    book.metadata.title = "Nested TOC & Calibration".to_string();
+    book.resources.insert(
+        "fig_wide".to_string(),
+        crate::ir::ResourceAsset {
+            id: "fig_wide".to_string(),
+            mime_type: "image/png".to_string(),
+            data: png_bytes.into_inner(),
+        },
+    );
+
+    // Section 1: 300 chars text + 400-char alt-text image (crosses PID 350 and 700!)
+    let long_alt = "A".repeat(400);
+    book.sections.push(Section {
+        id: "chap1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![
+            Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "X".repeat(300),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            },
+            Block::Image {
+                id: "img_fig".to_string(),
+                resource_id: "fig_wide".to_string(),
+                alt: Some(long_alt),
+                width: None,
+                height: None,
+            },
+        ],
+    });
+
+    // Section 2: target anchor at offset 12 inside paragraph
+    book.sections.push(Section {
+        id: "chap2".to_string(),
+        title: "Chapter 2".to_string(),
+        blocks: vec![
+            Block::Heading {
+                id: "h2".to_string(),
+                level: 1,
+                spans: vec![TextSpan {
+                    text: "Chapter Two".to_string(),
+                    style: None,
+                    anchor_id: Some("ch2_top".to_string()),
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            },
+            Block::Paragraph {
+                id: "p2".to_string(),
+                spans: vec![
+                    TextSpan {
+                        text: "Intro prefix".to_string(), // 12 chars
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "Anchor target".to_string(),
+                        style: None,
+                        anchor_id: Some("sub_target".to_string()),
+                        href: None,
+                        ruby: None,
+                    },
+                ],
+                style: None,
+            },
+        ],
+    });
+
+    book.toc = vec![crate::ir::TocItem {
+        title: "Chapter 2".to_string(),
+        target_section: "chap2".to_string(),
+        target_anchor: Some("ch2_top".to_string()),
+        children: vec![crate::ir::TocItem {
+            title: "Sub Target".to_string(),
+            target_section: "chap2".to_string(),
+            target_anchor: Some("sub_target".to_string()),
+            children: Vec::new(),
+        }],
+    }];
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager.package(&mut buffer).expect("Packaging failed");
+
+    // 1. Verify TOC nav_container ($391) has nested $393/$247 structure with child offset == 12
+    let toc_nav = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == 391)
+        .find(|e| {
+            let vals = crate::ion::IonReader::new(&e.data).decode_all().unwrap();
+            matches!(&vals[0], IonValue::Struct(f) if f.iter().any(|(k, v)| *k == 235 && *v == IonValue::Symbol(212)))
+        })
+        .expect("toc_nav entity missing");
+    let toc_vals = crate::ion::IonReader::new(&toc_nav.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(toc_fields) = &toc_vals[0] else {
+        panic!("Expected struct");
+    };
+    let Some((_, IonValue::List(top_entries))) = toc_fields.iter().find(|(k, _)| *k == 247) else {
+        panic!("entries ($247) missing or not a List");
+    };
+    let IonValue::Annotated(ann, inner_top) = &top_entries[0] else {
+        panic!("Expected $393 nav_unit annotation");
+    };
+    assert_eq!(ann.as_slice(), &[393]);
+    let IonValue::Struct(top_unit_fields) = inner_top.as_ref() else {
+        panic!("Expected nav_unit struct");
+    };
+    let Some((_, IonValue::List(child_entries))) = top_unit_fields.iter().find(|(k, _)| *k == 247)
+    else {
+        panic!("nested child entries ($247) missing or not a List");
+    };
+    let IonValue::Annotated(c_ann, inner_child) = &child_entries[0] else {
+        panic!("Expected nested $393 nav_unit annotation");
+    };
+    assert_eq!(c_ann.as_slice(), &[393]);
+    let IonValue::Struct(child_fields) = inner_child.as_ref() else {
+        panic!("Expected child struct");
+    };
+    let Some((_, IonValue::Struct(pos_fields))) = child_fields.iter().find(|(k, _)| *k == 246)
+    else {
+        panic!("target_position missing or not a Struct");
+    };
+    assert_eq!(
+        pos_fields.iter().find(|(k, _)| *k == 143).map(|(_, v)| v),
+        Some(&IonValue::Int(12)),
+        "Nested TOC anchor must resolve to exact character offset 12"
+    );
+
+    // 2. Verify continuous 350-PID calibration ($621) and Block::Image $550 offset clamped to 0
+    let loc_map = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == 550)
+        .expect("$550 missing");
+    let loc_pid_map = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == 621)
+        .expect("$621 missing");
+
+    let loc_vals = crate::ion::IonReader::new(&loc_map.data)
+        .decode_all()
+        .unwrap();
+    let pid_vals = crate::ion::IonReader::new(&loc_pid_map.data)
+        .decode_all()
+        .unwrap();
+
+    if let IonValue::List(l_wrap) = &loc_vals[0]
+        && let IonValue::Struct(lf) = &l_wrap[0]
+        && let Some((_, IonValue::List(entries))) = lf.iter().find(|(k, _)| *k == 182)
+        && let IonValue::List(p_wrap) = &pid_vals[0]
+        && let IonValue::Struct(pf) = &p_wrap[0]
+        && let Some((_, IonValue::List(pids))) = pf.iter().find(|(k, _)| *k == 182)
+    {
+        assert_eq!(entries.len(), pids.len());
+        // Verify PIDs are strictly increasing at 350 intervals: [0, 350, 700]
+        let raw_pids: Vec<i64> = pids
+            .iter()
+            .map(|v| match v {
+                IonValue::Int(n) => *n,
+                _ => panic!("Expected int pid"),
+            })
+            .collect();
+        assert_eq!(raw_pids, vec![0, 350, 700]);
+
+        // Verify any entry targeting an image block has offset == 0
+        for entry in entries {
+            if let IonValue::Struct(ef) = entry {
+                let id = match ef.iter().find(|(k, _)| *k == 155).map(|(_, v)| v) {
+                    Some(IonValue::Int(n)) => *n as u32,
+                    _ => 0,
+                };
+                let off = match ef.iter().find(|(k, _)| *k == 143).map(|(_, v)| v) {
+                    Some(IonValue::Int(n)) => *n,
+                    _ => -1,
+                };
+                if packager.image_block_eids.contains(&id) {
+                    assert_eq!(off, 0, "Block::Image $550 offset must be clamped to 0");
+                }
+            }
+        }
+    } else {
+        panic!("Malformed $550/$621 structure");
+    }
+}
+
+#[test]
+fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset() {
+    use image::{ImageBuffer, Rgb};
+
+    let cover_img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(12, 12);
+    let mut cover_png = Cursor::new(Vec::new());
+    cover_img
+        .write_to(&mut cover_png, image::ImageFormat::Png)
+        .unwrap();
+
+    let fig_img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(16, 16);
+    let mut fig_png = Cursor::new(Vec::new());
+    fig_img
+        .write_to(&mut fig_png, image::ImageFormat::Png)
+        .unwrap();
+
+    let mut book = BookIR::default();
+    book.metadata.title = "Landmarks & Image Calib".to_string();
+    book.metadata.cover_image_id = Some("cover.png".to_string());
+    book.resources.insert(
+        "cover.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "cover.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: cover_png.into_inner(),
+        },
+    );
+    book.resources.insert(
+        "fig_wide.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "fig_wide.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: fig_png.into_inner(),
+        },
+    );
+
+    book.sections.push(Section {
+        id: "chap1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![
+            Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Y".repeat(300),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            },
+            Block::Image {
+                id: "img_fig".to_string(),
+                resource_id: "fig_wide.png".to_string(),
+                alt: Some("Z".repeat(400)),
+                width: None,
+                height: None,
+            },
+            Block::Image {
+                id: "img_missing".to_string(),
+                resource_id: "absent.png".to_string(),
+                alt: Some("Absent Fallback".to_string()),
+                width: None,
+                height: None,
+            },
+        ],
+    });
+    book.sections.push(Section {
+        id: "OEBPS/Text/index".to_string(),
+        title: "Index".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p_idx".to_string(),
+            spans: vec![TextSpan {
+                text: "Index entry".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("Packaging with cover, index, and missing image fallback must succeed");
+
+    // 1. Verify serialized KFX container opens cleanly and fallback alt text was emitted in $145
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut tmp, buffer.get_ref()).unwrap();
+    let opened = crate::container::KfxContainer::open(tmp.path()).expect("KfxContainer::open");
+    assert!(!opened.chunks.is_empty());
+
+    let has_fallback_alt = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_CONTENT)
+        .any(|e| {
+            e.data
+                .windows(b"Absent Fallback".len())
+                .any(|w| w == b"Absent Fallback")
+        });
+    assert!(
+        has_fallback_alt,
+        "Missing <img> must emit alt-text fallback into $145 content"
+    );
+
+    // 1b. Standalone KfxPreflightValidator::validate_container() on a missing-image-only book
+    let mut missing_only = BookIR::default();
+    missing_only.metadata.title = "Missing Img Only".to_string();
+    missing_only.sections.push(Section {
+        id: "sec_1".to_string(),
+        title: "Sec".to_string(),
+        blocks: vec![Block::Image {
+            id: "m1".to_string(),
+            resource_id: "nope.png".to_string(),
+            alt: Some("Fallback Text".to_string()),
+            width: None,
+            height: None,
+        }],
+    });
+    let mut missing_pkg = KfxPackager::new(&missing_only, "EBOK");
+    let mut missing_buf = Cursor::new(Vec::new());
+    missing_pkg.package(&mut missing_buf).unwrap();
+    assert!(
+        crate::validator::KfxPreflightValidator::new(&missing_pkg.entities, None)
+            .validate_container()
+            .is_ok(),
+        "validate_container must pass when missing <img> falls back to alt text"
+    );
+
+    // 2. Verify landmarks container ($391) includes BOTH cover_page ($233) and index ($403)
+    let mut landmark_syms = Vec::new();
+    for ent in packager.entities.iter().filter(|e| e.chunk_type == 391) {
+        let vals = crate::ion::IonReader::new(&ent.data).decode_all().unwrap();
+        vals.iter()
+            .for_each(|v| collect_symbols(v, &mut landmark_syms));
+    }
+    assert!(
+        landmark_syms.contains(&233),
+        "landmarks_nav must emit cover_page ($233) when cover exists"
+    );
+    assert!(
+        landmark_syms.contains(&403),
+        "landmarks_nav must emit index ($403) when index section exists"
+    );
+
+    // 3. Verify absent.png did NOT create any $164/$417 resource entity
+    assert_eq!(
+        packager
+            .entities
+            .iter()
+            .filter(|e| e.chunk_type == 164)
+            .count(),
+        2
+    );
+
+    // 4. Non-vacuous check: $550 actually emitted entries for an image block EID with offset == 0
+    assert!(!packager.image_block_eids.is_empty());
+    let loc_map = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == 550)
+        .expect("$550 missing");
+    let loc_vals = crate::ion::IonReader::new(&loc_map.data)
+        .decode_all()
+        .unwrap();
+    let mut saw_image_loc_entry = false;
+    if let IonValue::List(l_wrap) = &loc_vals[0]
+        && let IonValue::Struct(lf) = &l_wrap[0]
+        && let Some((_, IonValue::List(entries))) = lf.iter().find(|(k, _)| *k == 182)
+    {
+        for entry in entries {
+            if let IonValue::Struct(ef) = entry {
+                let id = match ef.iter().find(|(k, _)| *k == 155).map(|(_, v)| v) {
+                    Some(IonValue::Int(n)) => *n as u32,
+                    _ => 0,
+                };
+                let off = match ef.iter().find(|(k, _)| *k == 143).map(|(_, v)| v) {
+                    Some(IonValue::Int(n)) => *n,
+                    _ => -1,
+                };
+                if packager.image_block_eids.contains(&id) {
+                    saw_image_loc_entry = true;
+                    assert_eq!(off, 0, "Block::Image $550 offset must be clamped to 0");
+                }
+            }
+        }
+    }
+    assert!(
+        saw_image_loc_entry,
+        "$550 location_map must have hit at least one image block EID at 350-PID intervals"
+    );
+}

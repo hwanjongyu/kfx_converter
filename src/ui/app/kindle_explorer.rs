@@ -374,8 +374,13 @@ impl KindleStudio {
                                                         .map(|r_idx| {
                                                             let file_idx = indices[r_idx];
                                                             let file = &this.files[file_idx];
-                                                            let is_confirming = this.confirm_delete_file.as_deref() == Some(&file.name);
-                                                            Self::render_kindle_file_row(file, &view, is_confirming)
+                                                            let is_confirming = this.confirm_delete_file.as_deref()
+                                                                == Some(file.full_path.as_path());
+                                                            Self::render_kindle_file_row(
+                                                                file,
+                                                                &view,
+                                                                is_confirming,
+                                                            )
                                                         })
                                                         .collect()
                                                 }),
@@ -479,9 +484,8 @@ impl KindleStudio {
             _ => Theme::text_muted(),
         };
 
-        let file_name = file.name.clone();
         let view_del = view.clone();
-        let f_del = file_name.clone();
+        let f_del = file.full_path.clone();
 
         div()
             .w_full()
@@ -585,7 +589,9 @@ impl KindleStudio {
                             .justify_end()
                             .child(
                                 div()
-                                    .id(ElementId::Name(format!("del_{}", file_name).into()))
+                                    .id(ElementId::Name(
+                                        format!("del_{}", f_del.to_string_lossy()).into(),
+                                    ))
                                     .cursor_pointer()
                                     .px_2()
                                     .py_0p5()
@@ -606,7 +612,7 @@ impl KindleStudio {
                                         view_del
                                             .update(cx, |this, cx| {
                                                 if this.confirm_delete_file.as_deref()
-                                                    == Some(&f_del)
+                                                    == Some(f_del.as_path())
                                                 {
                                                     this.confirm_delete_file = None;
                                                     this.delete_file(&f_del, cx);

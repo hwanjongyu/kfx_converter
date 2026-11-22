@@ -206,6 +206,8 @@ pub struct CssStylesheet {
 pub const MAX_CSS_RULES: usize = 50_000;
 /// Upper bound on declarations accepted per CSS rule to prevent allocation amplification.
 pub const MAX_DECLARATIONS_PER_RULE: usize = 256;
+/// Upper bound on nested `@media` / `@supports` recursion depth.
+const MAX_CSS_NESTING_DEPTH: usize = 32;
 
 impl CssStylesheet {
     pub fn new() -> Self {
@@ -218,19 +220,86 @@ impl CssStylesheet {
 
     /// Parses CSS text and appends its rules (later sources win on equal specificity).
     pub fn add_css(&mut self, css: &str) {
+        self.add_css_with_depth(css, 0);
+    }
+
+    fn add_css_with_depth(&mut self, css: &str, depth: usize) {
+        if depth > MAX_CSS_NESTING_DEPTH || self.rules.len() >= MAX_CSS_RULES {
+            return;
+        }
+        let css = css.trim_start_matches('\u{FEFF}');
         let cleaned = strip_comments(css);
-        for chunk in cleaned.split('}') {
+        let bytes = cleaned.as_bytes();
+        let mut i = 0usize;
+
+        while i < bytes.len() {
             if self.rules.len() >= MAX_CSS_RULES {
                 break;
             }
-            let Some((sel_part, body)) = chunk.rsplit_once('{') else {
-                continue;
-            };
-            // Unwrap @media/@supports prefixes: keep text after the last '{'.
-            let sel_part = sel_part.rsplit('{').next().unwrap_or(sel_part).trim();
-            if sel_part.is_empty() || sel_part.starts_with('@') {
+            while i < bytes.len()
+                && (bytes[i].is_ascii_whitespace() || bytes[i] == b';' || bytes[i] == b'}')
+            {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                break;
+            }
+
+            if bytes[i] == b'@' {
+                // Scan at-rule prelude until top-level `;` or `{`
+                let Some((term_pos, term_byte)) = scan_at_prelude(bytes, i) else {
+                    break;
+                };
+                if term_byte == b';' {
+                    i = term_pos + 1;
+                    continue;
+                }
+                let prelude = cleaned[i..term_pos].trim();
+                let body_start = term_pos + 1;
+                let (body_end, next_i) = scan_balanced_block(bytes, body_start);
+                i = next_i;
+
+                let after_at = &prelude[1..];
+                let kw_end = after_at
+                    .find(|c: char| c.is_ascii_whitespace() || c == '(' || c == ':')
+                    .unwrap_or(after_at.len());
+                let at_kw = after_at[..kw_end].to_ascii_lowercase();
+                let inner_css = &cleaned[body_start..body_end];
+
+                match at_kw.as_str() {
+                    "media" => {
+                        let query_list = after_at[kw_end..].trim();
+                        if is_supported_media_query_list(query_list) {
+                            self.add_css_with_depth(inner_css, depth + 1);
+                        }
+                    }
+                    "supports" => {
+                        self.add_css_with_depth(inner_css, depth + 1);
+                    }
+                    _ => {
+                        // @font-face, @page, @keyframes, @-webkit-keyframes, etc.
+                    }
+                }
                 continue;
             }
+
+            // Normal rule: scan selector up to `{` (resyncing on stray top-level `;`)
+            let Some((brace_pos, found_brace)) = scan_selector_end(bytes, i) else {
+                break;
+            };
+            if !found_brace {
+                i = brace_pos + 1;
+                continue;
+            }
+            let sel_part = cleaned[i..brace_pos].trim();
+            let body_start = brace_pos + 1;
+            let (body_end, next_i) = scan_balanced_block(bytes, body_start);
+            i = next_i;
+
+            if sel_part.is_empty() {
+                continue;
+            }
+            let body = &cleaned[body_start..body_end];
             let decls = parse_declarations(body);
             if decls.is_empty() {
                 continue;
@@ -338,25 +407,271 @@ impl CssStylesheet {
     }
 }
 
-fn strip_comments(css: &str) -> String {
-    let mut out = String::with_capacity(css.len());
-    let mut rest = css;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        match rest[start + 2..].find("*/") {
-            Some(end) => rest = &rest[start + 2 + end + 2..],
-            None => {
-                rest = "";
-                break;
-            }
+#[inline]
+fn advance_escaped(bytes: &[u8], pos: usize) -> usize {
+    let mut next = pos + 1;
+    if next < bytes.len() {
+        next += 1;
+        while next < bytes.len() && (bytes[next] & 0xC0) == 0x80 {
+            next += 1;
         }
     }
-    out.push_str(rest);
+    next
+}
+
+fn scan_at_prelude(bytes: &[u8], start: usize) -> Option<(usize, u8)> {
+    let mut i = start;
+    let mut quote: Option<u8> = None;
+    let mut paren_depth: usize = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i = advance_escaped(bytes, i);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b';' | b'{' if paren_depth == 0 => return Some((i, b)),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn scan_selector_end(bytes: &[u8], start: usize) -> Option<(usize, bool)> {
+    let mut i = start;
+    let mut quote: Option<u8> = None;
+    let mut bracket_depth: usize = 0;
+    let mut paren_depth: usize = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i = advance_escaped(bytes, i);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'{' if bracket_depth == 0 && paren_depth == 0 => return Some((i, true)),
+            b';' if bracket_depth == 0 && paren_depth == 0 => return Some((i, false)),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn scan_balanced_block(bytes: &[u8], body_start: usize) -> (usize, usize) {
+    let mut i = body_start;
+    let mut depth: usize = 1;
+    let mut quote: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i = advance_escaped(bytes, i);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (i, i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (bytes.len(), bytes.len())
+}
+
+fn is_supported_media_query_list(query_list: &str) -> bool {
+    let trimmed = query_list.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    for query in split_top_level_commas(trimmed) {
+        if is_supported_single_media_query(query) {
+            return true;
+        }
+    }
+    false
+}
+
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let bytes = s.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut paren_depth: usize = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i = advance_escaped(bytes, i);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b',' if paren_depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+fn is_supported_single_media_query(query: &str) -> bool {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() || q.starts_with('(') {
+        return true;
+    }
+    let rest = if let Some(after_only) = q.strip_prefix("only")
+        && after_only.starts_with(|c: char| c.is_ascii_whitespace() || c == '(')
+    {
+        after_only.trim_start()
+    } else {
+        q.as_str()
+    };
+    if rest.starts_with('(') {
+        return true;
+    }
+    let media_type = rest
+        .split(|c: char| c.is_ascii_whitespace() || c == '(')
+        .next()
+        .unwrap_or("");
+    matches!(media_type, "all" | "screen" | "amzn-kf8" | "amzn-et")
+}
+
+fn strip_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let bytes = css.as_bytes();
+    let mut copy_from = 0usize;
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i = advance_escaped(bytes, i);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            out.push_str(&css[copy_from..i]);
+            if let Some(end_rel) = css[i + 2..].find("*/") {
+                i = i + 2 + end_rel + 2;
+                copy_from = i;
+            } else {
+                copy_from = bytes.len();
+                break;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    if copy_from < bytes.len() {
+        out.push_str(&css[copy_from..]);
+    }
     out
 }
 
+fn split_declarations_quote_aware(body: &str) -> Vec<&str> {
+    let mut decls = Vec::new();
+    let bytes = body.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i = advance_escaped(bytes, i);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
+            b';' => {
+                decls.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start < bytes.len() {
+        decls.push(&body[start..]);
+    }
+    decls
+}
+
 fn parse_declarations(body: &str) -> Vec<(Cow<'static, str>, String)> {
-    body.split(';')
+    split_declarations_quote_aware(body)
+        .into_iter()
         .filter_map(|d| {
             let (p, v) = d.split_once(':')?;
             let p_trim = p.trim();
@@ -663,5 +978,81 @@ mod tests {
                 .all(|r| r.decls.len() == MAX_DECLARATIONS_PER_RULE),
             "Every rule must cap declarations at MAX_DECLARATIONS_PER_RULE"
         );
+    }
+
+    #[test]
+    fn test_css_bom_semicolon_at_rules_and_media_filtering() {
+        let css = "\u{FEFF}@charset \"UTF-8\";\n\
+            p.first-after-charset { font-weight: bold; }\n\
+            @import url(\"fonts.css;v=1\");\n\
+            @namespace epub \"http://www.idpf.org/2007/ops\";\n\
+            p.after-import { font-style: italic; }\n\
+            @font-face { font-family: \"Custom; /*not comment*/\"; src: url(a.ttf); }\n\
+            @keyframes fade { 0% { opacity: 0; } 100% { opacity: 1; } }\n\
+            @media print { p.print-only { font-style: italic; } }\n\
+            @media speech, aural { p.speech-only { font-weight: bold; } }\n\
+            @media screen { p.screen-rule { text-align: center; } }\n\
+            @media (min-width: 1px) { p.feature-rule { text-align: justify; } }\n\
+            @media print, amzn-et { p.et-rule { font-weight: bold; } }\n\
+            @supports (display: grid) { p.supports-rule { text-align: right; } }\n\
+            p.after-blocks { color: #123456; }\n";
+
+        let mut sheet = CssStylesheet::new();
+        sheet.add_css(css);
+
+        assert!(
+            sheet
+                .declarations_for("p", Some("first-after-charset"))
+                .contains("font-weight:bold")
+        );
+        assert!(
+            sheet
+                .declarations_for("p", Some("after-import"))
+                .contains("font-style:italic")
+        );
+        assert!(
+            sheet.declarations_for("p", Some("print-only")).is_empty(),
+            "print-only media rules must be dropped"
+        );
+        assert!(
+            sheet.declarations_for("p", Some("speech-only")).is_empty(),
+            "speech/aural-only media rules must be dropped"
+        );
+        assert!(
+            sheet
+                .declarations_for("p", Some("screen-rule"))
+                .contains("text-align:center")
+        );
+        assert!(
+            sheet
+                .declarations_for("p", Some("feature-rule"))
+                .contains("text-align:justify")
+        );
+        assert!(
+            sheet
+                .declarations_for("p", Some("et-rule"))
+                .contains("font-weight:bold")
+        );
+        assert!(
+            sheet
+                .declarations_for("p", Some("supports-rule"))
+                .contains("text-align:right")
+        );
+        assert!(
+            sheet
+                .declarations_for("p", Some("after-blocks"))
+                .contains("color:#123456")
+        );
+    }
+
+    #[test]
+    fn test_css_quote_aware_comment_stripping() {
+        let css =
+            r#"p.q { font-family: "Foo /* kept */ Bar"; /* real comment */ font-weight: bold; }"#;
+        let mut sheet = CssStylesheet::new();
+        sheet.add_css(css);
+        let d = sheet.declarations_for("p", Some("q"));
+        assert!(d.contains("/* kept */"), "decls: {}", d);
+        assert!(d.contains("font-weight:bold"), "decls: {}", d);
     }
 }

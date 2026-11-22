@@ -1,6 +1,7 @@
 use super::KindleStudio;
 use crate::state::StudioTab;
 use crate::theme::Theme;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 impl KindleStudio {
@@ -124,6 +125,7 @@ impl KindleStudio {
                             .into_any_element()
                     })
                     .children(if self.device.connected {
+                        let eject_disabled = self.eject_in_progress || self.has_active_tasks();
                         Some(
                             div()
                                 .id("btn_eject_device")
@@ -131,14 +133,23 @@ impl KindleStudio {
                                 .py_1()
                                 .rounded_md()
                                 .bg(Theme::bg_card_hover())
-                                .cursor_pointer()
                                 .text_xs()
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(Theme::accent_amber())
-                                .child("⏏ Eject Device")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.eject_device(cx);
-                                })),
+                                .text_color(if eject_disabled {
+                                    Theme::text_muted()
+                                } else {
+                                    Theme::accent_amber()
+                                })
+                                .child(if self.eject_in_progress {
+                                    "⏏ Ejecting..."
+                                } else {
+                                    "⏏ Eject Device"
+                                })
+                                .when(!eject_disabled, |el| {
+                                    el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                        this.eject_device(cx);
+                                    }))
+                                }),
                         )
                     } else {
                         None
@@ -197,7 +208,7 @@ impl KindleStudio {
                     .child("⚡ Dual-Pane")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::DualPane;
-                        this.refresh_device(cx);
+                        this.refresh_device_internal(false, cx);
                     })),
             )
             .child(
@@ -222,7 +233,7 @@ impl KindleStudio {
                     .child("📥 Converter Queue")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::Convert;
-                        this.refresh_device(cx);
+                        this.refresh_device_internal(false, cx);
                     })),
             )
             .child(
@@ -247,7 +258,7 @@ impl KindleStudio {
                     .child("📂 Local Folder")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::LocalFolder;
-                        this.refresh_device(cx);
+                        this.refresh_device_internal(false, cx);
                     })),
             )
             .child(
@@ -272,7 +283,7 @@ impl KindleStudio {
                     .child("📚 Kindle Explorer")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.tab = StudioTab::Explorer;
-                        this.refresh_device(cx);
+                        this.refresh_device_internal(false, cx);
                     })),
             )
     }

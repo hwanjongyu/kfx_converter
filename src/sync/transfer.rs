@@ -4,8 +4,11 @@
 //! over UMS and Linux GVFS MTP (`gio copy`), with atomic `.part` renames and streaming copy.
 
 use super::DEVICE_SYNC_LOCK;
-use super::catalog::clean_stale_sdr_files;
-use super::sanitize::{sanitize_asin, sanitize_filename};
+use super::catalog::clean_stale_sdr_files_with_content_id;
+use super::sanitize::{
+    collect_thumbnail_stems, sanitize_asin, sanitize_cde_content_type, sanitize_filename,
+    sanitize_sidecar_stem,
+};
 use super::types::SyncError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,6 +65,7 @@ pub fn sync_to_device(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| sanitize_filename(book_title));
     let safe_asin = sanitize_asin(asin);
+    let safe_cid = content_id.and_then(sanitize_sidecar_stem);
 
     let kfx_filename = format!("{}.kfx", safe_title);
     let dest_kfx_path = docs_dir.join(&kfx_filename);
@@ -91,48 +95,29 @@ pub fn sync_to_device(
         // Calibre-compatible amazon-cover-bug directory to survive WiFi sync
         thumb_dirs.push(device_root.join("amazon-cover-bug"));
 
-        let cde = cde_content_type.unwrap_or("EBOK");
+        let cde = sanitize_cde_content_type(cde_content_type.unwrap_or("EBOK"));
         let alt_cde = if cde == "EBOK" { "PDOC" } else { "EBOK" };
-
-        let mut ids_to_sync = vec![safe_asin.clone()];
-        if let Some(cid) = content_id {
-            let safe_cid = sanitize_asin(cid);
-            if safe_cid != safe_asin && !safe_cid.is_empty() {
-                ids_to_sync.push(safe_cid);
-            }
-        }
+        let ids_to_sync = collect_thumbnail_stems(Some(&safe_asin), safe_cid.as_deref());
 
         for thumb_dir in thumb_dirs {
-            let _ = std::fs::create_dir_all(&thumb_dir);
+            if crate::enhancements::SdrDeployer::ensure_dir_exists(&thumb_dir).is_err() {
+                continue;
+            }
             for id in &ids_to_sync {
-                // Primary CDE type thumbnail (e.g. thumbnail_{id}_PDOC_portrait.jpg)
-                let p1 = thumb_dir.join(format!("thumbnail_{}_{}_portrait.jpg", id, cde));
-                if p1.starts_with(&thumb_dir) {
-                    let _ = write_bytes(&p1, jpeg);
-                    if let Ok(meta) = std::fs::metadata(&p1) {
-                        let mut perms = meta.permissions();
-                        perms.set_readonly(true);
-                        let _ = std::fs::set_permissions(&p1, perms);
-                    }
-                }
-                // Alternate CDE type thumbnail (e.g. thumbnail_{id}_EBOK_portrait.jpg)
-                let p2 = thumb_dir.join(format!("thumbnail_{}_{}_portrait.jpg", id, alt_cde));
-                if p2.starts_with(&thumb_dir) {
-                    let _ = write_bytes(&p2, jpeg);
-                    if let Ok(meta) = std::fs::metadata(&p2) {
-                        let mut perms = meta.permissions();
-                        perms.set_readonly(true);
-                        let _ = std::fs::set_permissions(&p2, perms);
-                    }
-                }
-                // Legacy unqualified thumbnail (e.g. thumbnail_{id}_portrait.jpg)
-                let p3 = thumb_dir.join(format!("thumbnail_{}_portrait.jpg", id));
-                if p3.starts_with(&thumb_dir) {
-                    let _ = write_bytes(&p3, jpeg);
-                    if let Ok(meta) = std::fs::metadata(&p3) {
-                        let mut perms = meta.permissions();
-                        perms.set_readonly(true);
-                        let _ = std::fs::set_permissions(&p3, perms);
+                let thumb_names = [
+                    format!("thumbnail_{}_{}_portrait.jpg", id, cde),
+                    format!("thumbnail_{}_{}_portrait.jpg", id, alt_cde),
+                    format!("thumbnail_{}_portrait.jpg", id),
+                ];
+                for name in &thumb_names {
+                    let path = thumb_dir.join(name);
+                    if path.starts_with(&thumb_dir) {
+                        let _ = write_bytes(&path, jpeg);
+                        if let Ok(meta) = std::fs::metadata(&path) {
+                            let mut perms = meta.permissions();
+                            perms.set_readonly(true);
+                            let _ = std::fs::set_permissions(&path, perms);
+                        }
                     }
                 }
             }
@@ -151,7 +136,7 @@ pub fn sync_to_device(
     crate::enhancements::SdrDeployer::deploy(
         &sdr_dir,
         &safe_asin,
-        content_id,
+        safe_cid.as_deref(),
         cde_content_type,
         book_language,
         cover_jpeg,
@@ -159,7 +144,12 @@ pub fn sync_to_device(
     )?;
 
     let purge_ww = kll_bytes.is_none();
-    clean_stale_sdr_files(&sdr_dir, Some(&safe_asin), purge_ww);
+    let _ = clean_stale_sdr_files_with_content_id(
+        &sdr_dir,
+        Some(&safe_asin),
+        safe_cid.as_deref(),
+        purge_ww,
+    );
 
     // Flush dirty OS page cache to physical storage before reporting completion,
     // preventing truncated files and Kindle .bad_file markers on USB disconnect.
@@ -642,6 +632,51 @@ mod tests {
         assert_eq!(
             std::fs::read(rel_dir.path().join("rel_copy.kfx")).unwrap(),
             b"REL_COPY_BYTES"
+        );
+    }
+
+    #[test]
+    fn test_sync_to_device_preserves_content_id_sidecars_and_sanitizes_cde() {
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        let kfx_src = temp.path().join("content_id_book.kfx");
+        std::fs::write(&kfx_src, b"KFX_BYTES").unwrap();
+
+        let sdr_dir = docs.join("content_id_book.sdr");
+        std::fs::create_dir_all(&sdr_dir).unwrap();
+        // Pre-existing active X-Ray file keyed by content_id + stale ASIN file
+        std::fs::write(sdr_dir.join("XRAY.entities.CID_ACTIVE_123.asc"), b"xray").unwrap();
+        std::fs::write(sdr_dir.join("LanguageLayer.en.STALE_999.kll"), b"old_kll").unwrap();
+
+        let fake_jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        KindleSync::sync_to_device(
+            temp.path(),
+            &kfx_src,
+            "Content ID Book",
+            "123456789ABCDEF0123456789ABCDEF0",
+            Some("CID_ACTIVE_123"),
+            Some("../evil_cde"),
+            Some("en"),
+            Some(&fake_jpeg),
+            Some(b"SQLite format 3\0KLL"),
+        )
+        .unwrap();
+
+        assert!(
+            sdr_dir
+                .join("LanguageLayer.en.CID_ACTIVE_123.kll")
+                .is_file()
+        );
+        assert!(sdr_dir.join("XRAY.entities.CID_ACTIVE_123.asc").is_file());
+        assert!(!sdr_dir.join("LanguageLayer.en.STALE_999.kll").exists());
+        assert!(
+            temp.path()
+                .join("system")
+                .join("thumbnails")
+                .join("thumbnail_CID_ACTIVE_123_EBOK_portrait.jpg")
+                .is_file()
         );
     }
 }

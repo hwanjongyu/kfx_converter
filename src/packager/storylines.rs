@@ -13,6 +13,28 @@ use crate::ir::{Block, TextSpan};
 use crate::symbols::*;
 
 impl<'a> KfxPackager<'a> {
+    fn register_anchor_target(
+        anchor_targets: &mut std::collections::HashMap<(String, String), (u32, usize, usize)>,
+        global_anchor_targets: &mut std::collections::HashMap<String, (u32, usize, usize)>,
+        section_keys: (&str, &str, &str),
+        anchor: &str,
+        target: (u32, usize, usize),
+    ) {
+        let clean = anchor.trim().trim_start_matches('#');
+        if clean.is_empty() {
+            return;
+        }
+        let (raw_name, sec_name, norm_sec_path) = section_keys;
+        for key in [raw_name, sec_name, norm_sec_path] {
+            anchor_targets
+                .entry((key.to_string(), clean.to_string()))
+                .or_insert(target);
+        }
+        global_anchor_targets
+            .entry(clean.to_string())
+            .or_insert(target);
+    }
+
     pub(crate) fn build_storylines_and_sections(
         &mut self,
         symbols: &mut LocalSymbols,
@@ -36,7 +58,7 @@ impl<'a> KfxPackager<'a> {
         let sym_style_events = symbol_id("style_events").unwrap_or(142);
         let sym_offset = symbol_id("offset").unwrap_or(143);
         let sym_length = symbol_id("length").unwrap_or(144);
-        let sym_index = symbol_id("index").unwrap_or(153);
+        let sym_index = symbol_id("index").unwrap_or(403);
         let sym_section_name = symbol_id("section_name").unwrap_or(174);
         let sym_page_templates = symbol_id("page_templates").unwrap_or(141);
         let sym_kfx_id = symbol_id("kfx_id").unwrap_or(598);
@@ -50,6 +72,8 @@ impl<'a> KfxPackager<'a> {
         let mut text_acc = TextAccumulator::new();
         let mut used_styles = std::collections::HashSet::new();
         used_styles.insert(styles.p);
+        let mut used_sec_names = std::collections::HashSet::new();
+        let mut running_pid = 0usize;
 
         for (idx, sec) in sections.iter().enumerate() {
             let raw_name = if sec.id.is_empty() {
@@ -68,46 +92,97 @@ impl<'a> KfxPackager<'a> {
                             _ => false,
                         })));
 
-            let sec_name = format!("c_{}", raw_name);
+            let base_sec_name = format!("c_{}", raw_name);
+            let mut sec_name = base_sec_name.clone();
+            let mut suffix = 2usize;
+            while used_sec_names.contains(&sec_name)
+                || symbols.get_id(&sec_name).is_some()
+                || symbols.get_id(&format!("{}-story", sec_name)).is_some()
+                || symbols.get_id(&format!("{}-ad", sec_name)).is_some()
+            {
+                sec_name = format!("{}_{}", base_sec_name, suffix);
+                suffix += 1;
+            }
+            used_sec_names.insert(sec_name.clone());
 
             let sec_sym_id = symbols.intern(&sec_name);
             let story_sym_id = symbols.intern(&format!("{}-story", sec_name));
             let ad_sym_id = symbols.intern(&format!("{}-ad", sec_name));
 
             let section_eid = self.alloc_eid();
+            self.section_pid_starts.insert(sec_sym_id, running_pid);
+            running_pid += 1;
 
             let mut block_info = Vec::new();
             let mut story_elements = Vec::new();
 
+            let has_token = |tokens: &str, target: &str| -> bool {
+                tokens.split_whitespace().any(|t| t == target)
+            };
+
             // `inherited`: block-level text tokens (italic, bold, font_size_*, ...) resolved from
             // EPUB CSS on the parent <p>/<hN>, cascaded down to every child span.
             let extract_style_events =
-                |spans: &[TextSpan], inherited: &str| -> (String, Vec<IonValue>) {
+                |spans: &[TextSpan],
+                 inherited: &str|
+                 -> (String, Vec<IonValue>, Vec<(String, usize)>) {
                     let mut full_text = String::new();
                     let mut style_events = Vec::new();
+                    let mut anchors = Vec::new();
                     let mut offset = 0;
 
                     for span in spans {
                         let span_len = span.text.chars().count();
+                        if let Some(ref anchor) = span.anchor_id {
+                            let clean_anchor = anchor.trim().trim_start_matches('#').to_string();
+                            if !clean_anchor.is_empty() {
+                                anchors.push((clean_anchor, offset));
+                            }
+                        }
                         let span_st = span.style.as_deref();
-                        let has_bold = span_st.is_some_and(|s| s.contains("bold"))
-                            || (!inherited.is_empty() && inherited.contains("bold"));
-                        let has_italic = span_st.is_some_and(|s| s.contains("italic"))
-                            || (!inherited.is_empty() && inherited.contains("italic"));
-                        let has_underline = span_st.is_some_and(|s| s.contains("underline"))
-                            || (!inherited.is_empty() && inherited.contains("underline"));
-                        let has_strike = span_st.is_some_and(|s| s.contains("strike"))
-                            || (!inherited.is_empty() && inherited.contains("strike"));
-                        let has_sup = span_st.is_some_and(|s| s.contains("sup"))
-                            || (!inherited.is_empty() && inherited.contains("sup"));
-                        let has_sub = span_st.is_some_and(|s| s.contains("sub"))
-                            || (!inherited.is_empty() && inherited.contains("sub"));
-                        let has_code = span_st.is_some_and(|s| s.contains("code"))
-                            || (!inherited.is_empty() && inherited.contains("code"));
-                        let has_small_caps = span_st.is_some_and(|s| s.contains("small_caps"))
-                            || (!inherited.is_empty() && inherited.contains("small_caps"));
-                        let has_uppercase = span_st.is_some_and(|s| s.contains("uppercase"))
-                            || (!inherited.is_empty() && inherited.contains("uppercase"));
+                        let mut span_bold_override: Option<bool> = None;
+                        let mut span_italic_override: Option<bool> = None;
+                        if let Some(st) = span_st {
+                            for tok in st.split_whitespace() {
+                                match tok {
+                                    "bold" => span_bold_override = Some(true),
+                                    "font_weight_normal" => span_bold_override = Some(false),
+                                    "italic" => span_italic_override = Some(true),
+                                    "font_style_normal" => span_italic_override = Some(false),
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        let has_bold = span_bold_override.unwrap_or_else(|| {
+                            !inherited.is_empty() && has_token(inherited, "bold")
+                        });
+                        let has_italic = span_italic_override.unwrap_or_else(|| {
+                            !inherited.is_empty() && has_token(inherited, "italic")
+                        });
+                        let has_underline = span_st.is_some_and(|s| has_token(s, "underline"))
+                            || (!inherited.is_empty() && has_token(inherited, "underline"));
+                        let has_strike = span_st.is_some_and(|s| {
+                            has_token(s, "strike") || has_token(s, "strikethrough")
+                        }) || (!inherited.is_empty()
+                            && (has_token(inherited, "strike")
+                                || has_token(inherited, "strikethrough")));
+                        let has_sup = span_st
+                            .is_some_and(|s| has_token(s, "sup") || has_token(s, "superscript"))
+                            || (!inherited.is_empty()
+                                && (has_token(inherited, "sup")
+                                    || has_token(inherited, "superscript")));
+                        let has_sub = span_st
+                            .is_some_and(|s| has_token(s, "sub") || has_token(s, "subscript"))
+                            || (!inherited.is_empty()
+                                && (has_token(inherited, "sub")
+                                    || has_token(inherited, "subscript")));
+                        let has_code = span_st.is_some_and(|s| has_token(s, "code"))
+                            || (!inherited.is_empty() && has_token(inherited, "code"));
+                        let has_small_caps = span_st.is_some_and(|s| has_token(s, "small_caps"))
+                            || (!inherited.is_empty() && has_token(inherited, "small_caps"));
+                        let has_uppercase = span_st.is_some_and(|s| has_token(s, "uppercase"))
+                            || (!inherited.is_empty() && has_token(inherited, "uppercase"));
 
                         if has_bold {
                             style_events.push(IonValue::Struct(vec![
@@ -165,8 +240,13 @@ impl<'a> KfxPackager<'a> {
                                 (sym_style, IonValue::Symbol(styles.small_caps)),
                             ]));
                         }
+                        let is_dropcap = span_st.is_some_and(|s| {
+                            has_token(s, "dropcap")
+                                || has_token(s, "dropcap_2")
+                                || has_token(s, "dropcap_l2")
+                        });
                         if let Some(st) = span_st
-                            && st.contains("dropcap")
+                            && is_dropcap
                         {
                             let char_count = span.text.chars().count();
                             let has_quote = char_count == 2
@@ -175,9 +255,9 @@ impl<'a> KfxPackager<'a> {
                                     .chars()
                                     .next()
                                     .is_some_and(crate::epub::is_opening_quote);
-                            let is_two_char = st.contains("dropcap_2") || has_quote;
-                            let is_l2 = st.contains("dropcap_l2");
-                            let is_bold = st.contains("bold");
+                            let is_two_char = has_token(st, "dropcap_2") || has_quote;
+                            let is_l2 = has_token(st, "dropcap_l2");
+                            let is_bold = span_bold_override.unwrap_or(false);
 
                             let target_style = match (is_l2, is_two_char, is_bold) {
                                 (true, false, false) => styles.dropcap_l2,
@@ -204,7 +284,6 @@ impl<'a> KfxPackager<'a> {
                         }
                         // Relative font size tokens: child span precedence over inherited block style.
                         // Dropcap spans keep their own sizing and are excluded.
-                        let is_dropcap = span_st.is_some_and(|s| s.contains("dropcap"));
                         if !is_dropcap {
                             let find_font_size = |s: &str| {
                                 s.split_whitespace().find_map(|tok| match tok {
@@ -243,22 +322,31 @@ impl<'a> KfxPackager<'a> {
                         full_text.push_str(&span.text);
                         offset += span_len;
                     }
-                    (full_text, style_events)
+                    (full_text, style_events, anchors)
                 };
+
+            let norm_sec_path = Self::normalize_ir_path(&raw_name);
 
             for block in &sec.blocks {
                 let block_eid = self.alloc_eid();
+                let block_start_pid = running_pid;
 
                 match block {
                     Block::Heading {
+                        id,
                         level,
                         spans,
                         style,
-                        ..
                     } => {
-                        let centered = style
-                            .as_deref()
-                            .is_some_and(|s| s.split_whitespace().any(|t| t == "align_center"));
+                        let last_align = style.as_deref().and_then(|s| {
+                            s.split_whitespace().rfind(|t| {
+                                matches!(
+                                    *t,
+                                    "align_left" | "align_center" | "align_right" | "align_justify"
+                                )
+                            })
+                        });
+                        let centered = last_align == Some("align_center");
                         let style_sym = match (level, centered) {
                             (1, false) => styles.h1,
                             (2, false) => styles.h2,
@@ -268,12 +356,34 @@ impl<'a> KfxPackager<'a> {
                             (_, true) => styles.h3_center,
                         };
                         let inherited = inherited_text_tokens(style.as_deref(), false);
-                        let (full_text, style_events) = extract_style_events(spans, &inherited);
+                        let (full_text, style_events, span_anchors) =
+                            extract_style_events(spans, &inherited);
+
+                        for (anc, anc_off) in span_anchors {
+                            Self::register_anchor_target(
+                                &mut self.anchor_targets,
+                                &mut self.global_anchor_targets,
+                                (&raw_name, &sec_name, &norm_sec_path),
+                                &anc,
+                                (block_eid, block_start_pid + anc_off, anc_off),
+                            );
+                        }
+                        if !id.is_empty() {
+                            Self::register_anchor_target(
+                                &mut self.anchor_targets,
+                                &mut self.global_anchor_targets,
+                                (&raw_name, &sec_name, &norm_sec_path),
+                                id,
+                                (block_eid, block_start_pid, 0),
+                            );
+                        }
 
                         let (chunk_num, chunk_idx) = text_acc.push(&full_text);
                         let chunk_name = format!("content_{}", chunk_num);
                         let chunk_sym_id = symbols.intern(&chunk_name);
-                        block_info.push((block_eid, full_text.chars().count().max(1)));
+                        let pid_len = full_text.chars().count().max(1);
+                        block_info.push((block_eid, pid_len));
+                        running_pid += pid_len;
                         used_styles.insert(style_sym);
 
                         let mut elem_fields = vec![
@@ -304,33 +414,66 @@ impl<'a> KfxPackager<'a> {
                         }
                         story_elements.push(IonValue::Struct(elem_fields));
                     }
-                    Block::Paragraph { spans, style, .. } => {
+                    Block::Paragraph { id, spans, style } => {
                         let base_style = if let Some(st) = style.as_deref() {
-                            if st.contains("align_center") {
-                                styles.align_center
-                            } else if st.contains("align_right") {
-                                styles.align_right
-                            } else if st.contains("align_justify") {
-                                styles.align_justify
-                            } else if st.contains("hanging_indent") {
-                                styles.hanging_indent
-                            } else if st.contains("blockquote") || st.contains("indented_block") {
-                                styles.blockquote
-                            } else if st.contains("p_first") || st.contains("indent_none") {
-                                styles.p_first
-                            } else {
-                                styles.p
+                            let last_align = st.split_whitespace().rfind(|t| {
+                                matches!(
+                                    *t,
+                                    "align_left" | "align_center" | "align_right" | "align_justify"
+                                )
+                            });
+                            match last_align {
+                                Some("align_center") => styles.align_center,
+                                Some("align_right") => styles.align_right,
+                                Some("align_justify") => styles.align_justify,
+                                _ => {
+                                    if has_token(st, "hanging_indent") {
+                                        styles.hanging_indent
+                                    } else if has_token(st, "blockquote")
+                                        || has_token(st, "indented_block")
+                                    {
+                                        styles.blockquote
+                                    } else if has_token(st, "p_first")
+                                        || has_token(st, "indent_none")
+                                    {
+                                        styles.p_first
+                                    } else {
+                                        styles.p
+                                    }
+                                }
                             }
                         } else {
                             styles.p
                         };
                         let inherited = inherited_text_tokens(style.as_deref(), true);
-                        let (full_text, style_events) = extract_style_events(spans, &inherited);
+                        let (full_text, style_events, span_anchors) =
+                            extract_style_events(spans, &inherited);
+
+                        for (anc, anc_off) in span_anchors {
+                            Self::register_anchor_target(
+                                &mut self.anchor_targets,
+                                &mut self.global_anchor_targets,
+                                (&raw_name, &sec_name, &norm_sec_path),
+                                &anc,
+                                (block_eid, block_start_pid + anc_off, anc_off),
+                            );
+                        }
+                        if !id.is_empty() {
+                            Self::register_anchor_target(
+                                &mut self.anchor_targets,
+                                &mut self.global_anchor_targets,
+                                (&raw_name, &sec_name, &norm_sec_path),
+                                id,
+                                (block_eid, block_start_pid, 0),
+                            );
+                        }
 
                         let (chunk_num, chunk_idx) = text_acc.push(&full_text);
                         let chunk_name = format!("content_{}", chunk_num);
                         let chunk_sym_id = symbols.intern(&chunk_name);
-                        block_info.push((block_eid, full_text.chars().count().max(1)));
+                        let pid_len = full_text.chars().count().max(1);
+                        block_info.push((block_eid, pid_len));
+                        running_pid += pid_len;
                         used_styles.insert(base_style);
 
                         let mut elem_fields = vec![
@@ -365,47 +508,154 @@ impl<'a> KfxPackager<'a> {
                     // MUST use sym_resource_name ($175) pointing to the local symbol (IonValue::Symbol) matching
                     // the entity_id of the $164 external_resource entity for Kindle layout resolution.
                     // MUST include sym_style ($157) referencing styles.img to establish bounding box width and center alignment.
+                    // If the referenced resource is absent from `self.book.resources`, emit a safe text fallback
+                    // rather than a dangling `$175` reference.
                     Block::Image {
-                        resource_id, alt, ..
+                        id,
+                        resource_id,
+                        alt,
+                        ..
                     } => {
-                        let alt_text = alt.clone().unwrap_or_default();
-                        block_info.push((block_eid, alt_text.chars().count().max(1)));
-                        let res_sym_id = symbols.intern(resource_id);
-
-                        let is_tiny_icon = self
-                            .book
-                            .resources
-                            .get(resource_id)
-                            .and_then(|a| {
-                                crate::enhancements::CoverOptimizer::get_image_dimensions(&a.data)
-                            })
-                            .is_some_and(|(w, h)| w <= 64 && h <= 64);
-
-                        let img_style = if is_cover || is_tiny_icon {
-                            styles.cover_img
-                        } else {
-                            styles.img
-                        };
-                        used_styles.insert(img_style);
-
-                        let mut img_fields = vec![
-                            (sym_id, IonValue::Int(block_eid as i64)),
-                            (sym_style, IonValue::Symbol(img_style)),
-                            (sym_type, IonValue::Symbol(sym_type_image)),
-                            (sym_resource_name, IonValue::Symbol(res_sym_id)),
-                        ];
-                        if !alt_text.is_empty() {
-                            img_fields.push((sym_alt_text, IonValue::String(alt_text)));
+                        if !id.is_empty() {
+                            Self::register_anchor_target(
+                                &mut self.anchor_targets,
+                                &mut self.global_anchor_targets,
+                                (&raw_name, &sec_name, &norm_sec_path),
+                                id,
+                                (block_eid, block_start_pid, 0),
+                            );
                         }
 
-                        story_elements.push(IonValue::Struct(img_fields));
+                        if let Some(resolved_res_id) = self.resolve_resource_key(resource_id) {
+                            let alt_text = alt.clone().unwrap_or_default();
+                            let pid_len = alt_text.chars().count().max(1);
+                            block_info.push((block_eid, pid_len));
+                            running_pid += pid_len;
+                            self.image_block_eids.insert(block_eid);
+
+                            let res_sym_id = symbols.intern(&resolved_res_id);
+
+                            let is_tiny_icon = self
+                                .book
+                                .resources
+                                .get(&resolved_res_id)
+                                .and_then(|a| {
+                                    crate::enhancements::CoverOptimizer::get_image_dimensions(
+                                        &a.data,
+                                    )
+                                })
+                                .is_some_and(|(w, h)| w <= 64 && h <= 64);
+
+                            let img_style = if is_cover || is_tiny_icon {
+                                styles.cover_img
+                            } else {
+                                styles.img
+                            };
+                            used_styles.insert(img_style);
+
+                            let mut img_fields = vec![
+                                (sym_id, IonValue::Int(block_eid as i64)),
+                                (sym_style, IonValue::Symbol(img_style)),
+                                (sym_type, IonValue::Symbol(sym_type_image)),
+                                (sym_resource_name, IonValue::Symbol(res_sym_id)),
+                            ];
+                            if !alt_text.is_empty() {
+                                img_fields.push((sym_alt_text, IonValue::String(alt_text)));
+                            }
+
+                            story_elements.push(IonValue::Struct(img_fields));
+                        } else {
+                            let fallback_text = alt
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("[Image]")
+                                .to_string();
+                            let (chunk_num, chunk_idx) = text_acc.push(&fallback_text);
+                            let chunk_name = format!("content_{}", chunk_num);
+                            let chunk_sym_id = symbols.intern(&chunk_name);
+                            let pid_len = fallback_text.chars().count().max(1);
+                            block_info.push((block_eid, pid_len));
+                            running_pid += pid_len;
+                            used_styles.insert(styles.p);
+
+                            story_elements.push(IonValue::Struct(vec![
+                                (sym_id, IonValue::Int(block_eid as i64)),
+                                (sym_type, IonValue::Symbol(sym_type_text)),
+                                (sym_style, IonValue::Symbol(styles.p)),
+                                (
+                                    sym_content,
+                                    IonValue::Struct(vec![
+                                        (sym_name, IonValue::Symbol(chunk_sym_id)),
+                                        (sym_index, IonValue::Int(chunk_idx as i64)),
+                                    ]),
+                                ),
+                            ]));
+                        }
                     }
                     _ => {
+                        if let Block::List { id, items, .. } = block {
+                            if !id.is_empty() {
+                                Self::register_anchor_target(
+                                    &mut self.anchor_targets,
+                                    &mut self.global_anchor_targets,
+                                    (&raw_name, &sec_name, &norm_sec_path),
+                                    id,
+                                    (block_eid, block_start_pid, 0),
+                                );
+                            }
+                            let mut stack: Vec<&Block> = items
+                                .iter()
+                                .flat_map(|item| item.iter())
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            while let Some(child) = stack.pop() {
+                                match child {
+                                    Block::Paragraph { spans, .. }
+                                    | Block::Heading { spans, .. } => {
+                                        for sp in spans {
+                                            if let Some(ref anc) = sp.anchor_id {
+                                                Self::register_anchor_target(
+                                                    &mut self.anchor_targets,
+                                                    &mut self.global_anchor_targets,
+                                                    (&raw_name, &sec_name, &norm_sec_path),
+                                                    anc,
+                                                    (block_eid, block_start_pid, 0),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Block::List { items: sub, .. } => {
+                                        for item in sub.iter().rev() {
+                                            for gc in item.iter().rev() {
+                                                stack.push(gc);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        } else if let Block::Table { id, .. } = block
+                            && !id.is_empty()
+                        {
+                            Self::register_anchor_target(
+                                &mut self.anchor_targets,
+                                &mut self.global_anchor_targets,
+                                (&raw_name, &sec_name, &norm_sec_path),
+                                id,
+                                (block_eid, block_start_pid, 0),
+                            );
+                        }
+
                         let text = block.plain_text();
                         let (chunk_num, chunk_idx) = text_acc.push(&text);
                         let chunk_name = format!("content_{}", chunk_num);
                         let chunk_sym_id = symbols.intern(&chunk_name);
-                        block_info.push((block_eid, text.chars().count().max(1)));
+                        let pid_len = text.chars().count().max(1);
+                        block_info.push((block_eid, pid_len));
+                        running_pid += pid_len;
                         used_styles.insert(styles.p);
 
                         story_elements.push(IonValue::Struct(vec![
@@ -430,6 +680,7 @@ impl<'a> KfxPackager<'a> {
                 let chunk_name = format!("content_{}", chunk_num);
                 let chunk_sym_id = symbols.intern(&chunk_name);
                 block_info.push((fallback_eid, 1));
+                running_pid += 1;
                 used_styles.insert(styles.p);
                 story_elements.push(IonValue::Struct(vec![
                     (sym_id, IonValue::Int(fallback_eid as i64)),
@@ -556,5 +807,97 @@ impl<'a> KfxPackager<'a> {
 
         self.sections = sections;
         (section_data, used_styles)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{BookIR, Section};
+
+    #[test]
+    fn test_storylines_exact_tokens_and_normal_overrides() {
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "sec_1".to_string(),
+            title: "Sec 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![
+                    TextSpan {
+                        text: "Inherited italic ".to_string(),
+                        style: Some("subject".to_string()),
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "Overridden upright".to_string(),
+                        style: Some("font_style_normal font_weight_normal".to_string()),
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                ],
+                style: Some("align_center align_left italic bold".to_string()),
+            }],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut symbols = LocalSymbols::new();
+        let (styles, _) = packager.build_styles(&mut symbols);
+        let (sec_data, used_styles) = packager.build_storylines_and_sections(&mut symbols, &styles);
+
+        assert_eq!(sec_data.len(), 1);
+        // align_center overridden by align_left -> uses styles.p (left), NOT styles.align_center
+        assert!(used_styles.contains(&styles.p));
+        assert!(!used_styles.contains(&styles.align_center));
+        // "subject" must NOT falsely trigger styles.subscript
+        assert!(!used_styles.contains(&styles.subscript));
+
+        // Check storyline events: span 0 ("Inherited italic ", len 17) has italic & bold,
+        // span 1 ("Overridden upright", offset 17) must NOT have italic or bold style_events!
+        let story_ent = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == SYM_STORYLINE)
+            .expect("storyline");
+        let vals = crate::ion::IonReader::new(&story_ent.data)
+            .decode_all()
+            .expect("decode storyline");
+        let sym_offset = symbol_id("offset").unwrap_or(143);
+        let sym_style = symbol_id("style").unwrap_or(157);
+        let sym_style_events = symbol_id("style_events").unwrap_or(142);
+        let sym_content_list = symbol_id("content_list").unwrap_or(146);
+
+        let mut saw_span0_italic = false;
+        let mut saw_span1_event = false;
+        if let IonValue::Struct(root) = &vals[0]
+            && let Some((_, IonValue::List(elems))) =
+                root.iter().find(|(k, _)| *k == sym_content_list)
+            && let IonValue::Struct(elem) = &elems[0]
+            && let Some((_, IonValue::List(events))) =
+                elem.iter().find(|(k, _)| *k == sym_style_events)
+        {
+            for ev in events {
+                if let IonValue::Struct(ef) = ev {
+                    let off = ef.iter().find(|(k, _)| *k == sym_offset).map(|(_, v)| v);
+                    let st = ef.iter().find(|(k, _)| *k == sym_style).map(|(_, v)| v);
+                    if off == Some(&IonValue::Int(0))
+                        && st == Some(&IonValue::Symbol(styles.italic))
+                    {
+                        saw_span0_italic = true;
+                    }
+                    if off == Some(&IonValue::Int(17)) {
+                        saw_span1_event = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_span0_italic, "span 0 should inherit italic");
+        assert!(
+            !saw_span1_event,
+            "span 1 with font_style_normal/font_weight_normal must suppress inherited italic/bold"
+        );
     }
 }

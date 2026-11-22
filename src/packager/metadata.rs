@@ -111,19 +111,26 @@ impl<'a> KfxPackager<'a> {
             ]));
         }
 
-        // 2. yj_jpg_rst_marker_present: Required when emitted JPEG images have restart markers
-        let has_rst_marker = self.book.resources.values().any(|res| {
-            res.mime_type.starts_with("image/jpeg")
-                && res
-                    .data
-                    .windows(2)
-                    .any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
-        }) || self.entities.iter().any(|e| {
-            e.chunk_type == 417
-                && e.data
-                    .windows(2)
-                    .any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
-        });
+        // 2. yj_jpg_rst_marker_present: Required when emitted JPEG images ($417) have restart markers.
+        // Falls back to raw resources only if build_content_features is invoked standalone before build_resources.
+        let has_emitted_417 = self.entities.iter().any(|e| e.chunk_type == 417);
+        let has_rst_marker = if has_emitted_417 {
+            self.entities.iter().any(|e| {
+                e.chunk_type == 417
+                    && e.data.starts_with(b"\xFF\xD8\xFF")
+                    && e.data
+                        .windows(2)
+                        .any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+            })
+        } else {
+            self.book.resources.values().any(|res| {
+                res.mime_type.starts_with("image/jpeg")
+                    && res
+                        .data
+                        .windows(2)
+                        .any(|w| w[0] == 0xff && (0xd0..=0xd7).contains(&w[1]))
+            })
+        };
         if has_rst_marker {
             feature_list.push(IonValue::Struct(vec![
                 (
@@ -206,6 +213,89 @@ impl<'a> KfxPackager<'a> {
         self.book.resolve_cover_resource_id()
     }
 
+    pub(crate) fn has_cover_resource(&self) -> bool {
+        self.resolve_cover_resource_id().is_some_and(|id| {
+            self.book
+                .resources
+                .get(&id)
+                .is_some_and(|r| r.mime_type.starts_with("image/"))
+        })
+    }
+
+    pub(crate) fn normalize_bcp47_tag(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return "en".to_string();
+        }
+        let parts: Vec<&str> = trimmed
+            .split(['-', '_'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return "en".to_string();
+        }
+        let mut normalized = Vec::with_capacity(parts.len());
+        let first_lower = parts[0].to_ascii_lowercase();
+        let is_private_or_grandfathered = first_lower == "x" || first_lower == "i";
+        normalized.push(first_lower);
+
+        for sub in &parts[1..] {
+            if is_private_or_grandfathered {
+                normalized.push(sub.to_ascii_lowercase());
+            } else if sub.len() == 4 && sub.bytes().all(|b| b.is_ascii_alphabetic()) {
+                let mut chars = sub.chars();
+                let mut s = String::with_capacity(4);
+                if let Some(c) = chars.next() {
+                    s.push(c.to_ascii_uppercase());
+                }
+                for c in chars {
+                    s.push(c.to_ascii_lowercase());
+                }
+                normalized.push(s);
+            } else if (sub.len() == 2 && sub.bytes().all(|b| b.is_ascii_alphabetic()))
+                || (sub.len() == 3 && sub.bytes().all(|b| b.is_ascii_digit()))
+            {
+                normalized.push(sub.to_ascii_uppercase());
+            } else {
+                normalized.push(sub.to_ascii_lowercase());
+            }
+        }
+        normalized.join("-")
+    }
+
+    fn extract_isbn(identifier: &str) -> Option<(String, bool)> {
+        let trimmed = identifier.trim();
+        let stripped = trimmed
+            .strip_prefix("urn:isbn:")
+            .or_else(|| trimmed.strip_prefix("URN:ISBN:"))
+            .or_else(|| trimmed.strip_prefix("isbn:"))
+            .or_else(|| trimmed.strip_prefix("ISBN:"))
+            .unwrap_or(trimmed)
+            .trim();
+        let compact: String = stripped
+            .chars()
+            .filter(|c| !matches!(c, '-' | ' '))
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        if compact.len() == 10
+            && compact[..9].bytes().all(|b| b.is_ascii_digit())
+            && compact
+                .as_bytes()
+                .last()
+                .is_some_and(|b| b.is_ascii_digit() || *b == b'X')
+        {
+            return Some((compact, false));
+        }
+        if compact.len() == 13
+            && (compact.starts_with("978") || compact.starts_with("979"))
+            && compact.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Some((compact, true));
+        }
+        None
+    }
+
     pub(crate) fn build_book_metadata(&mut self) {
         let sym_book_meta = SYM_BOOK_METADATA; // 490
         let sym_categorised = symbol_id("categorised_metadata").unwrap_or(491);
@@ -214,24 +304,32 @@ impl<'a> KfxPackager<'a> {
         let sym_key = symbol_id("key").unwrap_or(492);
         let sym_val = symbol_id("value").unwrap_or(307);
 
-        let author = self.book.metadata.creators.join(", ");
-        let lang = if self.book.metadata.language.starts_with("en")
-            || self.book.metadata.language.is_empty()
-        {
-            "en".to_string()
-        } else {
-            self.book.metadata.language.clone()
-        };
+        let lang = Self::normalize_bcp47_tag(&self.book.metadata.language);
 
-        let mut title_metadata = vec![
-            IonValue::Struct(vec![
-                (sym_key, IonValue::String("title".to_string())),
-                (sym_val, IonValue::String(self.book.metadata.title.clone())),
-            ]),
-            IonValue::Struct(vec![
+        let mut title_metadata = vec![IonValue::Struct(vec![
+            (sym_key, IonValue::String("title".to_string())),
+            (sym_val, IonValue::String(self.book.metadata.title.clone())),
+        ])];
+
+        let mut emitted_author = false;
+        for creator in &self.book.metadata.creators {
+            let trimmed = creator.trim();
+            if !trimmed.is_empty() {
+                title_metadata.push(IonValue::Struct(vec![
+                    (sym_key, IonValue::String("author".to_string())),
+                    (sym_val, IonValue::String(trimmed.to_string())),
+                ]));
+                emitted_author = true;
+            }
+        }
+        if !emitted_author {
+            title_metadata.push(IonValue::Struct(vec![
                 (sym_key, IonValue::String("author".to_string())),
-                (sym_val, IonValue::String(author)),
-            ]),
+                (sym_val, IonValue::String(String::new())),
+            ]));
+        }
+
+        title_metadata.extend([
             IonValue::Struct(vec![
                 (sym_key, IonValue::String("language".to_string())),
                 (sym_val, IonValue::String(lang)),
@@ -267,34 +365,58 @@ impl<'a> KfxPackager<'a> {
                 ),
                 (sym_val, IonValue::Bool(false)),
             ]),
-        ];
+        ]);
 
         if let Some(ref desc) = self.book.metadata.description
-            && !desc.is_empty()
+            && !desc.trim().is_empty()
         {
             title_metadata.push(IonValue::Struct(vec![
                 (sym_key, IonValue::String("description".to_string())),
-                (sym_val, IonValue::String(desc.clone())),
+                (sym_val, IonValue::String(desc.trim().to_string())),
             ]));
         }
         if let Some(ref publ) = self.book.metadata.publisher
-            && !publ.is_empty()
+            && !publ.trim().is_empty()
         {
             title_metadata.push(IonValue::Struct(vec![
                 (sym_key, IonValue::String("publisher".to_string())),
-                (sym_val, IonValue::String(publ.clone())),
+                (sym_val, IonValue::String(publ.trim().to_string())),
             ]));
         }
         if let Some(ref date) = self.book.metadata.date
-            && !date.is_empty()
+            && !date.trim().is_empty()
         {
             title_metadata.push(IonValue::Struct(vec![
                 (sym_key, IonValue::String("issue_date".to_string())),
-                (sym_val, IonValue::String(date.clone())),
+                (sym_val, IonValue::String(date.trim().to_string())),
             ]));
         }
 
-        if let Some(cover_id) = self.resolve_cover_resource_id() {
+        let ident = self.book.metadata.identifier.trim();
+        if !ident.is_empty() {
+            if let Some((isbn, is_isbn13)) = Self::extract_isbn(ident) {
+                title_metadata.push(IonValue::Struct(vec![
+                    (sym_key, IonValue::String("ISBN".to_string())),
+                    (sym_val, IonValue::String(isbn.clone())),
+                ]));
+                title_metadata.push(IonValue::Struct(vec![
+                    (
+                        sym_key,
+                        IonValue::String(if is_isbn13 { "ISBN-13" } else { "ISBN-10" }.to_string()),
+                    ),
+                    (sym_val, IonValue::String(isbn)),
+                ]));
+            } else {
+                title_metadata.push(IonValue::Struct(vec![
+                    (sym_key, IonValue::String("identifier".to_string())),
+                    (sym_val, IonValue::String(ident.to_string())),
+                ]));
+            }
+        }
+
+        if self.has_cover_resource()
+            && let Some(cover_id) = self.resolve_cover_resource_id()
+        {
             title_metadata.push(IonValue::Struct(vec![
                 (sym_key, IonValue::String("cover_image".to_string())),
                 (sym_val, IonValue::String(cover_id)),

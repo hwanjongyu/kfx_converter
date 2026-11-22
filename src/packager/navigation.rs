@@ -6,22 +6,209 @@ use crate::ion::{IonValue, IonWriter};
 use crate::symbols::symbol_id;
 
 impl<'a> KfxPackager<'a> {
+    fn resolve_nav_target(
+        &self,
+        section_data: &[SectionPackData],
+        raw_section: &str,
+        raw_anchor: Option<&str>,
+    ) -> Option<(u32, usize, usize)> {
+        if section_data.is_empty() {
+            return None;
+        }
+
+        let (sec_part, embedded_anchor) = match raw_section.split_once('#') {
+            Some((s, a)) => (s, Some(a)),
+            None => (raw_section, None),
+        };
+        let eff_anchor = raw_anchor.or(embedded_anchor).and_then(|a| {
+            let decoded = crate::epub::archive::decode_percent(a.trim().trim_start_matches('#'));
+            let trimmed = decoded.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+
+        let norm_sec = Self::normalize_ir_path(sec_part);
+        let sec_file = std::path::Path::new(&norm_sec)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        let matched_sec = section_data
+            .iter()
+            .find(|s| {
+                s.raw_id == sec_part
+                    || s.name == sec_part
+                    || (!norm_sec.is_empty() && Self::normalize_ir_path(&s.raw_id) == norm_sec)
+            })
+            .or_else(|| {
+                let prefix_raw = format!("{}_p", sec_part);
+                let prefix_norm = format!("{}_p", norm_sec);
+                section_data.iter().find(|s| {
+                    s.raw_id.starts_with(&prefix_raw)
+                        || s.name.starts_with(&prefix_raw)
+                        || (!norm_sec.is_empty()
+                            && Self::normalize_ir_path(&s.raw_id).starts_with(&prefix_norm))
+                })
+            })
+            .or_else(|| {
+                if sec_file.is_empty() {
+                    None
+                } else {
+                    section_data.iter().find(|s| {
+                        let s_norm = Self::normalize_ir_path(&s.raw_id);
+                        std::path::Path::new(&s_norm)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|f| f.eq_ignore_ascii_case(sec_file))
+                    })
+                }
+            });
+
+        if let Some(ref anchor) = eff_anchor {
+            if let Some(sec) = matched_sec
+                && let Some(&target) = self
+                    .anchor_targets
+                    .get(&(sec.raw_id.clone(), anchor.clone()))
+                    .or_else(|| self.anchor_targets.get(&(sec.name.clone(), anchor.clone())))
+                    .or_else(|| {
+                        self.anchor_targets
+                            .get(&(Self::normalize_ir_path(&sec.raw_id), anchor.clone()))
+                    })
+            {
+                return Some(target);
+            }
+
+            if let Some(&target) = self
+                .anchor_targets
+                .get(&(sec_part.to_string(), anchor.clone()))
+                .or_else(|| self.anchor_targets.get(&(norm_sec.clone(), anchor.clone())))
+            {
+                return Some(target);
+            }
+
+            let prefix_raw = format!("{}_p", sec_part);
+            let prefix_norm = format!("{}_p", norm_sec);
+            for sec in section_data {
+                if (sec.raw_id.starts_with(&prefix_raw)
+                    || (!norm_sec.is_empty()
+                        && Self::normalize_ir_path(&sec.raw_id).starts_with(&prefix_norm)))
+                    && let Some(&target) = self
+                        .anchor_targets
+                        .get(&(sec.raw_id.clone(), anchor.clone()))
+                {
+                    return Some(target);
+                }
+            }
+
+            if let Some(&target) = self.global_anchor_targets.get(anchor) {
+                return Some(target);
+            }
+        }
+
+        let fallback_sec = matched_sec.or_else(|| section_data.first())?;
+        let sec_start_pid = self
+            .section_pid_starts
+            .get(&fallback_sec.sec_sym_id)
+            .copied()
+            .unwrap_or(0);
+        if let Some(&(first_eid, _)) = fallback_sec.block_info.first() {
+            Some((first_eid, sec_start_pid + 1, 0))
+        } else {
+            Some((fallback_sec.sec_eid, sec_start_pid, 0))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_toc_entries_recursive(
+        &self,
+        items: &[crate::ir::TocItem],
+        section_data: &[SectionPackData],
+        sym_nav_unit: u32,
+        sym_representation: u32,
+        sym_label: u32,
+        sym_target_position: u32,
+        sym_id: u32,
+        sym_offset: u32,
+        sym_entries: u32,
+        depth: usize,
+    ) -> Vec<IonValue> {
+        if depth > 64 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let Some((target_eid, _target_pid, target_off)) = self.resolve_nav_target(
+                section_data,
+                &item.target_section,
+                item.target_anchor.as_deref(),
+            ) else {
+                continue;
+            };
+
+            let mut fields = vec![
+                (
+                    sym_representation,
+                    IonValue::Struct(vec![(sym_label, IonValue::String(item.title.clone()))]),
+                ),
+                (
+                    sym_target_position,
+                    IonValue::Struct(vec![
+                        (sym_id, IonValue::Int(target_eid as i64)),
+                        (sym_offset, IonValue::Int(target_off as i64)),
+                    ]),
+                ),
+            ];
+
+            if !item.children.is_empty() {
+                let child_entries = self.build_toc_entries_recursive(
+                    &item.children,
+                    section_data,
+                    sym_nav_unit,
+                    sym_representation,
+                    sym_label,
+                    sym_target_position,
+                    sym_id,
+                    sym_offset,
+                    sym_entries,
+                    depth + 1,
+                );
+                if !child_entries.is_empty() {
+                    fields.push((sym_entries, IonValue::List(child_entries)));
+                }
+            }
+
+            out.push(IonValue::Annotated(
+                vec![sym_nav_unit],
+                Box::new(IonValue::Struct(fields)),
+            ));
+        }
+        out
+    }
+
     pub(crate) fn build_navigation(
         &mut self,
         symbols: &mut LocalSymbols,
         section_data: &[SectionPackData],
     ) {
-        if self.toc.is_empty() && self.page_list.is_empty() && section_data.is_empty() {
+        let has_cover_resource = self.has_cover_resource();
+        if section_data.is_empty()
+            || (self.toc.is_empty() && self.page_list.is_empty() && !has_cover_resource)
+        {
             return;
         }
 
         let sym_book_navigation = symbol_id("book_navigation").unwrap_or(389);
         let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
+        let sym_nav_unit = symbol_id("nav_unit").unwrap_or(393);
         let sym_toc = symbol_id("toc").unwrap_or(212);
         let sym_page_list = symbol_id("page_list").unwrap_or(237);
         let sym_landmarks = symbol_id("landmarks").unwrap_or(236);
         let sym_landmark_type = symbol_id("landmark_type").unwrap_or(238);
         let sym_cover_page = symbol_id("cover_page").unwrap_or(233);
+        let sym_index = symbol_id("index").unwrap_or(403);
         let sym_nav_type = symbol_id("nav_type").unwrap_or(235);
         let sym_nav_container_name = symbol_id("nav_container_name").unwrap_or(239);
         let sym_nav_containers = symbol_id("nav_containers").unwrap_or(392);
@@ -39,33 +226,56 @@ impl<'a> KfxPackager<'a> {
 
         // 1. Primary TOC navigation container ($391) - Must be index 0 per Kindle Yellowjacket navigation spec
         if !self.toc.is_empty() {
-            let mut entries = Vec::new();
+            let entries = self.build_toc_entries_recursive(
+                &self.toc,
+                section_data,
+                sym_nav_unit,
+                sym_representation,
+                sym_label,
+                sym_target_position,
+                sym_id,
+                sym_offset,
+                sym_entries,
+                0,
+            );
 
-            for item in &self.toc {
-                let target_sec = section_data
-                    .iter()
-                    .find(|s| s.raw_id == item.target_section || s.name == item.target_section)
-                    .or_else(|| {
-                        let prefix = format!("{}_p", item.target_section);
-                        section_data
-                            .iter()
-                            .find(|s| s.raw_id.starts_with(&prefix) || s.name.starts_with(&prefix))
-                    })
-                    .or_else(|| section_data.first());
+            if !entries.is_empty() {
+                let container_sym = symbols.intern("toc_nav");
+                let container_val = IonValue::Struct(vec![
+                    (sym_nav_type, IonValue::Symbol(sym_toc)),
+                    (sym_nav_container_name, IonValue::Symbol(container_sym)),
+                    (sym_entries, IonValue::List(entries)),
+                ]);
 
-                let target_pos = if let Some(sec) = target_sec {
-                    sec.block_info
-                        .first()
-                        .map(|&(eid, _)| eid)
-                        .unwrap_or(sec.sec_eid)
-                } else {
-                    200
-                };
+                let mut container_writer = IonWriter::new();
+                container_writer.write_bvm();
+                container_writer.write_value(&container_val);
+                self.entities.push(KfxEntity {
+                    entity_id: container_sym,
+                    chunk_type: sym_nav_container,
+                    data: container_writer.into_bytes(),
+                });
+                nav_container_syms.push(IonValue::Symbol(container_sym));
+            }
+        }
 
-                let entry_val = IonValue::Struct(vec![
+        // 2. Landmarks container ($236) - Emit cover_page ($233) ONLY when a cover resource exists,
+        // and index ($403) landmark if a dedicated index section is present.
+        let mut landmark_entries = Vec::new();
+        if has_cover_resource && let Some(first_sec) = section_data.first() {
+            let target_pos = first_sec
+                .block_info
+                .first()
+                .map(|&(eid, _)| eid)
+                .unwrap_or(first_sec.sec_eid);
+
+            landmark_entries.push(IonValue::Annotated(
+                vec![sym_nav_unit],
+                Box::new(IonValue::Struct(vec![
+                    (sym_landmark_type, IonValue::Symbol(sym_cover_page)),
                     (
                         sym_representation,
-                        IonValue::Struct(vec![(sym_label, IonValue::String(item.title.clone()))]),
+                        IonValue::Struct(vec![(sym_label, IonValue::String("Cover".to_string()))]),
                     ),
                     (
                         sym_target_position,
@@ -74,57 +284,44 @@ impl<'a> KfxPackager<'a> {
                             (sym_offset, IonValue::Int(0)),
                         ]),
                     ),
-                ]);
-                entries.push(entry_val);
-            }
-
-            // Build nav_container ($391) standalone entity for TOC
-            let container_sym = symbols.intern("toc_nav");
-            let container_val = IonValue::Struct(vec![
-                (sym_nav_type, IonValue::Symbol(sym_toc)),
-                (sym_nav_container_name, IonValue::Symbol(container_sym)),
-                (sym_entries, IonValue::List(entries)),
-            ]);
-
-            let mut container_writer = IonWriter::new();
-            container_writer.write_bvm();
-            container_writer.write_value(&container_val);
-            self.entities.push(KfxEntity {
-                entity_id: container_sym,
-                chunk_type: sym_nav_container,
-                data: container_writer.into_bytes(),
-            });
-            nav_container_syms.push(IonValue::Symbol(container_sym));
+                ])),
+            ));
         }
 
-        // 2. Landmarks container ($236) - For Kindle Reader mapping Cover Page & "Go To > Cover"
-        if let Some(first_sec) = section_data.first() {
-            let target_pos = first_sec
+        if let Some(index_sec) = section_data.iter().find(|s| {
+            s.raw_id.eq_ignore_ascii_case("index")
+                || s.raw_id.to_ascii_lowercase().ends_with("/index")
+        }) {
+            let target_pos = index_sec
                 .block_info
                 .first()
                 .map(|&(eid, _)| eid)
-                .unwrap_or(first_sec.sec_eid);
+                .unwrap_or(index_sec.sec_eid);
+            landmark_entries.push(IonValue::Annotated(
+                vec![sym_nav_unit],
+                Box::new(IonValue::Struct(vec![
+                    (sym_landmark_type, IonValue::Symbol(sym_index)),
+                    (
+                        sym_representation,
+                        IonValue::Struct(vec![(sym_label, IonValue::String("Index".to_string()))]),
+                    ),
+                    (
+                        sym_target_position,
+                        IonValue::Struct(vec![
+                            (sym_id, IonValue::Int(target_pos as i64)),
+                            (sym_offset, IonValue::Int(0)),
+                        ]),
+                    ),
+                ])),
+            ));
+        }
 
-            let cover_landmark = IonValue::Struct(vec![
-                (sym_landmark_type, IonValue::Symbol(sym_cover_page)),
-                (
-                    sym_representation,
-                    IonValue::Struct(vec![(sym_label, IonValue::String("Cover".to_string()))]),
-                ),
-                (
-                    sym_target_position,
-                    IonValue::Struct(vec![
-                        (sym_id, IonValue::Int(target_pos as i64)),
-                        (sym_offset, IonValue::Int(0)),
-                    ]),
-                ),
-            ]);
-
+        if !landmark_entries.is_empty() {
             let landmarks_sym = symbols.intern("landmarks_nav");
             let landmarks_val = IonValue::Struct(vec![
                 (sym_nav_type, IonValue::Symbol(sym_landmarks)),
                 (sym_nav_container_name, IonValue::Symbol(landmarks_sym)),
-                (sym_entries, IonValue::List(vec![cover_landmark])),
+                (sym_entries, IonValue::List(landmark_entries)),
             ]);
 
             let mut landmarks_writer = IonWriter::new();
@@ -142,62 +339,58 @@ impl<'a> KfxPackager<'a> {
             let mut page_entries = Vec::new();
 
             for page in &self.page_list {
-                let target_sec = section_data
-                    .iter()
-                    .find(|s| s.raw_id == page.target_section || s.name == page.target_section)
-                    .or_else(|| {
-                        let prefix = format!("{}_p", page.target_section);
-                        section_data
-                            .iter()
-                            .find(|s| s.raw_id.starts_with(&prefix) || s.name.starts_with(&prefix))
-                    })
-                    .or_else(|| section_data.first());
-
-                let target_pos = if let Some(sec) = target_sec {
-                    sec.block_info
-                        .first()
-                        .map(|&(eid, _)| eid)
-                        .unwrap_or(sec.sec_eid)
-                } else {
-                    200
+                let Some((target_eid, _target_pid, target_off)) = self.resolve_nav_target(
+                    section_data,
+                    &page.target_section,
+                    page.target_anchor.as_deref(),
+                ) else {
+                    continue;
                 };
 
-                let entry_val = IonValue::Struct(vec![
-                    (
-                        sym_representation,
-                        IonValue::Struct(vec![(
-                            sym_label,
-                            IonValue::String(page.page_number.clone()),
-                        )]),
-                    ),
-                    (
-                        sym_target_position,
-                        IonValue::Struct(vec![
-                            (sym_id, IonValue::Int(target_pos as i64)),
-                            (sym_offset, IonValue::Int(0)),
-                        ]),
-                    ),
-                ]);
+                let entry_val = IonValue::Annotated(
+                    vec![sym_nav_unit],
+                    Box::new(IonValue::Struct(vec![
+                        (
+                            sym_representation,
+                            IonValue::Struct(vec![(
+                                sym_label,
+                                IonValue::String(page.page_number.clone()),
+                            )]),
+                        ),
+                        (
+                            sym_target_position,
+                            IonValue::Struct(vec![
+                                (sym_id, IonValue::Int(target_eid as i64)),
+                                (sym_offset, IonValue::Int(target_off as i64)),
+                            ]),
+                        ),
+                    ])),
+                );
                 page_entries.push(entry_val);
             }
 
-            // Build nav_container ($391) standalone entity for page_list
-            let page_container_sym = symbols.intern("page_list_nav");
-            let page_container_val = IonValue::Struct(vec![
-                (sym_nav_type, IonValue::Symbol(sym_page_list)),
-                (sym_nav_container_name, IonValue::Symbol(page_container_sym)),
-                (sym_entries, IonValue::List(page_entries)),
-            ]);
+            if !page_entries.is_empty() {
+                let page_container_sym = symbols.intern("page_list_nav");
+                let page_container_val = IonValue::Struct(vec![
+                    (sym_nav_type, IonValue::Symbol(sym_page_list)),
+                    (sym_nav_container_name, IonValue::Symbol(page_container_sym)),
+                    (sym_entries, IonValue::List(page_entries)),
+                ]);
 
-            let mut page_writer = IonWriter::new();
-            page_writer.write_bvm();
-            page_writer.write_value(&page_container_val);
-            self.entities.push(KfxEntity {
-                entity_id: page_container_sym,
-                chunk_type: sym_nav_container,
-                data: page_writer.into_bytes(),
-            });
-            nav_container_syms.push(IonValue::Symbol(page_container_sym));
+                let mut page_writer = IonWriter::new();
+                page_writer.write_bvm();
+                page_writer.write_value(&page_container_val);
+                self.entities.push(KfxEntity {
+                    entity_id: page_container_sym,
+                    chunk_type: sym_nav_container,
+                    data: page_writer.into_bytes(),
+                });
+                nav_container_syms.push(IonValue::Symbol(page_container_sym));
+            }
+        }
+
+        if nav_container_syms.is_empty() {
+            return;
         }
 
         // Build book_navigation ($389) as singleton list of reading orders referencing container symbols

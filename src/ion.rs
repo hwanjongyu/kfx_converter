@@ -158,16 +158,24 @@ pub fn parse_decimal_exact(s: &str) -> Option<(i64, i8)> {
         return Some((0, 0));
     }
 
-    let mut coef: i64 = trimmed.parse().ok()?;
-    if is_neg {
-        coef = -coef;
-    }
-    let mut exp: i32 = -(frac_part.len() as i32) + exp_offset;
+    let mag: u64 = trimmed.parse().ok()?;
+    let mut coef: i64 = if is_neg {
+        if mag == (i64::MAX as u64) + 1 {
+            i64::MIN
+        } else {
+            i64::try_from(mag).ok()?.checked_neg()?
+        }
+    } else {
+        i64::try_from(mag).ok()?
+    };
+
+    let frac_len_i32 = i32::try_from(frac_part.len()).ok()?.checked_neg()?;
+    let mut exp: i32 = frac_len_i32.checked_add(exp_offset)?;
 
     // Normalize trailing zeros: e.g. 1.0 -> coef 10, exp -1 -> coef 1, exp 0
     while coef != 0 && coef % 10 == 0 {
         coef /= 10;
-        exp += 1;
+        exp = exp.checked_add(1)?;
     }
 
     let exp_i8 = i8::try_from(exp).ok()?;
@@ -422,19 +430,30 @@ pub enum IonError {
 
 /// Decodes an unsigned integer from Ion 7-bit variable-length unsigned integer (VarUInt).
 pub fn decode_varuint(buf: &[u8], offset: &mut usize) -> Result<u64, IonError> {
+    decode_varuint_bounded(buf, offset, buf.len())
+}
+
+fn decode_varuint_bounded(buf: &[u8], offset: &mut usize, limit: usize) -> Result<u64, IonError> {
+    let end = limit.min(buf.len());
     let mut val: u64 = 0;
-    let mut count = 0;
-    while *offset < buf.len() {
+    let mut count = 0usize;
+    while *offset < end {
         let b = buf[*offset];
         *offset += 1;
         count += 1;
-        if count > 10 || (count == 10 && val > (u64::MAX >> 7)) {
+        if count > 10 {
             return Err(IonError::MalformedIon(format!(
                 "VarUInt sequence exceeded 10 bytes or overflowed at offset {}",
                 *offset
             )));
         }
-        val = (val << 7) | ((b & 0x7F) as u64);
+        val = val.checked_mul(128).ok_or_else(|| {
+            IonError::MalformedIon(format!(
+                "VarUInt sequence exceeded 10 bytes or overflowed at offset {}",
+                *offset
+            ))
+        })?;
+        val |= u64::from(b & 0x7F);
         if (b & 0x80) != 0 {
             return Ok(val);
         }
@@ -450,42 +469,53 @@ pub fn decode_varint_slice(buf: &[u8], offset: &mut usize) -> Result<i64, IonErr
     let first = buf[*offset];
     *offset += 1;
     let is_neg = (first & 0x40) != 0;
-    let mut mag: u64 = (first & 0x3F) as u64;
+    let mut mag: u64 = u64::from(first & 0x3F);
     if (first & 0x80) != 0 {
-        return Ok(if is_neg { -(mag as i64) } else { mag as i64 });
+        let val =
+            i64::try_from(mag).map_err(|_| IonError::MalformedIon("VarInt overflow".into()))?;
+        return if is_neg {
+            val.checked_neg()
+                .ok_or_else(|| IonError::MalformedIon("VarInt underflow".into()))
+        } else {
+            Ok(val)
+        };
     }
-    let mut count = 1;
+    let mut count = 1usize;
     while *offset < buf.len() {
         count += 1;
-        if count > 10 || (count == 10 && mag > (u64::MAX >> 7)) {
+        if count > 10 {
             return Err(IonError::MalformedIon(
                 "VarInt exceeds 10 bytes or overflows".into(),
             ));
         }
         let b = buf[*offset];
         *offset += 1;
-        if mag > (u64::MAX >> 7) {
-            return Err(IonError::MalformedIon("VarInt shift overflow".into()));
-        }
-        mag = (mag << 7) | ((b & 0x7F) as u64);
+        mag = mag
+            .checked_mul(128)
+            .ok_or_else(|| IonError::MalformedIon("VarInt shift overflow".into()))?;
+        mag |= u64::from(b & 0x7F);
         if (b & 0x80) != 0 {
             if is_neg {
                 if mag == (i64::MAX as u64) + 1 {
                     return Ok(i64::MIN);
                 }
-                if mag > (i64::MAX as u64) + 1 {
-                    return Err(IonError::MalformedIon("VarInt underflow".into()));
-                }
-                return Ok(-(mag as i64));
+                let pos = i64::try_from(mag)
+                    .map_err(|_| IonError::MalformedIon("VarInt underflow".into()))?;
+                return pos
+                    .checked_neg()
+                    .ok_or_else(|| IonError::MalformedIon("VarInt underflow".into()));
             } else {
-                if mag > i64::MAX as u64 {
-                    return Err(IonError::MalformedIon("VarInt overflow".into()));
-                }
-                return Ok(mag as i64);
+                return i64::try_from(mag)
+                    .map_err(|_| IonError::MalformedIon("VarInt overflow".into()));
             }
         }
     }
     Err(IonError::UnexpectedEof(*offset))
+}
+
+#[inline]
+fn is_nop_pad(td: u8) -> bool {
+    (td >> 4) == 0 && td != 0x0F
 }
 
 /// Binary Amazon Ion deserializer.
@@ -519,10 +549,48 @@ impl<'a> IonReader<'a> {
         self.offset
     }
 
+    fn skip_single_nop_pad(&mut self, limit: usize) -> Result<bool, IonError> {
+        if self.offset >= limit {
+            return Ok(false);
+        }
+        let td = self.buf[self.offset];
+        if !is_nop_pad(td) {
+            return Ok(false);
+        }
+        self.offset += 1;
+        let pad_len = if td == 0x00 {
+            0usize
+        } else if td <= 0x0D {
+            usize::from(td)
+        } else {
+            let len_u64 = decode_varuint_bounded(self.buf, &mut self.offset, limit)?;
+            usize::try_from(len_u64).map_err(|_| {
+                IonError::MalformedIon(format!("NOP pad length {} exceeds usize::MAX", len_u64))
+            })?
+        };
+        let pad_end = self
+            .offset
+            .checked_add(pad_len)
+            .filter(|&end| end <= limit)
+            .ok_or(IonError::UnexpectedEof(limit))?;
+        self.offset = pad_end;
+        Ok(true)
+    }
+
+    fn skip_nop_pads(&mut self, limit: usize) -> Result<(), IonError> {
+        while self.skip_single_nop_pad(limit)? {}
+        Ok(())
+    }
+
     /// Decodes all top-level values until end of buffer.
     pub fn decode_all(&mut self) -> Result<Vec<IonValue>, IonError> {
         let mut values = Vec::new();
-        while self.offset < self.buf.len() {
+        let limit = self.buf.len();
+        loop {
+            self.skip_nop_pads(limit)?;
+            if self.offset >= limit {
+                break;
+            }
             values.push(self.decode_value()?);
         }
         Ok(values)
@@ -540,6 +608,7 @@ impl<'a> IonReader<'a> {
                 "Recursion depth limit exceeded".into(),
             ));
         }
+        self.skip_nop_pads(limit)?;
         if self.offset >= limit {
             return Err(IonError::UnexpectedEof(self.offset));
         }
@@ -551,14 +620,24 @@ impl<'a> IonReader<'a> {
         let type_code = td >> 4;
         let len_nibble = td & 0x0F;
 
+        if type_code == 0xF || (type_code == 0xE && len_nibble == 0x0F) {
+            return Err(IonError::InvalidTypeDescriptor(td, start_offset));
+        }
+        if type_code == 0x1 && !matches!(len_nibble, 0x0 | 0x1 | 0xF) {
+            return Err(IonError::InvalidTypeDescriptor(td, start_offset));
+        }
+
         let content_len = if type_code == 0x0 || type_code == 0x1 {
             0
-        } else if len_nibble == 0x0E {
-            decode_varuint(self.buf, &mut self.offset)? as usize
+        } else if len_nibble == 0x0E || (type_code == 0xD && len_nibble == 0x01) {
+            let len_u64 = decode_varuint_bounded(self.buf, &mut self.offset, limit)?;
+            usize::try_from(len_u64).map_err(|_| {
+                IonError::MalformedIon(format!("Ion value length {} exceeds usize::MAX", len_u64))
+            })?
         } else if len_nibble == 0x0F {
             0
         } else {
-            len_nibble as usize
+            usize::from(len_nibble)
         };
 
         if len_nibble == 0x0F && type_code != 0x01 {
@@ -591,14 +670,15 @@ impl<'a> IonReader<'a> {
                 }
                 let mut int_val: u64 = 0;
                 for i in 0..content_len {
-                    int_val = (int_val << 8) | (self.buf[payload_start + i] as u64);
+                    int_val = (int_val << 8) | u64::from(self.buf[payload_start + i]);
                 }
                 self.offset = payload_end;
-                let signed = if int_val > i64::MAX as u64 {
-                    i64::MAX
-                } else {
-                    int_val as i64
-                };
+                let signed = i64::try_from(int_val).map_err(|_| {
+                    IonError::MalformedIon(format!(
+                        "Positive integer {} overflows i64::MAX",
+                        int_val
+                    ))
+                })?;
                 IonValue::Int(signed)
             }
             0x3 => {
@@ -610,13 +690,21 @@ impl<'a> IonReader<'a> {
                 }
                 let mut int_val: u64 = 0;
                 for i in 0..content_len {
-                    int_val = (int_val << 8) | (self.buf[payload_start + i] as u64);
+                    int_val = (int_val << 8) | u64::from(self.buf[payload_start + i]);
                 }
                 self.offset = payload_end;
-                let signed = if int_val > (i64::MAX as u64) {
+                let signed = if int_val == (i64::MAX as u64) + 1 {
                     i64::MIN
                 } else {
-                    -(int_val as i64)
+                    let pos = i64::try_from(int_val).map_err(|_| {
+                        IonError::MalformedIon(format!(
+                            "Negative integer -{} overflows i64::MIN",
+                            int_val
+                        ))
+                    })?;
+                    pos.checked_neg().ok_or_else(|| {
+                        IonError::MalformedIon("Negative integer negation overflow".into())
+                    })?
                 };
                 IonValue::Int(signed)
             }
@@ -626,7 +714,7 @@ impl<'a> IonReader<'a> {
                 } else if content_len == 4 {
                     let mut b = [0u8; 4];
                     b.copy_from_slice(&self.buf[payload_start..payload_end]);
-                    f32::from_be_bytes(b) as f64
+                    f64::from(f32::from_be_bytes(b))
                 } else if content_len == 8 {
                     let mut b = [0u8; 8];
                     b.copy_from_slice(&self.buf[payload_start..payload_end]);
@@ -663,32 +751,36 @@ impl<'a> IonReader<'a> {
                     if !mantissa_bytes.is_empty() {
                         let is_neg = (mantissa_bytes[0] & 0x80) != 0;
                         let first = mantissa_bytes[0] & 0x7F;
-                        let mut mag: u64 = first as u64;
+                        let mut mag: u64 = u64::from(first);
                         for &b in &mantissa_bytes[1..] {
-                            mag = (mag << 8) | (b as u64);
+                            mag = (mag << 8) | u64::from(b);
                         }
                         if is_neg {
                             if mag == (i64::MAX as u64) + 1 {
                                 mantissa = i64::MIN;
-                            } else if mag > (i64::MAX as u64) + 1 {
-                                return Err(IonError::MalformedIon("Mantissa underflow".into()));
                             } else {
-                                mantissa = -(mag as i64);
+                                let pos = i64::try_from(mag).map_err(|_| {
+                                    IonError::MalformedIon("Mantissa underflow".into())
+                                })?;
+                                mantissa = pos.checked_neg().ok_or_else(|| {
+                                    IonError::MalformedIon("Mantissa underflow".into())
+                                })?;
                             }
                         } else {
-                            if mag > i64::MAX as u64 {
-                                return Err(IonError::MalformedIon("Mantissa overflow".into()));
-                            }
-                            mantissa = mag as i64;
+                            mantissa = i64::try_from(mag)
+                                .map_err(|_| IonError::MalformedIon("Mantissa overflow".into()))?;
                         }
                     }
                     self.offset = payload_end;
                     if exp == 0 {
                         IonValue::Decimal(format!("{}.0", mantissa))
                     } else if exp < 0 {
-                        let shift = exp.checked_neg().ok_or_else(|| {
+                        let neg_exp = exp.checked_neg().ok_or_else(|| {
                             IonError::MalformedIon("Decimal exponent negation overflow".into())
-                        })? as usize;
+                        })?;
+                        let shift = usize::try_from(neg_exp).map_err(|_| {
+                            IonError::MalformedIon("Decimal shift exceeds usize::MAX".into())
+                        })?;
                         if shift > 64 {
                             return Err(IonError::MalformedIon(
                                 "Decimal shift exceeds bound".into(),
@@ -719,9 +811,15 @@ impl<'a> IonReader<'a> {
                 }
             }
             0x7 => {
+                if content_len > 4 {
+                    return Err(IonError::MalformedIon(format!(
+                        "Symbol ID payload exceeds 4 bytes (length {})",
+                        content_len
+                    )));
+                }
                 let mut sid: u32 = 0;
                 for i in 0..content_len {
-                    sid = (sid << 8) | (self.buf[payload_start + i] as u32);
+                    sid = (sid << 8) | u32::from(self.buf[payload_start + i]);
                 }
                 self.offset = payload_end;
                 IonValue::Symbol(sid)
@@ -742,7 +840,11 @@ impl<'a> IonReader<'a> {
                 self.offset = payload_start;
                 self.depth += 1;
                 let mut items = Vec::new();
-                while self.offset < payload_end {
+                loop {
+                    self.skip_nop_pads(payload_end)?;
+                    if self.offset >= payload_end {
+                        break;
+                    }
                     items.push(self.decode_value_bounded(payload_end)?);
                 }
                 self.depth -= 1;
@@ -759,7 +861,18 @@ impl<'a> IonReader<'a> {
                 self.depth += 1;
                 let mut fields = Vec::new();
                 while self.offset < payload_end {
-                    let field_id = decode_varuint(self.buf, &mut self.offset)? as u32;
+                    let field_id_u64 =
+                        decode_varuint_bounded(self.buf, &mut self.offset, payload_end)?;
+                    let field_id = u32::try_from(field_id_u64).map_err(|_| {
+                        IonError::MalformedIon(format!(
+                            "Struct field SID {} exceeds u32::MAX",
+                            field_id_u64
+                        ))
+                    })?;
+                    if self.offset < payload_end && is_nop_pad(self.buf[self.offset]) {
+                        self.skip_single_nop_pad(payload_end)?;
+                        continue;
+                    }
                     let field_val = self.decode_value_bounded(payload_end)?;
                     fields.push((field_id, field_val));
                 }
@@ -774,7 +887,19 @@ impl<'a> IonReader<'a> {
             }
             0xE => {
                 self.offset = payload_start;
-                let annot_length = decode_varuint(self.buf, &mut self.offset)? as usize;
+                let annot_len_u64 =
+                    decode_varuint_bounded(self.buf, &mut self.offset, payload_end)?;
+                let annot_length = usize::try_from(annot_len_u64).map_err(|_| {
+                    IonError::MalformedIon(format!(
+                        "Annotation length {} exceeds usize::MAX",
+                        annot_len_u64
+                    ))
+                })?;
+                if annot_length == 0 {
+                    return Err(IonError::MalformedIon(
+                        "Annotation length must be greater than zero".into(),
+                    ));
+                }
                 let annot_end = self
                     .offset
                     .checked_add(annot_length)
@@ -782,12 +907,29 @@ impl<'a> IonReader<'a> {
                     .ok_or(IonError::UnexpectedEof(payload_end))?;
                 let mut annotations = Vec::new();
                 while self.offset < annot_end {
-                    let annot_id = decode_varuint(self.buf, &mut self.offset)? as u32;
+                    let annot_id_u64 =
+                        decode_varuint_bounded(self.buf, &mut self.offset, annot_end)?;
+                    let annot_id = u32::try_from(annot_id_u64).map_err(|_| {
+                        IonError::MalformedIon(format!(
+                            "Annotation SID {} exceeds u32::MAX",
+                            annot_id_u64
+                        ))
+                    })?;
                     annotations.push(annot_id);
+                }
+                if self.offset != annot_end || annotations.is_empty() {
+                    return Err(IonError::MalformedIon(
+                        "Malformed Ion annotation symbol sequence".into(),
+                    ));
                 }
                 self.depth += 1;
                 let wrapped_val = self.decode_value_bounded(payload_end)?;
                 self.depth -= 1;
+                if matches!(wrapped_val, IonValue::Annotated(_, _)) {
+                    return Err(IonError::MalformedIon(
+                        "Nested Ion annotation wrappers are not permitted".into(),
+                    ));
+                }
                 if self.offset != payload_end {
                     return Err(IonError::MalformedIon(format!(
                         "Ion annotated child value length mismatch: offset {} != end {}",
@@ -1194,5 +1336,141 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), IonError::MalformedIon(msg) if msg.contains("Invalid Ion float length"))
         );
+    }
+
+    #[test]
+    fn test_ion_nop_padding_vs_null_and_container_pads() {
+        // 0x00 (1-byte pad) + 0x02 AA BB (3-byte pad) + 0x0E 81 CC (VarUInt 1-byte pad) + 0x0F (Null)
+        let stream = [0x00, 0x02, 0xAA, 0xBB, 0x0E, 0x81, 0xCC, 0x0F];
+        let mut r = IonReader::new(&stream);
+        assert_eq!(r.decode_value().unwrap(), IonValue::Null);
+        assert!(r.is_empty());
+
+        // Stream consisting solely of NOPs must return UnexpectedEof when a value is required
+        let nop_only = [0x00, 0x01, 0xFF, 0x0E, 0x82, 0x11, 0x22];
+        let mut r_nop = IonReader::new(&nop_only);
+        assert!(matches!(
+            r_nop.decode_value(),
+            Err(IonError::UnexpectedEof(_))
+        ));
+
+        // Truncated NOP pad inside container bounds must return UnexpectedEof
+        let truncated_nop_in_list = [0xB2, 0x03, 0xAA]; // List len 2, NOP claims 3 bytes
+        let mut r_trunc = IonReader::new(&truncated_nop_in_list);
+        assert!(matches!(
+            r_trunc.decode_value(),
+            Err(IonError::UnexpectedEof(_))
+        ));
+
+        // List with leading and trailing NOP pads around Int(7) and Null (0x0F)
+        let list_with_nops = [0xB7, 0x00, 0x21, 0x07, 0x0F, 0x02, 0xDE, 0xAD];
+        let mut r_list = IonReader::new(&list_with_nops);
+        assert_eq!(
+            r_list.decode_value().unwrap(),
+            IonValue::List(vec![IonValue::Int(7), IonValue::Null])
+        );
+
+        // Struct with NOP field ($0: 0x00) followed by SID 175 ([0x01, 0xAF]) and trailing NOP field
+        let struct_with_nops = [
+            0xD9, // Struct length 9
+            0x80, 0x00, // $0: 1-byte NOP
+            0x01, 0xAF, 0x21, 0x2A, // $175: 42
+            0x80, 0x01, 0x99, // $0: 2-byte NOP
+        ];
+        let mut r_struct = IonReader::new(&struct_with_nops);
+        assert_eq!(
+            r_struct.decode_value().unwrap(),
+            IonValue::Struct(vec![(175, IonValue::Int(42))])
+        );
+    }
+
+    #[test]
+    fn test_ion_sorted_struct_d1_and_bounded_fields() {
+        // Sorted struct 0xD1 with VarUInt length 6 (0x86): {$10: 1, $175: true}
+        let sorted_struct = [0xD1, 0x86, 0x8A, 0x21, 0x01, 0x01, 0xAF, 0x11];
+        let mut r = IonReader::new(&sorted_struct);
+        assert_eq!(
+            r.decode_value().unwrap(),
+            IonValue::Struct(vec![(10, IonValue::Int(1)), (175, IonValue::Bool(true))])
+        );
+
+        // Struct field VarUInt extending past struct payload_end must be rejected
+        let truncated_field_sid = [0xD2, 0x01, 0x02, 0xAF, 0x20];
+        let mut r_bad = IonReader::new(&truncated_field_sid);
+        assert!(r_bad.decode_value().is_err());
+    }
+
+    #[test]
+    fn test_ion_symbol_length_cap_and_annotation_strictness() {
+        // Symbol length 5 (> 4 bytes) must return Err (both inline 0x75 and VarUInt 0x7E)
+        let sym_too_long = [0x75, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let mut r_sym = IonReader::new(&sym_too_long);
+        assert!(matches!(
+            r_sym.decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        let sym_varuint_too_long = [0x7E, 0x85, 0x00, 0x00, 0x00, 0x00, 0x01];
+        assert!(matches!(
+            IonReader::new(&sym_varuint_too_long).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        let sym_varuint_valid = [0x7E, 0x82, 0x01, 0xAB];
+        assert_eq!(
+            IonReader::new(&sym_varuint_valid).decode_value().unwrap(),
+            IonValue::Symbol(0x01AB)
+        );
+
+        // Annotation length == 0 must be rejected
+        let empty_annot = [0xE2, 0x80, 0x20];
+        assert!(matches!(
+            IonReader::new(&empty_annot).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        // Annotation SID spanning past annot_end must be rejected
+        let spanning_sid = [0xE4, 0x81, 0x01, 0x8A, 0x20];
+        assert!(IonReader::new(&spanning_sid).decode_value().is_err());
+
+        // Nested 0xE annotation wrapper must be rejected
+        let nested_annot = [0xE6, 0x81, 0x8A, 0xE3, 0x81, 0x8B, 0x20];
+        assert!(matches!(
+            IonReader::new(&nested_annot).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        // Trailing bytes inside annotation wrapper after wrapped value must be rejected
+        let trailing_in_annot = [0xE4, 0x81, 0x8A, 0x20, 0x20];
+        assert!(matches!(
+            IonReader::new(&trailing_in_annot).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+    }
+
+    #[test]
+    fn test_ion_integer_and_decimal_overflow_no_clamping() {
+        // PosInt 0x28 with 2^63 (exceeds i64::MAX) must error instead of clamping
+        let pos_overflow = [0x28, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert!(matches!(
+            IonReader::new(&pos_overflow).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        // NegInt 0x38 with 2^63 + 1 (exceeds |i64::MIN|) must error instead of clamping
+        let neg_overflow = [0x38, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        assert!(matches!(
+            IonReader::new(&neg_overflow).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        // parse_decimal_exact checked arithmetic boundaries
+        assert_eq!(
+            parse_decimal_exact("-9223372036854775808"),
+            Some((i64::MIN, 0))
+        );
+        assert_eq!(parse_decimal_exact("9223372036854775808"), None);
+        assert_eq!(parse_decimal_exact("0.1e-2147483648"), None);
+        assert_eq!(parse_decimal_exact("1.0e128"), None);
     }
 }

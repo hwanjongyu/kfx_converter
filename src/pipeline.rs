@@ -40,24 +40,48 @@ pub fn conversion_log_path() -> PathBuf {
         .join("conversion.log")
 }
 
-fn append_conversion_log(message: &str) {
-    let _guard = match LOG_LOCK.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
+/// Rotates `path` to `log.old` when it exceeds `max_bytes`, falling back to
+/// copy + truncate/remove if `rename` fails (e.g., locked or cross-filesystem targets).
+fn rotate_log_if_needed(path: &Path, max_bytes: u64) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
     };
-    let path = conversion_log_path();
-    if let Some(parent) = path.parent() {
+    if meta.len() <= max_bytes {
+        return;
+    }
+
+    let backup_path = path.with_extension("log.old");
+    if let Err(err) = std::fs::remove_file(&backup_path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        // Best-effort: fall through to rename and copy+truncate fallback.
+    }
+
+    if std::fs::rename(path, &backup_path).is_err() {
+        let _ = std::fs::copy(path, &backup_path);
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .is_err()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Appends a timestamped log line to `path` with non-fatal rotation.
+fn append_conversion_log_at(path: &Path, message: &str) {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(meta) = std::fs::metadata(&path)
-        && meta.len() > 2 * 1024 * 1024
-    {
-        let _ = std::fs::rename(&path, path.with_extension("log.old"));
-    }
+    rotate_log_if_needed(path, 2 * 1024 * 1024);
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -65,6 +89,15 @@ fn append_conversion_log(message: &str) {
             .unwrap_or(0);
         let _ = writeln!(file, "[{}] {}", ts, message);
     }
+}
+
+fn append_conversion_log(message: &str) {
+    let _guard = match LOG_LOCK.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let path = conversion_log_path();
+    append_conversion_log_at(&path, message);
 }
 
 use crate::enhancements::{CoverOptimizer, WordWiseBuilder};
@@ -492,5 +525,54 @@ mod tests {
             kll_count >= 1,
             "At least one .kll file must exist in the SDR directory"
         );
+    }
+
+    #[test]
+    fn test_conversion_log_double_rotation_overwrites_old_backup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("conversion.log");
+        let backup_path = temp_dir.path().join("conversion.log.old");
+
+        // First oversized log (> 2 MiB)
+        let first_payload = vec![b'A'; 2 * 1024 * 1024 + 16];
+        std::fs::write(&log_path, &first_payload).unwrap();
+        append_conversion_log_at(&log_path, "FIRST_ROTATED");
+
+        assert!(backup_path.is_file());
+        assert_eq!(std::fs::read(&backup_path).unwrap(), first_payload);
+        let log_after_first = std::fs::read_to_string(&log_path).unwrap();
+        assert!(log_after_first.contains("FIRST_ROTATED"));
+        assert!(log_after_first.len() < 1024);
+
+        // Second oversized log while conversion.log.old already exists
+        let second_payload = vec![b'B'; 2 * 1024 * 1024 + 32];
+        std::fs::write(&log_path, &second_payload).unwrap();
+        append_conversion_log_at(&log_path, "SECOND_ROTATED");
+
+        assert!(backup_path.is_file());
+        assert_eq!(std::fs::read(&backup_path).unwrap(), second_payload);
+        let log_after_second = std::fs::read_to_string(&log_path).unwrap();
+        assert!(log_after_second.contains("SECOND_ROTATED"));
+        assert!(!log_after_second.contains("FIRST_ROTATED"));
+        assert!(log_after_second.len() < 1024);
+    }
+
+    #[test]
+    fn test_conversion_log_rotation_fallback_truncates_when_rename_fails() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("conversion.log");
+        let backup_blocker = temp_dir.path().join("conversion.log.old");
+
+        // Blocking directory prevents remove_file/rename/copy on all platforms.
+        std::fs::create_dir_all(&backup_blocker).unwrap();
+        let oversized = vec![b'C'; 2 * 1024 * 1024 + 8];
+        std::fs::write(&log_path, &oversized).unwrap();
+
+        append_conversion_log_at(&log_path, "FALLBACK_FRESH_LINE");
+
+        assert!(backup_blocker.is_dir());
+        let active_log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(active_log.contains("FALLBACK_FRESH_LINE"));
+        assert!(active_log.len() < 1024);
     }
 }

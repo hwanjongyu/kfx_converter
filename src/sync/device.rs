@@ -8,6 +8,72 @@ use super::types::{KindleDeviceInfo, SyncError, UnmountedKindleUsb};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Decodes `\OOO` octal escapes (e.g. `\040`, `\011`, `\012`, `\134`, and multi-byte UTF-8
+/// byte sequences) from a `/proc/mounts` field.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn unescape_proc_mounts_field(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && bytes[i + 1..i + 4]
+                .iter()
+                .all(|b| (b'0'..=b'7').contains(b))
+            && let Ok(oct_str) = std::str::from_utf8(&bytes[i + 1..i + 4])
+            && let Ok(val) = u8::from_str_radix(oct_str, 8)
+        {
+            out.push(val);
+            i += 4;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Finds and unescapes the source device field in `/proc/mounts` content matching `target_mount`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn find_mount_source_in_mounts(
+    mounts_content: &str,
+    target_mount: &Path,
+) -> Option<String> {
+    for line in mounts_content.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(raw_dev), Some(raw_mount)) = (parts.next(), parts.next()) {
+            let mount = unescape_proc_mounts_field(raw_mount);
+            if Path::new(&mount) == target_mount {
+                return Some(unescape_proc_mounts_field(raw_dev));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn run_eject_command(label: &str, mut cmd: Command) -> Result<(), String> {
+    match cmd.output() {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let detail = if stderr.is_empty() {
+                "no stderr output".to_string()
+            } else {
+                stderr
+            };
+            Err(format!(
+                "{} failed (exit {:?}): {}",
+                label,
+                out.status.code(),
+                detail
+            ))
+        }
+        Err(e) => Err(format!("{} failed to spawn: {}", label, e)),
+    }
+}
+
 /// Queries filesystem storage statistics (used_gb, total_gb).
 #[cfg(unix)]
 pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
@@ -36,9 +102,31 @@ pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
 
 #[cfg(windows)]
 const DRIVE_REMOVABLE: u32 = 2;
+#[cfg(windows)]
+const GENERIC_READ: u32 = 0x8000_0000;
+#[cfg(windows)]
+const GENERIC_WRITE: u32 = 0x4000_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+#[cfg(windows)]
+const OPEN_EXISTING: u32 = 3;
+#[cfg(windows)]
+const INVALID_HANDLE_VALUE: *mut core::ffi::c_void = (-1isize) as *mut core::ffi::c_void;
+#[cfg(windows)]
+const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
+#[cfg(windows)]
+const FSCTL_UNLOCK_VOLUME: u32 = 0x0009_001C;
+#[cfg(windows)]
+const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
+#[cfg(windows)]
+const IOCTL_STORAGE_EJECT_MEDIA: u32 = 0x002D_4808;
 
 #[cfg(windows)]
 #[link(name = "kernel32")]
+// SAFETY: Declarations match the Windows kernel32 ABI signatures for volume inspection,
+// handle lifecycle, flushing, and DeviceIoControl volume/media operations.
 unsafe extern "system" {
     fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
     fn GetVolumeInformationW(
@@ -57,6 +145,164 @@ unsafe extern "system" {
         lpTotalNumberOfBytes: *mut u64,
         lpTotalNumberOfFreeBytes: *mut u64,
     ) -> i32;
+    fn CreateFileW(
+        lpFileName: *const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: *const core::ffi::c_void,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void;
+    fn FlushFileBuffers(hFile: *mut core::ffi::c_void) -> i32;
+    fn DeviceIoControl(
+        hDevice: *mut core::ffi::c_void,
+        dwIoControlCode: u32,
+        lpInBuffer: *const core::ffi::c_void,
+        nInBufferSize: u32,
+        lpOutBuffer: *mut core::ffi::c_void,
+        nOutBufferSize: u32,
+        lpBytesReturned: *mut u32,
+        lpOverlapped: *mut core::ffi::c_void,
+    ) -> i32;
+    fn CloseHandle(hObject: *mut core::ffi::c_void) -> i32;
+    fn GetLastError() -> u32;
+}
+
+/// Extracts a Win32 volume namespace device path (`\\.\X:`) from a Windows drive root or path.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_volume_device_path(mount_point: &Path) -> Option<String> {
+    let raw = mount_point.to_str()?;
+    let trimmed = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix(r"\\.\"))
+        .unwrap_or(raw);
+    let mut bytes = trimmed.bytes();
+    let drive = bytes.next()?;
+    let colon = bytes.next()?;
+    if drive.is_ascii_alphabetic() && colon == b':' {
+        Some(format!(r"\\.\{}:", (drive as char).to_ascii_uppercase()))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+struct VolumeGuard {
+    handle: *mut core::ffi::c_void,
+    locked: bool,
+}
+
+#[cfg(windows)]
+impl Drop for VolumeGuard {
+    fn drop(&mut self) {
+        if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
+            if self.locked {
+                let mut bytes_returned: u32 = 0;
+                // SAFETY: `self.handle` is an open Win32 volume handle not yet closed; null
+                // input/output buffers with length 0 are valid for `FSCTL_UNLOCK_VOLUME`.
+                unsafe {
+                    DeviceIoControl(
+                        self.handle,
+                        FSCTL_UNLOCK_VOLUME,
+                        core::ptr::null(),
+                        0,
+                        core::ptr::null_mut(),
+                        0,
+                        &mut bytes_returned,
+                        core::ptr::null_mut(),
+                    );
+                }
+            }
+            // SAFETY: `self.handle` is an open Win32 handle exclusively owned by this guard.
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_last_error(op: &str, volume: &str) -> SyncError {
+    // SAFETY: `GetLastError` reads thread-local Win32 error state with no pointer arguments.
+    let code = unsafe { GetLastError() };
+    let os_err = std::io::Error::from_raw_os_error(code as i32);
+    SyncError::Io(std::io::Error::new(
+        os_err.kind(),
+        format!(
+            "{} failed for {} (Win32 error {}: {})",
+            op, volume, code, os_err
+        ),
+    ))
+}
+
+#[cfg(windows)]
+fn windows_eject_volume(root: &Path) -> Result<(), SyncError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let volume_path = windows_volume_device_path(root)
+        .ok_or_else(|| SyncError::DeviceNotFound(root.to_path_buf()))?;
+    let wide: Vec<u16> = std::ffi::OsStr::new(&volume_path)
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect();
+
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string; security and template pointers are null.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            core::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            core::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(windows_last_error("CreateFileW", &volume_path));
+    }
+    let mut guard = VolumeGuard {
+        handle,
+        locked: false,
+    };
+
+    // SAFETY: `guard.handle` is a valid open volume handle returned by `CreateFileW`.
+    if unsafe { FlushFileBuffers(guard.handle) } == 0 {
+        return Err(windows_last_error("FlushFileBuffers", &volume_path));
+    }
+
+    let ioctl_no_buf = |code: u32, op: &str| -> Result<(), SyncError> {
+        let mut bytes_returned: u32 = 0;
+        // SAFETY: `guard.handle` is a valid open volume handle; null buffers with zero size
+        // match the Win32 `FSCTL_LOCK_VOLUME`/`FSCTL_DISMOUNT_VOLUME`/`IOCTL_STORAGE_EJECT_MEDIA` contract.
+        let ok = unsafe {
+            DeviceIoControl(
+                guard.handle,
+                code,
+                core::ptr::null(),
+                0,
+                core::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                core::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            Err(windows_last_error(op, &volume_path))
+        } else {
+            Ok(())
+        }
+    };
+
+    ioctl_no_buf(FSCTL_LOCK_VOLUME, "FSCTL_LOCK_VOLUME")?;
+    guard.locked = true;
+    ioctl_no_buf(FSCTL_DISMOUNT_VOLUME, "FSCTL_DISMOUNT_VOLUME")?;
+    ioctl_no_buf(IOCTL_STORAGE_EJECT_MEDIA, "IOCTL_STORAGE_EJECT_MEDIA")?;
+
+    let _ = ioctl_no_buf(FSCTL_UNLOCK_VOLUME, "FSCTL_UNLOCK_VOLUME");
+    guard.locked = false;
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -487,11 +733,11 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
         // Also inspect /proc/mounts to find any mounted filesystem labeled or pointing to Kindle
         if let Ok(mounts_content) = std::fs::read_to_string("/proc/mounts") {
             for line in mounts_content.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let mount_point = parts[1];
-                    let p = PathBuf::from(mount_point);
-                    if is_kindle_name(mount_point)
+                let mut parts = line.split_whitespace();
+                if let (Some(_raw_dev), Some(raw_mount)) = (parts.next(), parts.next()) {
+                    let mount_point = unescape_proc_mounts_field(raw_mount);
+                    let p = PathBuf::from(&mount_point);
+                    if is_kindle_name(&mount_point)
                         && !candidates.iter().any(|(existing, _)| existing == &p)
                     {
                         candidates.push((p, None));
@@ -564,7 +810,8 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("cmd").args(["/C", "sync"]).status();
+        windows_eject_volume(root)?;
+        return Ok(());
     }
 
     // 2. Unmount cleanly depending on host OS and mount type
@@ -577,49 +824,43 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
             } else {
                 &root_str
             };
-            let status = Command::new("gio")
-                .args(["mount", "-u", mtp_mount])
-                .status();
-            if let Ok(s) = status
-                && !s.success()
-            {
-                return Err(SyncError::GioFailed(format!(
-                    "Failed to unmount MTP Kindle device at {:?} (exit code {:?})",
-                    mtp_mount,
-                    s.code()
-                )));
-            }
+            let mut cmd = Command::new("gio");
+            cmd.args(["mount", "-u", "--"]).arg(mtp_mount);
+            run_eject_command("gio mount -u", cmd).map_err(|err| {
+                SyncError::GioFailed(format!(
+                    "Failed to unmount MTP Kindle device at {:?}: {}",
+                    mtp_mount, err
+                ))
+            })?;
         } else {
-            let status = Command::new("gio").args(["mount", "-u"]).arg(root).status();
-            if status.is_err() || !status.unwrap().success() {
+            let mut errors = Vec::new();
+            let mut gio_cmd = Command::new("gio");
+            gio_cmd.args(["mount", "-u", "--"]).arg(root);
+            if let Err(err) = run_eject_command("gio mount -u", gio_cmd) {
+                errors.push(err);
                 let block_dev = std::fs::read_to_string("/proc/mounts")
                     .ok()
-                    .and_then(|mounts| {
-                        for line in mounts.lines() {
-                            let mut parts = line.split_whitespace();
-                            if let (Some(dev), Some(mount)) = (parts.next(), parts.next())
-                                && mount == root.to_str().unwrap_or_default()
-                            {
-                                return Some(dev.to_string());
-                            }
-                        }
-                        None
-                    });
+                    .and_then(|mounts| find_mount_source_in_mounts(&mounts, root));
+
+                let mut unmounted = false;
                 if let Some(dev) = block_dev {
-                    let udisks_status = Command::new("udisksctl")
-                        .args(["unmount", "-b", &dev])
-                        .status();
-                    if udisks_status.is_err() || !udisks_status.unwrap().success() {
-                        let umount_status = Command::new("umount").arg(root).status();
-                        if let Ok(s) = umount_status
-                            && !s.success()
-                        {
-                            return Err(SyncError::GioFailed(format!(
-                                "Failed to cleanly unmount Kindle device at {:?} (device may be busy, exit code {:?})",
-                                root,
-                                s.code()
-                            )));
-                        }
+                    let mut udisks_cmd = Command::new("udisksctl");
+                    udisks_cmd.args(["unmount", "-b"]).arg(&dev);
+                    match run_eject_command("udisksctl unmount -b", udisks_cmd) {
+                        Ok(()) => unmounted = true,
+                        Err(e) => errors.push(e),
+                    }
+                }
+                if !unmounted {
+                    let mut umount_cmd = Command::new("umount");
+                    umount_cmd.arg("--").arg(root);
+                    if let Err(e) = run_eject_command("umount", umount_cmd) {
+                        errors.push(e);
+                        return Err(SyncError::GioFailed(format!(
+                            "Failed to cleanly unmount Kindle device at {:?}: {}",
+                            root,
+                            errors.join("; ")
+                        )));
                     }
                 }
             }
@@ -627,10 +868,25 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("diskutil")
-            .args(["unmount"])
-            .arg(root)
-            .status();
+        let mut cmd = Command::new("diskutil");
+        cmd.args(["unmount", "--"]).arg(root);
+        run_eject_command("diskutil unmount", cmd).map_err(|err| {
+            SyncError::GioFailed(format!(
+                "Failed to unmount Kindle device at {:?}: {}",
+                root, err
+            ))
+        })?;
+    }
+    #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+    {
+        let mut cmd = Command::new("umount");
+        cmd.arg("--").arg(root);
+        run_eject_command("umount", cmd).map_err(|err| {
+            SyncError::GioFailed(format!(
+                "Failed to unmount Kindle device at {:?}: {}",
+                root, err
+            ))
+        })?;
     }
 
     Ok(())
@@ -917,6 +1173,69 @@ mod tests {
         assert!(
             !detect_body.contains("/tmp/kindle") && !detect_body.contains("/tmp/kindle_mtp"),
             "detect_device_info() must NOT auto-register world-writable /tmp/kindle or /tmp/kindle_mtp"
+        );
+    }
+
+    #[test]
+    fn test_proc_mounts_unescaping_and_source_lookup() {
+        assert_eq!(
+            unescape_proc_mounts_field(r"/media/Kindle\040Paperwhite\011\012\134dir"),
+            "/media/Kindle Paperwhite\t\n\\dir"
+        );
+        // Multi-byte UTF-8 octal escape sequence (\355\225\234 = '한')
+        assert_eq!(
+            unescape_proc_mounts_field(r"/media/\355\225\234\040Kindle"),
+            "/media/한 Kindle"
+        );
+        // Incomplete or out-of-range octal escapes remain literal
+        assert_eq!(
+            unescape_proc_mounts_field(r"/media/\400\04"),
+            r"/media/\400\04"
+        );
+
+        let mounts = "/dev/sdb1 /media/Kindle\\040Scribe vfat rw 0 0\n";
+        assert_eq!(
+            find_mount_source_in_mounts(mounts, Path::new("/media/Kindle Scribe")),
+            Some("/dev/sdb1".to_string())
+        );
+        assert_eq!(
+            find_mount_source_in_mounts(mounts, Path::new("/media/Other")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_windows_volume_device_path_extraction() {
+        assert_eq!(
+            windows_volume_device_path(Path::new(r"E:\")),
+            Some(r"\\.\E:".to_string())
+        );
+        assert_eq!(
+            windows_volume_device_path(Path::new(r"f:\documents\book.kfx")),
+            Some(r"\\.\F:".to_string())
+        );
+        assert_eq!(
+            windows_volume_device_path(Path::new(r"\\?\G:\")),
+            Some(r"\\.\G:".to_string())
+        );
+        assert_eq!(windows_volume_device_path(Path::new("/mnt/Kindle")), None);
+        assert_eq!(
+            windows_volume_device_path(Path::new(r"\\server\share")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_eject_device_propagates_failure_for_unmounted_and_dash_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let dash_dir = temp.path().join("-rf");
+        std::fs::create_dir_all(&dash_dir).unwrap();
+        let err = KindleSync::eject_device(&dash_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "eject_device on unmounted path must return descriptive error"
         );
     }
 }

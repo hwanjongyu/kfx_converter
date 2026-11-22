@@ -111,31 +111,42 @@ impl<'a> KfxPackager<'a> {
             data: pos_id_writer.into_bytes(),
         });
 
-        // 4. location_map ($550) - 350 positions per location calibration
-        let kfx_positions_per_location = 350usize;
+        // 4. location_map ($550) - continuous running 350-PID calibration across sections/blocks
+        let kfx_positions_per_location = 350i64;
         let mut loc_entries = Vec::new();
         let mut loc_pids = Vec::new();
         let mut running_pid = 0i64;
+        let mut next_loc_pid = 0i64;
 
         for sec in section_data {
-            loc_entries.push(IonValue::Struct(vec![
-                (sym_id, IonValue::Int(sec.sec_eid as i64)),
-                (sym_offset, IonValue::Int(0)),
-            ]));
-            loc_pids.push(IonValue::Int(running_pid));
+            if next_loc_pid <= running_pid {
+                loc_entries.push(IonValue::Struct(vec![
+                    (sym_id, IonValue::Int(sec.sec_eid as i64)),
+                    (sym_offset, IonValue::Int(0)),
+                ]));
+                loc_pids.push(IonValue::Int(running_pid));
+                while next_loc_pid <= running_pid {
+                    next_loc_pid += kfx_positions_per_location;
+                }
+            }
             running_pid += 1;
 
             for &(p_eid, p_len) in &sec.block_info {
-                let mut off = 0usize;
-                while off < p_len.max(1) {
+                let block_len = p_len.max(1) as i64;
+                let block_end_pid = running_pid + block_len;
+                let is_image = self.image_block_eids.contains(&p_eid);
+
+                while next_loc_pid < block_end_pid {
+                    let raw_off = (next_loc_pid - running_pid).max(0);
+                    let emitted_off = if is_image { 0 } else { raw_off };
                     loc_entries.push(IonValue::Struct(vec![
                         (sym_id, IonValue::Int(p_eid as i64)),
-                        (sym_offset, IonValue::Int(off as i64)),
+                        (sym_offset, IonValue::Int(emitted_off)),
                     ]));
-                    loc_pids.push(IonValue::Int(running_pid + off as i64));
-                    off += kfx_positions_per_location;
+                    loc_pids.push(IonValue::Int(next_loc_pid));
+                    next_loc_pid += kfx_positions_per_location;
                 }
-                running_pid += p_len.max(1) as i64;
+                running_pid = block_end_pid;
             }
         }
 
@@ -218,6 +229,7 @@ impl<'a> KfxPackager<'a> {
         let mut entity_dependencies = Vec::new();
 
         // 1. Section -> external_resource dependencies
+        let has_built_storylines = self.entities.iter().any(|e| e.chunk_type == SYM_STORYLINE);
         for (idx, sec_pack) in section_data.iter().enumerate() {
             if let Some(sec) = self.sections.get(idx) {
                 let mut res_ids = Vec::new();
@@ -225,9 +237,16 @@ impl<'a> KfxPackager<'a> {
 
                 let mut img_syms = Vec::new();
                 for r_id in res_ids {
-                    let res_sym = symbols.intern(&r_id);
-                    if !img_syms.contains(&res_sym) {
-                        img_syms.push(res_sym);
+                    let target_id = if has_built_storylines {
+                        self.resolve_resource_key(&r_id)
+                    } else {
+                        Some(r_id)
+                    };
+                    if let Some(resolved) = target_id {
+                        let res_sym = symbols.intern(&resolved);
+                        if !img_syms.contains(&res_sym) {
+                            img_syms.push(res_sym);
+                        }
                     }
                 }
 

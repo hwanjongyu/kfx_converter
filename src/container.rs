@@ -12,6 +12,7 @@ use crate::symbols::symbol_id;
 
 pub const KFX_MAGIC: &[u8; 4] = b"CONT";
 pub const KFX_ENTITY_MAGIC: &[u8; 4] = b"ENTY";
+pub const MAX_CONTAINER_INFO_BYTES: u32 = 64 * 1024;
 
 #[derive(Error, Debug)]
 pub enum ContainerError {
@@ -86,13 +87,22 @@ impl KfxContainer {
         let info_offset = file.read_u32::<LittleEndian>()?;
         let info_length = file.read_u32::<LittleEndian>()?;
 
+        if header_length < 18 {
+            return Err(ContainerError::CorruptedHeader(format!(
+                "Container header_length ({}) must be >= 18",
+                header_length
+            )));
+        }
         if (header_length as u64) > file_len || (info_offset as u64) > file_len {
             return Err(ContainerError::CorruptedHeader(format!(
                 "Header length ({}) or info_offset ({}) exceeds file size ({})",
                 header_length, info_offset, file_len
             )));
         }
-        if (info_offset as u64) + (info_length as u64) > file_len {
+        if (info_offset as u64)
+            .checked_add(info_length as u64)
+            .is_none_or(|end| end > file_len)
+        {
             return Err(ContainerError::CorruptedHeader(format!(
                 "ContainerInfo bounds ({} + {}) exceed file size ({})",
                 info_offset, info_length, file_len
@@ -107,43 +117,159 @@ impl KfxContainer {
             info_length,
         };
 
-        // Read chunk index table (bcIndexTab at offset 18 until info_offset)
-        let mut index_tab_len = if info_offset >= 18 {
-            (info_offset - 18) as usize
-        } else {
-            0
-        };
+        let mut index_tab_offset: u64 = 18;
+        let mut explicit_index_tab_len: Option<usize> = None;
 
-        // If ContainerInfo is available at info_offset, decode it structurally to retrieve exact bcIndexTabLength ($414)
-        if (info_offset as u64) + (info_length as u64) <= file_len && info_length > 0 {
+        // If ContainerInfo is present, decode and validate compression, DRM, and index table metadata
+        if info_length > 0 {
+            if info_length > MAX_CONTAINER_INFO_BYTES {
+                return Err(ContainerError::CorruptedHeader(format!(
+                    "ContainerInfo length ({}) exceeds safety limit ({})",
+                    info_length, MAX_CONTAINER_INFO_BYTES
+                )));
+            }
+            if info_offset < 18 {
+                return Err(ContainerError::CorruptedHeader(format!(
+                    "ContainerInfo offset ({}) must be >= 18",
+                    info_offset
+                )));
+            }
+
             file.seek(SeekFrom::Start(info_offset as u64))?;
             let mut ci_bytes = vec![0u8; info_length as usize];
-            if file.read_exact(&mut ci_bytes).is_ok() {
-                let mut reader = crate::ion::IonReader::new(&ci_bytes);
-                let struct_fields = match reader.decode_value() {
-                    Ok(IonValue::Struct(fields)) => Some(fields),
-                    Ok(IonValue::Annotated(_, val)) => match *val {
-                        IonValue::Struct(fields) => Some(fields),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some(fields) = struct_fields {
-                    for (sid, val) in fields {
-                        if sid == 414 {
-                            // bcIndexTabLength
-                            if let IonValue::Int(len) = val
-                                && len > 0
-                                && (len as usize) < index_tab_len
-                            {
-                                index_tab_len = len as usize;
-                            }
-                            break;
-                        }
+            file.read_exact(&mut ci_bytes)?;
+
+            let mut reader = crate::ion::IonReader::new(&ci_bytes);
+            let ci_val = reader.decode_value().map_err(|e| {
+                ContainerError::CorruptedHeader(format!("Malformed ContainerInfo Ion: {}", e))
+            })?;
+            let fields = match ci_val {
+                IonValue::Struct(fields) => fields,
+                IonValue::Annotated(_, inner) => match *inner {
+                    IonValue::Struct(fields) => fields,
+                    _ => {
+                        return Err(ContainerError::CorruptedHeader(
+                            "ContainerInfo payload must be an Ion struct".into(),
+                        ));
                     }
+                },
+                _ => {
+                    return Err(ContainerError::CorruptedHeader(
+                        "ContainerInfo payload must be an Ion struct".into(),
+                    ));
+                }
+            };
+
+            let mut has_index_offset = false;
+            for (sid, val) in fields {
+                match sid {
+                    // $410 = bcComprType
+                    410 => match val {
+                        IonValue::Int(0) => {}
+                        IonValue::Int(c) => {
+                            return Err(ContainerError::CorruptedHeader(format!(
+                                "Unsupported KFX container compression type: {}",
+                                c
+                            )));
+                        }
+                        other => {
+                            return Err(ContainerError::CorruptedHeader(format!(
+                                "Invalid bcComprType ($410) value: {:?}",
+                                other
+                            )));
+                        }
+                    },
+                    // $411 = bcDRMScheme
+                    411 => match val {
+                        IonValue::Int(0) => {}
+                        _ => return Err(ContainerError::DrmProtected),
+                    },
+                    // $413 = bcIndexTabOffset
+                    413 => {
+                        let off = match val {
+                            IonValue::Int(v) if v >= 18 => u64::try_from(v).map_err(|_| {
+                                ContainerError::CorruptedHeader(
+                                    "Invalid bcIndexTabOffset ($413)".into(),
+                                )
+                            })?,
+                            _ => {
+                                return Err(ContainerError::CorruptedHeader(format!(
+                                    "Invalid bcIndexTabOffset ($413): {:?}",
+                                    val
+                                )));
+                            }
+                        };
+                        if off > file_len {
+                            return Err(ContainerError::CorruptedHeader(format!(
+                                "bcIndexTabOffset ({}) exceeds file size ({})",
+                                off, file_len
+                            )));
+                        }
+                        index_tab_offset = off;
+                        has_index_offset = true;
+                    }
+                    // $414 = bcIndexTabLength
+                    414 => {
+                        let len_u64 = match val {
+                            IonValue::Int(v) if v >= 0 => u64::try_from(v).map_err(|_| {
+                                ContainerError::CorruptedHeader(
+                                    "Invalid bcIndexTabLength ($414)".into(),
+                                )
+                            })?,
+                            _ => {
+                                return Err(ContainerError::CorruptedHeader(format!(
+                                    "Invalid bcIndexTabLength ($414): {:?}",
+                                    val
+                                )));
+                            }
+                        };
+                        if len_u64 % 24 != 0 {
+                            return Err(ContainerError::CorruptedHeader(format!(
+                                "bcIndexTabLength ({}) is not a multiple of 24",
+                                len_u64
+                            )));
+                        }
+                        let len_usize = usize::try_from(len_u64).map_err(|_| {
+                            ContainerError::CorruptedHeader(
+                                "bcIndexTabLength ($414) exceeds usize::MAX".into(),
+                            )
+                        })?;
+                        explicit_index_tab_len = Some(len_usize);
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(len) = explicit_index_tab_len {
+                if index_tab_offset
+                    .checked_add(len as u64)
+                    .is_none_or(|end| end > file_len)
+                {
+                    return Err(ContainerError::CorruptedHeader(format!(
+                        "bcIndexTab bounds ({} + {}) exceed file size ({})",
+                        index_tab_offset, len, file_len
+                    )));
+                }
+                if has_index_offset && len == 0 && (header_length as u64) < file_len {
+                    // Explicit index offset with 0-length table on non-empty payload container is suspicious
+                    return Err(ContainerError::CorruptedHeader(
+                        "bcIndexTabLength ($414) cannot be 0 when entity payload bytes exist"
+                            .into(),
+                    ));
                 }
             }
         }
+
+        let index_tab_len = match explicit_index_tab_len {
+            Some(len) => len,
+            None => {
+                if (info_offset as u64) >= index_tab_offset {
+                    ((info_offset as u64) - index_tab_offset) as usize
+                } else {
+                    0
+                }
+            }
+        };
 
         let chunk_count = index_tab_len / 24;
         if chunk_count > 50_000 {
@@ -153,13 +279,19 @@ impl KfxContainer {
             )));
         }
 
-        if (18 + chunk_count * 24) as u64 > file_len {
+        let table_byte_len = (chunk_count as u64).checked_mul(24).ok_or_else(|| {
+            ContainerError::CorruptedHeader("bcIndexTab table byte length overflow".into())
+        })?;
+        if index_tab_offset
+            .checked_add(table_byte_len)
+            .is_none_or(|end| end > file_len)
+        {
             return Err(ContainerError::CorruptedHeader(
                 "bcIndexTab table exceeds file size".into(),
             ));
         }
 
-        file.seek(SeekFrom::Start(18))?;
+        file.seek(SeekFrom::Start(index_tab_offset))?;
         let mut chunks = Vec::with_capacity(chunk_count);
         for _ in 0..chunk_count {
             let entity_id = file.read_u32::<LittleEndian>()?;
@@ -214,18 +346,63 @@ impl KfxContainer {
         self.reader.read_exact(&mut buf)?;
 
         // If enveloped by ENTY header, unwrap it dynamically using header_length (bytes 6..10)
-        if buf.len() >= 10 && &buf[0..4] == KFX_ENTITY_MAGIC {
-            let header_len = (&buf[6..10]).read_u32::<LittleEndian>()? as usize;
-            if header_len <= buf.len() {
-                buf.drain(..header_len);
-                return Ok(buf);
-            } else {
+        if buf.len() >= 4 && &buf[0..4] == KFX_ENTITY_MAGIC {
+            if buf.len() < 10 {
+                return Err(ContainerError::InvalidChunkHeader);
+            }
+            let header_len = usize::try_from((&buf[6..10]).read_u32::<LittleEndian>()?)
+                .map_err(|_| ContainerError::InvalidChunkHeader)?;
+            if header_len < 10 {
+                return Err(ContainerError::CorruptedHeader(format!(
+                    "ENTY chunk header length ({}) must be >= 10",
+                    header_len
+                )));
+            }
+            if header_len > buf.len() {
                 return Err(ContainerError::CorruptedHeader(format!(
                     "ENTY chunk header length ({}) exceeds chunk buffer length ({})",
                     header_len,
                     buf.len()
                 )));
             }
+            if header_len > 10 {
+                let mut reader = crate::ion::IonReader::new(&buf[10..header_len]);
+                let hdr_val = reader.decode_value().map_err(|e| {
+                    ContainerError::CorruptedHeader(format!("Malformed ENTY Ion header: {}", e))
+                })?;
+                let fields = match hdr_val {
+                    IonValue::Struct(fields) => fields,
+                    IonValue::Annotated(_, inner) => match *inner {
+                        IonValue::Struct(fields) => fields,
+                        _ => {
+                            return Err(ContainerError::CorruptedHeader(
+                                "ENTY header Ion payload must be a struct".into(),
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(ContainerError::CorruptedHeader(
+                            "ENTY header Ion payload must be a struct".into(),
+                        ));
+                    }
+                };
+                for (sid, val) in fields {
+                    match sid {
+                        410 if val != IonValue::Int(0) => {
+                            return Err(ContainerError::CorruptedHeader(format!(
+                                "Unsupported ENTY compression type: {:?}",
+                                val
+                            )));
+                        }
+                        411 if val != IonValue::Int(0) => {
+                            return Err(ContainerError::DrmProtected);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            buf.drain(..header_len);
+            return Ok(buf);
         }
 
         Ok(buf)
@@ -253,14 +430,13 @@ impl KfxContainer {
         let mut current_raw_offset: u64 = 0;
 
         for ent in entities {
-            // Yellowjacket spec assertion: non-singleton entity_id must be >= 852
+            // Yellowjacket spec requirement: non-singleton entity_id must be >= 852
             // 348 is SINGLETON_ID ($null)
             if ent.entity_id != 348 && ent.entity_id < 852 {
-                debug_assert!(
-                    false,
+                return Err(ContainerError::CorruptedHeader(format!(
                     "Yellowjacket spec violation: non-singleton entity_id {} must be >= 852",
                     ent.entity_id
-                );
+                )));
             }
 
             let payload_len = ent.data.len() as u64 + crate::ion::ENTY_HEADER_LEN as u64;
@@ -602,5 +778,189 @@ mod tests {
             1,
             "Must parse 1 chunk from field 414 despite preceding [0x03, 0x9e]"
         );
+    }
+
+    #[test]
+    fn test_container_rejects_small_header_and_huge_info_length() {
+        // 1. header_length < 18 rejected
+        let mut bad_hdr = Vec::new();
+        bad_hdr.extend_from_slice(b"CONT");
+        bad_hdr.write_u16::<LittleEndian>(2).unwrap();
+        bad_hdr.write_u32::<LittleEndian>(12).unwrap(); // < 18
+        bad_hdr.write_u32::<LittleEndian>(18).unwrap();
+        bad_hdr.write_u32::<LittleEndian>(0).unwrap();
+        let mut f1 = tempfile::NamedTempFile::new().unwrap();
+        f1.write_all(&bad_hdr).unwrap();
+        assert!(matches!(
+            KfxContainer::open(f1.path()),
+            Err(ContainerError::CorruptedHeader(_))
+        ));
+
+        // 2. info_length > MAX_CONTAINER_INFO_BYTES rejected
+        let info_len = MAX_CONTAINER_INFO_BYTES + 1;
+        let info_off = 18u32;
+        let f2 = tempfile::NamedTempFile::new().unwrap();
+        f2.as_file().set_len((info_off + info_len) as u64).unwrap();
+        {
+            let mut file = f2.as_file();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(b"CONT").unwrap();
+            file.write_u16::<LittleEndian>(2).unwrap();
+            file.write_u32::<LittleEndian>(info_off + info_len).unwrap();
+            file.write_u32::<LittleEndian>(info_off).unwrap();
+            file.write_u32::<LittleEndian>(info_len).unwrap();
+        }
+        assert!(matches!(
+            KfxContainer::open(f2.path()),
+            Err(ContainerError::CorruptedHeader(_))
+        ));
+    }
+
+    #[test]
+    fn test_container_rejects_compressed_or_drm_info_and_honors_413() {
+        let make_with_ci = |fields: Vec<(u32, IonValue)>, extra_after_ci: &[u8]| {
+            let mut w_ci = IonWriter::new();
+            w_ci.write_bvm();
+            w_ci.write_value(&IonValue::Struct(fields));
+            let ci_bytes = w_ci.into_bytes();
+
+            let ci_offset = 18u32;
+            let header_len = ci_offset + ci_bytes.len() as u32 + extra_after_ci.len() as u32;
+            let mut data = Vec::new();
+            data.extend_from_slice(b"CONT");
+            data.write_u16::<LittleEndian>(2).unwrap();
+            data.write_u32::<LittleEndian>(header_len).unwrap();
+            data.write_u32::<LittleEndian>(ci_offset).unwrap();
+            data.write_u32::<LittleEndian>(ci_bytes.len() as u32)
+                .unwrap();
+            data.extend_from_slice(&ci_bytes);
+            data.extend_from_slice(extra_after_ci);
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(&data).unwrap();
+            tmp
+        };
+
+        // Non-zero $410 compression rejected
+        let f_comp = make_with_ci(vec![(410, IonValue::Int(1))], &[]);
+        assert!(matches!(
+            KfxContainer::open(f_comp.path()),
+            Err(ContainerError::CorruptedHeader(_))
+        ));
+
+        // Non-zero $411 DRM rejected
+        let f_drm = make_with_ci(vec![(411, IonValue::Int(2))], &[]);
+        assert!(matches!(
+            KfxContainer::open(f_drm.path()),
+            Err(ContainerError::DrmProtected)
+        ));
+
+        // $413 bcIndexTabOffset honored when placed after ContainerInfo
+        let mut w_ci = IonWriter::new();
+        w_ci.write_bvm();
+        w_ci.write_value(&IonValue::Struct(vec![
+            (410, IonValue::Int(0)),
+            (411, IonValue::Int(0)),
+        ]));
+        let dummy_ci_len = w_ci.into_bytes().len() as u32;
+        // Build exact CI with $413 = 18 + actual_ci_len
+        let mut ci_with_413 = IonWriter::new();
+        ci_with_413.write_bvm();
+        ci_with_413.write_value(&IonValue::Struct(vec![
+            (410, IonValue::Int(0)),
+            (411, IonValue::Int(0)),
+            (413, IonValue::Int((18 + dummy_ci_len + 2) as i64)),
+            (414, IonValue::Int(24)),
+        ]));
+        let ci_bytes = ci_with_413.into_bytes();
+        let tab_offset = 18 + ci_bytes.len() as u32;
+        // Re-encode with exact tab_offset matching ci_bytes.len()
+        let mut ci_exact = IonWriter::new();
+        ci_exact.write_bvm();
+        ci_exact.write_value(&IonValue::Struct(vec![
+            (410, IonValue::Int(0)),
+            (411, IonValue::Int(0)),
+            (413, IonValue::Int(tab_offset as i64)),
+            (414, IonValue::Int(24)),
+        ]));
+        let ci_exact_bytes = ci_exact.into_bytes();
+        assert_eq!(ci_exact_bytes.len(), ci_bytes.len());
+
+        let header_len = tab_offset + 24;
+        let mut data = Vec::new();
+        data.extend_from_slice(b"CONT");
+        data.write_u16::<LittleEndian>(2).unwrap();
+        data.write_u32::<LittleEndian>(header_len).unwrap();
+        data.write_u32::<LittleEndian>(18).unwrap();
+        data.write_u32::<LittleEndian>(ci_exact_bytes.len() as u32)
+            .unwrap();
+        data.extend_from_slice(&ci_exact_bytes);
+        let mut entry = vec![0u8; 24];
+        entry[0..4].copy_from_slice(&900u32.to_le_bytes());
+        entry[4..8].copy_from_slice(&260u32.to_le_bytes());
+        entry[8..16].copy_from_slice(&0u64.to_le_bytes());
+        entry[16..24].copy_from_slice(&5u64.to_le_bytes());
+        data.extend_from_slice(&entry);
+        data.extend_from_slice(b"HELLO");
+
+        let mut tmp_413 = tempfile::NamedTempFile::new().unwrap();
+        tmp_413.write_all(&data).unwrap();
+        let mut opened = KfxContainer::open(tmp_413.path()).unwrap();
+        assert_eq!(opened.chunks.len(), 1);
+        assert_eq!(opened.chunks[0].entity_id, 900);
+        assert_eq!(
+            opened.read_chunk(&opened.chunks[0].clone()).unwrap(),
+            b"HELLO"
+        );
+    }
+
+    #[test]
+    fn test_container_rejects_invalid_enty_header_and_low_entity_id() {
+        // 1. write_to_with_symbols rejects entity_id < 852 (and != 348) at runtime
+        let bad_entities = vec![KfxEntity {
+            entity_id: 100,
+            chunk_type: 260,
+            data: b"DATA".to_vec(),
+        }];
+        let mut cursor = Cursor::new(Vec::new());
+        assert!(matches!(
+            KfxContainer::write_to_with_symbols(&bad_entities, "CR!TEST", None, None, &mut cursor),
+            Err(ContainerError::CorruptedHeader(_))
+        ));
+
+        // 2. read_chunk rejects ENTY header_len < 10
+        let mut bad_enty = Vec::new();
+        bad_enty.extend_from_slice(b"ENTY");
+        bad_enty.write_u16::<LittleEndian>(1).unwrap();
+        bad_enty.write_u32::<LittleEndian>(4).unwrap(); // < 10!
+        bad_enty.extend_from_slice(b"PAYLOAD");
+
+        let entities = [KfxEntity {
+            entity_id: 852,
+            chunk_type: 260,
+            data: Vec::new(),
+        }];
+        // Write raw CONT with bad_enty as chunk payload
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"CONT");
+        raw.write_u16::<LittleEndian>(2).unwrap();
+        raw.write_u32::<LittleEndian>(18 + 24).unwrap();
+        raw.write_u32::<LittleEndian>(18 + 24).unwrap();
+        raw.write_u32::<LittleEndian>(0).unwrap();
+        raw.write_u32::<LittleEndian>(entities[0].entity_id)
+            .unwrap();
+        raw.write_u32::<LittleEndian>(entities[0].chunk_type)
+            .unwrap();
+        raw.write_u64::<LittleEndian>(0).unwrap();
+        raw.write_u64::<LittleEndian>(bad_enty.len() as u64)
+            .unwrap();
+        raw.extend_from_slice(&bad_enty);
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&raw).unwrap();
+        let mut opened = KfxContainer::open(tmp.path()).unwrap();
+        assert!(matches!(
+            opened.read_chunk(&opened.chunks[0].clone()),
+            Err(ContainerError::CorruptedHeader(_))
+        ));
     }
 }

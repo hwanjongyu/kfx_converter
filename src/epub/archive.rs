@@ -106,17 +106,9 @@ pub fn read_entry_string(
         .map_err(|e| EpubError::Invalid(format!("Invalid UTF-8 in EPUB entry: {}", e)))
 }
 
-/// Resolves a relative path against a base directory within a zip archive,
-/// preventing path traversal vulnerabilities (`..`).
-pub fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
-    let normalized_rel = relative_path.replace('\\', "/");
-    let combined = if base_dir.is_empty() {
-        normalized_rel
-    } else {
-        format!("{}/{}", base_dir.trim_matches('/'), normalized_rel)
-    };
+fn collapse_zip_path(path: &str) -> String {
     let mut parts = Vec::new();
-    for seg in combined.split('/') {
+    for seg in path.split('/') {
         if seg.is_empty() || seg == "." {
             continue;
         } else if seg == ".." {
@@ -126,6 +118,110 @@ pub fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
         }
     }
     parts.join("/")
+}
+
+/// Resolves a relative or root-relative path against a base directory within a zip archive,
+/// preventing path traversal vulnerabilities (`..`).
+pub fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
+    let normalized_rel = relative_path.replace('\\', "/");
+    let combined = if base_dir.is_empty() || normalized_rel.starts_with('/') {
+        normalized_rel
+    } else {
+        format!("{}/{}", base_dir.trim_matches('/'), normalized_rel)
+    };
+    collapse_zip_path(&combined)
+}
+
+fn resolve_zip_entry_index<R: Read + std::io::Seek>(
+    archive: &ZipArchive<R>,
+    raw_path: &str,
+) -> Option<usize> {
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    // 1. Exact path match
+    if let Some(idx) = archive.index_for_name(raw_path) {
+        return Some(idx);
+    }
+
+    // 2. Backslash-to-slash & stripped leading '/'
+    let norm = raw_path.replace('\\', "/");
+    let trimmed = norm.trim_start_matches('/');
+    if !trimmed.is_empty()
+        && let Some(idx) = archive.index_for_name(trimmed)
+    {
+        return Some(idx);
+    }
+
+    // 3. Collapsed '.' / '..' segments
+    let collapsed = collapse_zip_path(trimmed);
+    if !collapsed.is_empty()
+        && let Some(idx) = archive.index_for_name(&collapsed)
+    {
+        return Some(idx);
+    }
+
+    // 4. Percent-decoded variants
+    let decoded_raw = decode_percent(raw_path);
+    if !decoded_raw.is_empty()
+        && let Some(idx) = archive.index_for_name(&decoded_raw)
+    {
+        return Some(idx);
+    }
+    let decoded_norm = decode_percent(trimmed).replace('\\', "/");
+    let decoded_trimmed = decoded_norm.trim_start_matches('/');
+    if !decoded_trimmed.is_empty()
+        && let Some(idx) = archive.index_for_name(decoded_trimmed)
+    {
+        return Some(idx);
+    }
+    let decoded_collapsed = collapse_zip_path(decoded_trimmed);
+    if !decoded_collapsed.is_empty()
+        && let Some(idx) = archive.index_for_name(&decoded_collapsed)
+    {
+        return Some(idx);
+    }
+
+    // 5. Case-insensitive fallback scan over archive entry names
+    let mut lc_candidates: Vec<String> = Vec::with_capacity(4);
+    for cand in [trimmed, &collapsed, decoded_trimmed, &decoded_collapsed] {
+        if !cand.is_empty() {
+            let lc = cand.to_lowercase();
+            if !lc_candidates.contains(&lc) {
+                lc_candidates.push(lc);
+            }
+        }
+    }
+    if lc_candidates.is_empty() {
+        return None;
+    }
+
+    let matched_name = archive
+        .file_names()
+        .find(|name| {
+            let entry_norm = name.replace('\\', "/");
+            let entry_trimmed = entry_norm.trim_start_matches('/');
+            let entry_collapsed = collapse_zip_path(entry_trimmed);
+            let e1 = entry_trimmed.to_lowercase();
+            let e2 = entry_collapsed.to_lowercase();
+            lc_candidates.iter().any(|c| c == &e1 || c == &e2)
+        })
+        .map(str::to_string)?;
+
+    archive.index_for_name(&matched_name)
+}
+
+/// Opens a ZIP entry with tolerant path normalization: exact match -> backslash/leading-slash
+/// normalization -> `.`/`..` collapse -> percent-decoding -> case-insensitive scan.
+pub(crate) fn open_zip_entry<'a, R: Read + std::io::Seek>(
+    archive: &'a mut ZipArchive<R>,
+    raw_path: &str,
+) -> zip::result::ZipResult<zip::read::ZipFile<'a>> {
+    match resolve_zip_entry_index(archive, raw_path) {
+        Some(idx) => archive.by_index(idx),
+        None => Err(zip::result::ZipError::FileNotFound),
+    }
 }
 
 /// Decodes standard percent-encoded URI strings (e.g. `%20` -> space).
@@ -158,8 +254,7 @@ pub fn find_opf_path_with_budget<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     budget: &mut DecompressionBudget,
 ) -> Result<String, EpubError> {
-    let mut entry = archive
-        .by_name("META-INF/container.xml")
+    let mut entry = open_zip_entry(archive, "META-INF/container.xml")
         .map_err(|_| EpubError::Invalid("META-INF/container.xml not found".to_string()))?;
 
     let content = read_entry_string(&mut entry, MAX_METADATA_BYTES, budget)?;
@@ -174,7 +269,7 @@ pub fn find_opf_path_with_budget<R: Read + std::io::Seek>(
                 if name.as_ref() == b"rootfile" {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"full-path" {
-                            let path = String::from_utf8_lossy(&attr.value).to_string();
+                            let path = crate::epub::unescape_attr_value(&attr);
                             return Ok(path);
                         }
                     }
@@ -198,4 +293,49 @@ pub fn find_opf_path<R: Read + std::io::Seek>(
 ) -> Result<String, EpubError> {
     let mut budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
     find_opf_path_with_budget(archive, &mut budget)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    #[test]
+    fn test_resolve_zip_path_root_relative_and_parent_segments() {
+        assert_eq!(
+            resolve_zip_path("OEBPS", "/Images/cover.jpg"),
+            "Images/cover.jpg"
+        );
+        assert_eq!(
+            resolve_zip_path("OEBPS/Text", "\\OEBPS\\Styles\\main.css"),
+            "OEBPS/Styles/main.css"
+        );
+        assert_eq!(resolve_zip_path("OEBPS", "../Images/a.jpg"), "Images/a.jpg");
+        assert_eq!(
+            resolve_zip_path("OEBPS/Text", "../Images/a.jpg"),
+            "OEBPS/Images/a.jpg"
+        );
+    }
+
+    #[test]
+    fn test_open_zip_entry_tolerant_lookup() {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("OEBPS/Text/My Chapter.xhtml", opts).unwrap();
+            zip.write_all(b"<html/>").unwrap();
+            zip.start_file("OEBPS/Images/Cover.JPG", opts).unwrap();
+            zip.write_all(b"img").unwrap();
+            zip.finish().unwrap();
+        }
+        let mut archive = ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
+
+        assert!(open_zip_entry(&mut archive, "OEBPS/Text/My Chapter.xhtml").is_ok());
+        assert!(open_zip_entry(&mut archive, "/OEBPS/Text/My%20Chapter.xhtml").is_ok());
+        assert!(open_zip_entry(&mut archive, "OEBPS\\Text\\./sub/../My%20Chapter.xhtml").is_ok());
+        assert!(open_zip_entry(&mut archive, "oebps/images/cover.jpg").is_ok());
+        assert!(open_zip_entry(&mut archive, "missing/file.xhtml").is_err());
+    }
 }

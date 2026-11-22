@@ -137,6 +137,23 @@ impl KindleSync {
         catalog::clean_stale_sdr_files(sdr_dir, current_asin, purge_word_wise)
     }
 
+    /// Purges `.bad_file` markers and orphaned sidecars while preserving `.kll`/`.asc` entries
+    /// matching `current_asin` (including its 10-char alias) or `current_content_id`.
+    #[inline]
+    pub fn clean_stale_sdr_files_with_content_id(
+        sdr_dir: &Path,
+        current_asin: Option<&str>,
+        current_content_id: Option<&str>,
+        purge_word_wise: bool,
+    ) -> Result<(), SyncError> {
+        catalog::clean_stale_sdr_files_with_content_id(
+            sdr_dir,
+            current_asin,
+            current_content_id,
+            purge_word_wise,
+        )
+    }
+
     /// Clears the read-only attribute on an existing destination file so that atomic overwrites or renames succeed.
     #[inline]
     #[allow(clippy::permissions_set_readonly_false)]

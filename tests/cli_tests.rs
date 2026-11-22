@@ -299,3 +299,143 @@ fn test_cli_convert_missing_input_file_returns_code_1() {
         stderr
     );
 }
+
+#[test]
+fn test_cli_help_shows_word_wise_and_content_type_ebok() {
+    let output = Command::new(get_bin())
+        .arg("--help")
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--content-type"));
+    assert!(stdout.contains("EBOK"));
+    assert!(stdout.contains("PDOC"));
+    assert!(stdout.contains("--word-wise"));
+}
+
+#[test]
+fn test_cli_short_word_wise_flag_with_positional_input() {
+    let temp = common::temp_dir();
+    let epub_path =
+        common::create_minimal_epub(temp.path(), "ww_short.epub", "Word Wise Short", "en", false);
+
+    let output = Command::new(get_bin())
+        .arg("-w")
+        .arg(&epub_path)
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "kfx-conv -w <book.epub> must succeed without treating book path as -w value; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(temp.path().join("ww_short.kfx").is_file());
+    assert!(temp.path().join("ww_short.sdr").is_dir());
+}
+
+#[test]
+fn test_cli_word_wise_equals_and_short_space_false() {
+    let temp = common::temp_dir();
+    let epub_path =
+        common::create_minimal_epub(temp.path(), "ww_off.epub", "No WW Modes", "en", false);
+
+    let out_eq = temp.path().join("eq_off.kfx");
+    let res_eq = Command::new(get_bin())
+        .arg(&epub_path)
+        .arg("-o")
+        .arg(&out_eq)
+        .arg("--word-wise=false")
+        .output()
+        .expect("Failed to execute binary");
+    assert!(res_eq.status.success());
+    assert!(out_eq.is_file());
+
+    let out_short = temp.path().join("short_off.kfx");
+    let res_short = Command::new(get_bin())
+        .arg(&epub_path)
+        .arg("-o")
+        .arg(&out_short)
+        .arg("-w")
+        .arg("false")
+        .output()
+        .expect("Failed to execute binary");
+    assert!(res_short.status.success());
+    assert!(out_short.is_file());
+
+    for sdr_name in ["eq_off.sdr", "short_off.sdr"] {
+        let kll_count = std::fs::read_dir(temp.path().join(sdr_name))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".kll"))
+            .count();
+        assert_eq!(kll_count, 0, "Expected 0 .kll files in {sdr_name}");
+    }
+}
+
+#[test]
+fn test_cli_content_type_case_insensitive_and_invalid_exit_2() {
+    let temp = common::temp_dir();
+    let epub_path =
+        common::create_minimal_epub(temp.path(), "ctype.epub", "Content Type Book", "en", false);
+    let target_kfx = temp.path().join("ctype.kfx");
+
+    let ok_lower = Command::new(get_bin())
+        .arg(&epub_path)
+        .arg("-o")
+        .arg(&target_kfx)
+        .arg("-c")
+        .arg("pdoc")
+        .output()
+        .expect("Failed to execute binary");
+    assert!(ok_lower.status.success(), "-c pdoc should succeed");
+
+    let invalid = Command::new(get_bin())
+        .arg(&epub_path)
+        .arg("-c")
+        .arg("INVALID")
+        .output()
+        .expect("Failed to execute binary");
+    assert_eq!(
+        invalid.status.code(),
+        Some(2),
+        "Invalid -c value must fail at Clap parse time with exit code 2"
+    );
+}
+
+#[test]
+fn test_cli_word_wise_error_emits_stderr_warning_and_no_success_line() {
+    let temp = common::temp_dir();
+    let epub_path =
+        common::create_minimal_epub(temp.path(), "ww_warn.epub", "WW Warning Book", "en", false);
+    let target_kfx = temp.path().join("ww_warn.kfx");
+
+    // Pre-create a regular file where `.sdr` directory would be deployed so SdrDeployer::deploy fails
+    // and populates `report.word_wise_error` while conversion itself still succeeds.
+    std::fs::write(target_kfx.with_extension("sdr"), b"blocking-file").unwrap();
+
+    let output = Command::new(get_bin())
+        .arg(&epub_path)
+        .arg("-o")
+        .arg(&target_kfx)
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "Non-fatal Word Wise failure must still exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Warning: Word Wise generation failed:"),
+        "Expected stderr warning, got: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Word Wise sidecar generated"),
+        "Must NOT print Word Wise sidecar generated when word_wise_error is Some; stdout={stdout}"
+    );
+}

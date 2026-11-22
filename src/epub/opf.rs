@@ -30,33 +30,57 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
 
     let mut xml_reader = XmlReader::from_str(opf_xml);
     let mut buf = Vec::new();
-    let mut current_tag = String::new();
+    let mut tag_stack: Vec<String> = Vec::new();
     let mut current_text = String::new();
     let mut current_title_id: Option<String> = None;
     let mut current_title_type: Option<String> = None;
     let mut current_identifier_id: Option<String> = None;
     let mut current_meta_refines: Option<String> = None;
 
-    loop {
-        match xml_reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                current_text.clear();
-                let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+    fn attr_local_key(key: &[u8]) -> &[u8] {
+        if let Some(pos) = key.iter().position(|&b| b == b':') {
+            &key[pos + 1..]
+        } else {
+            key
+        }
+    }
 
-                if local == "package" {
+    fn is_metadata_value_tag(tag: &str) -> bool {
+        matches!(
+            tag,
+            "title"
+                | "identifier"
+                | "creator"
+                | "language"
+                | "publisher"
+                | "description"
+                | "date"
+                | "meta"
+        )
+    }
+
+    loop {
+        let ev = xml_reader.read_event_into(&mut buf);
+        let start_or_empty = match &ev {
+            Ok(Event::Start(e)) => Some((e, true)),
+            Ok(Event::Empty(e)) => Some((e, false)),
+            _ => None,
+        };
+        if let Some((e, is_start)) = start_or_empty {
+            let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+            if is_start {
+                tag_stack.push(local.clone());
+            }
+
+            match local.as_str() {
+                "package" => {
                     for attr in e.attributes().flatten() {
-                        let key = attr.key.as_ref();
-                        let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                            &key[pos + 1..]
-                        } else {
-                            key
-                        };
-                        if local_key == b"unique-identifier" {
-                            unique_identifier_id =
-                                Some(String::from_utf8_lossy(&attr.value).to_string());
+                        if attr_local_key(attr.key.as_ref()) == b"unique-identifier" {
+                            unique_identifier_id = Some(crate::epub::unescape_attr_value(&attr));
                         }
                     }
-                } else if local == "item" {
+                }
+                "item" => {
                     let mut id = String::new();
                     let mut href = String::new();
                     let mut media_type = String::new();
@@ -64,13 +88,11 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
 
                     for attr in e.attributes().flatten() {
                         match attr.key.as_ref() {
-                            b"id" => id = String::from_utf8_lossy(&attr.value).to_string(),
-                            b"href" => href = String::from_utf8_lossy(&attr.value).to_string(),
-                            b"media-type" => {
-                                media_type = String::from_utf8_lossy(&attr.value).to_string()
-                            }
+                            b"id" => id = crate::epub::unescape_attr_value(&attr),
+                            b"href" => href = crate::epub::unescape_attr_value(&attr),
+                            b"media-type" => media_type = crate::epub::unescape_attr_value(&attr),
                             b"properties" => {
-                                properties = Some(String::from_utf8_lossy(&attr.value).to_string())
+                                properties = Some(crate::epub::unescape_attr_value(&attr))
                             }
                             _ => {}
                         }
@@ -93,68 +115,57 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                             },
                         );
                     }
-                } else if local == "itemref" {
+                }
+                "itemref" => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"idref" {
-                            spine.push(String::from_utf8_lossy(&attr.value).to_string());
+                            spine.push(crate::epub::unescape_attr_value(&attr));
                         }
                     }
-                } else if local == "title" {
-                    current_tag = "title".to_string();
+                }
+                "title" if is_start => {
+                    current_text.clear();
                     current_title_id = None;
                     current_title_type = None;
                     for attr in e.attributes().flatten() {
-                        let key = attr.key.as_ref();
-                        let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                            &key[pos + 1..]
-                        } else {
-                            key
-                        };
+                        let local_key = attr_local_key(attr.key.as_ref());
                         if local_key == b"id" {
-                            current_title_id =
-                                Some(String::from_utf8_lossy(&attr.value).to_string());
+                            current_title_id = Some(crate::epub::unescape_attr_value(&attr));
                         } else if local_key == b"title-type" {
-                            current_title_type =
-                                Some(String::from_utf8_lossy(&attr.value).to_string());
+                            current_title_type = Some(crate::epub::unescape_attr_value(&attr));
                         }
                     }
-                } else if local == "identifier" {
-                    current_tag = "identifier".to_string();
+                }
+                "identifier" if is_start => {
+                    current_text.clear();
                     current_identifier_id = None;
                     for attr in e.attributes().flatten() {
-                        let key = attr.key.as_ref();
-                        let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                            &key[pos + 1..]
-                        } else {
-                            key
-                        };
-                        if local_key == b"id" {
-                            current_identifier_id =
-                                Some(String::from_utf8_lossy(&attr.value).to_string());
+                        if attr_local_key(attr.key.as_ref()) == b"id" {
+                            current_identifier_id = Some(crate::epub::unescape_attr_value(&attr));
                         }
                     }
-                } else if local == "meta" {
+                }
+                "meta" => {
+                    if is_start {
+                        current_text.clear();
+                        current_meta_refines = None;
+                    }
                     let mut is_cover_meta = false;
                     let mut is_title_type_meta = false;
                     let mut refines_val = String::new();
                     let mut content_val = String::new();
 
                     for attr in e.attributes().flatten() {
-                        let key = attr.key.as_ref();
-                        let local_key = if let Some(pos) = key.iter().position(|&b| b == b':') {
-                            &key[pos + 1..]
-                        } else {
-                            key
-                        };
-                        if local_key == b"name" && attr.value.as_ref() == b"cover" {
+                        let local_key = attr_local_key(attr.key.as_ref());
+                        let val = crate::epub::unescape_attr_value(&attr);
+                        if local_key == b"name" && val == "cover" {
                             is_cover_meta = true;
                         } else if local_key == b"content" {
-                            content_val = String::from_utf8_lossy(&attr.value).to_string();
-                        } else if local_key == b"property" && attr.value.as_ref() == b"title-type" {
+                            content_val = val;
+                        } else if local_key == b"property" && val == "title-type" {
                             is_title_type_meta = true;
                         } else if local_key == b"refines" {
-                            let r = String::from_utf8_lossy(&attr.value).to_string();
-                            refines_val = r.trim_start_matches('#').to_string();
+                            refines_val = val.trim_start_matches('#').to_string();
                         }
                     }
 
@@ -163,62 +174,95 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                     } else if is_title_type_meta && !refines_val.is_empty() {
                         if !content_val.is_empty() {
                             title_types.insert(refines_val, content_val);
-                        } else {
-                            current_tag = "meta_title_type".to_string();
+                        } else if is_start {
                             current_meta_refines = Some(refines_val);
                         }
                     }
-                } else {
-                    current_tag = local;
+                }
+                t if is_start && is_metadata_value_tag(t) => {
+                    current_text.clear();
+                }
+                _ => {}
+            }
+            buf.clear();
+            continue;
+        }
+
+        match ev {
+            Ok(Event::Text(ref e)) => {
+                if tag_stack.iter().any(|t| is_metadata_value_tag(t)) {
+                    let decoded = crate::epub::unescape_xml_or_html(e);
+                    current_text.push_str(&decoded);
                 }
             }
-            Ok(Event::Text(ref e)) => {
-                let decoded = crate::epub::unescape_xml_or_html(e);
-                current_text.push_str(&decoded);
+            Ok(Event::CData(ref e)) => {
+                if tag_stack.iter().any(|t| is_metadata_value_tag(t)) {
+                    current_text.push_str(&String::from_utf8_lossy(e.as_ref()));
+                }
             }
-            Ok(Event::End(_)) => {
-                let text = current_text.trim().to_string();
-                if !text.is_empty() {
-                    match current_tag.as_str() {
-                        "title" => {
-                            titles.push((current_title_id.take(), current_title_type.take(), text));
-                        }
-                        "identifier" => {
-                            identifiers.push((current_identifier_id.take(), text));
-                        }
-                        "meta_title_type" => {
-                            if let Some(target) = current_meta_refines.take() {
-                                title_types.insert(target, text);
+            Ok(Event::End(ref e)) => {
+                let end_local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                let popped = if let Some(pos) = tag_stack.iter().rposition(|t| t == &end_local) {
+                    let popped = tag_stack[pos].clone();
+                    tag_stack.truncate(pos);
+                    Some(popped)
+                } else {
+                    None
+                };
+
+                if let Some(tag) = popped
+                    && is_metadata_value_tag(&tag)
+                {
+                    let text = current_text.trim().to_string();
+                    if !text.is_empty() {
+                        match tag.as_str() {
+                            "title" => {
+                                titles.push((
+                                    current_title_id.take(),
+                                    current_title_type.take(),
+                                    text,
+                                ));
                             }
-                        }
-                        "creator" => metadata.creators.push(text),
-                        "language" => {
-                            if metadata.language.is_empty() {
-                                metadata.language = text;
+                            "identifier" => {
+                                identifiers.push((current_identifier_id.take(), text));
                             }
-                        }
-                        "publisher" => {
-                            if metadata.publisher.is_none() {
-                                metadata.publisher = Some(text);
+                            "meta" => {
+                                if let Some(target) = current_meta_refines.take() {
+                                    title_types.insert(target, text);
+                                }
                             }
-                        }
-                        "description" => {
-                            if metadata.description.is_none() {
-                                metadata.description = Some(text);
+                            "creator" => metadata.creators.push(text),
+                            "language" => {
+                                if metadata.language.is_empty() {
+                                    metadata.language = text;
+                                }
                             }
+                            "publisher" => {
+                                if metadata.publisher.is_none() {
+                                    metadata.publisher = Some(text);
+                                }
+                            }
+                            "description" => {
+                                if metadata.description.is_none() {
+                                    metadata.description = Some(text);
+                                }
+                            }
+                            "date" if metadata.date.is_none() => {
+                                metadata.date = Some(text);
+                            }
+                            _ => {}
                         }
-                        "date" if metadata.date.is_none() => {
-                            metadata.date = Some(text);
-                        }
-                        _ => {}
+                    }
+                    current_text.clear();
+                    if tag == "title" {
+                        current_title_id = None;
+                        current_title_type = None;
+                    } else if tag == "identifier" {
+                        current_identifier_id = None;
+                    } else if tag == "meta" {
+                        current_meta_refines = None;
                     }
                 }
-                current_tag.clear();
-                current_text.clear();
-                current_title_id = None;
-                current_title_type = None;
-                current_identifier_id = None;
-                current_meta_refines = None;
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(EpubError::Xml(e.to_string())),
@@ -343,4 +387,52 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
     }
 
     Ok((metadata, manifest, spine))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_opf_empty_meta_cdata_and_attr_unescape() {
+        let opf = r##"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid&amp;1" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title id="t1">Part 1 <meta name="empty-marker" content="ignored"/>&amp; Part 2</dc:title>
+    <dc:title id="t2"><![CDATA[CDATA Title & More]]></dc:title>
+    <meta property="title-type" refines="#t2">main</meta>
+    <dc:description><![CDATA[Summary <with> raw & symbols]]></dc:description>
+    <dc:creator>Author &mdash; One</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:identifier id="uid&amp;1">urn:uuid:1234</dc:identifier>
+    <meta name="cover" content="cov&amp;img"/>
+  </metadata>
+  <manifest>
+    <item id="cov&amp;img" href="images/cover&amp;1.jpg" media-type="image/jpeg"/>
+    <item id="c1" href="text/ch1.xhtml?x=1&amp;y=2" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+  </spine>
+</package>"##;
+
+        let (meta, manifest, spine) = parse_opf(opf).expect("parse_opf should succeed");
+        assert_eq!(meta.title, "CDATA Title & More");
+        assert_eq!(
+            meta.description.as_deref(),
+            Some("Summary <with> raw & symbols")
+        );
+        assert_eq!(meta.creators, vec!["Author — One"]);
+        assert_eq!(meta.identifier, "urn:uuid:1234");
+        assert_eq!(meta.cover_image_id.as_deref(), Some("cov&img"));
+        assert_eq!(
+            manifest.get("cov&img").map(|i| i.href.as_str()),
+            Some("images/cover&1.jpg")
+        );
+        assert_eq!(
+            manifest.get("c1").map(|i| i.href.as_str()),
+            Some("text/ch1.xhtml?x=1&y=2")
+        );
+        assert_eq!(spine, vec!["c1"]);
+    }
 }

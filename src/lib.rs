@@ -14,7 +14,9 @@ pub mod sync;
 pub mod validator;
 
 pub use container::{ChunkEntry, ContainerError, ContainerHeader, KfxContainer, KfxEntity};
-pub use enhancements::{CoverError, CoverOptimizer, WordWiseBuilder, WordWiseGloss};
+pub use enhancements::{
+    CoverError, CoverOptimizer, WordWiseBuilder, WordWiseGloss, WordWisePacingConfig,
+};
 pub use epub::{EpubError, EpubReader};
 pub use ion::{IonError, IonReader, IonValue, IonWriter, encode_varuint, wrap_enty_header};
 pub use ir::{

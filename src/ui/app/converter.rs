@@ -98,16 +98,13 @@ impl KindleStudio {
                                 .ok();
                             }
                             Ok(Ok(None)) => {}
-                            _ => {
-                                let sample_path = std::path::PathBuf::from(
-                                    "../sample/Apocolocyntosis - Lucius Annaeus Seneca.epub",
-                                );
-                                if sample_path.exists() {
-                                    this.update(cx, |this, cx| {
-                                        this.handle_incoming_path(&sample_path, cx);
-                                    })
-                                    .ok();
-                                }
+                            Ok(Err(_)) | Err(_) => {
+                                this.update(cx, |this, cx| {
+                                    this.status_message =
+                                        Some(("Unable to open file picker dialog.".into(), true));
+                                    cx.notify();
+                                })
+                                .ok();
                             }
                         })
                         .detach();
@@ -219,29 +216,51 @@ impl KindleStudio {
                                 format!("Conversion Queue ({} tasks)", self.tasks.len())
                             }),
                     )
-                    .child(if !self.tasks.is_empty() {
+                    .child(
                         div()
-                            .id("btn_clear_completed")
-                            .cursor_pointer()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_md()
-                            .bg(Theme::bg_card_hover())
-                            .text_xs()
-                            .text_color(Theme::text_muted())
-                            .child("🗑 Clear")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tasks.retain(|t| {
-                                    t.status == TaskStatus::Converting
-                                        || t.status == TaskStatus::Syncing
-                                        || t.status == TaskStatus::Queued
-                                });
-                                cx.notify();
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(self.last_output_path.clone().map(|out_path| {
+                                div()
+                                    .id("btn_open_output_folder")
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(Theme::bg_card_hover())
+                                    .text_xs()
+                                    .text_color(Theme::text_muted())
+                                    .child("📂 Output")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_output_folder(&out_path, cx);
+                                    }))
                             }))
-                            .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    }),
+                            .children(if !self.tasks.is_empty() {
+                                Some(
+                                    div()
+                                        .id("btn_clear_completed")
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(Theme::bg_card_hover())
+                                        .text_xs()
+                                        .text_color(Theme::text_muted())
+                                        .child("🗑 Clear")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.tasks.retain(|t| {
+                                                t.status == TaskStatus::Converting
+                                                    || t.status == TaskStatus::Syncing
+                                                    || t.status == TaskStatus::Queued
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                            } else {
+                                None
+                            }),
+                    ),
             )
             // 4. Task Queue Cards
             .child(

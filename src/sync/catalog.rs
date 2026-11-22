@@ -4,7 +4,9 @@
 //! enforcing whitelist-safe deletion, and purging stale or corrupt files.
 
 use super::DEVICE_SYNC_LOCK;
-use super::types::KindleBookFile;
+use super::sanitize::collect_sidecar_stems;
+use super::types::{KindleBookFile, SyncError};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Scans the Kindle documents directory (including author subfolders up to max_depth 3) for valid e-book files.
@@ -326,52 +328,81 @@ pub fn delete_book_file(full_path: &Path) -> Result<(), std::io::Error> {
     delete_book_file_safe(None, full_path)
 }
 
-/// Purges .bad_file markers, incompatible serialized state files, and orphaned enhancement sidecars.
-pub fn clean_stale_sdr_files(sdr_dir: &Path, current_asin: Option<&str>, purge_word_wise: bool) {
+/// Purges `.bad_file` markers, incompatible serialized state files, and orphaned enhancement
+/// sidecars while preserving `.kll`/`.asc` entries matching `current_asin` (including its
+/// 10-character canonical ASIN alias) or `current_content_id` when `purge_word_wise == false`.
+pub fn clean_stale_sdr_files_with_content_id(
+    sdr_dir: &Path,
+    current_asin: Option<&str>,
+    current_content_id: Option<&str>,
+    purge_word_wise: bool,
+) -> Result<(), SyncError> {
     if !sdr_dir.is_dir() {
-        return;
+        return Ok(());
     }
+    if let Ok(dir_meta) = std::fs::symlink_metadata(sdr_dir)
+        && dir_meta.file_type().is_symlink()
+    {
+        return Ok(());
+    }
+
     let stale_exts = [
         ".han", ".tan", ".pdr", ".mbp1", ".phl", ".bdr", ".ea", ".yjf", ".yjr", ".part",
     ];
-    if let Ok(entries) = std::fs::read_dir(sdr_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let fname_lower = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_lowercase())
-                    .unwrap_or_default();
+    let valid_stems: HashSet<String> = collect_sidecar_stems(current_asin, current_content_id)
+        .into_iter()
+        .map(|s| s.to_lowercase())
+        .collect();
 
-                if fname_lower.contains(".bad_file")
-                    || stale_exts.iter().any(|ext| fname_lower.ends_with(ext))
-                    || (purge_word_wise && fname_lower.contains(".kll"))
-                {
+    for entry in std::fs::read_dir(sdr_dir)?.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_file() {
+            let fname_lower = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_lowercase())
+                .unwrap_or_default();
+
+            if fname_lower.contains(".bad_file")
+                || stale_exts.iter().any(|ext| fname_lower.ends_with(ext))
+                || (purge_word_wise && fname_lower.ends_with(".kll"))
+            {
+                let _ = std::fs::remove_file(&path);
+            } else if (fname_lower.ends_with(".kll") || fname_lower.ends_with(".asc"))
+                && !valid_stems.is_empty()
+            {
+                let stem_id = path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .and_then(|s| s.rsplit('.').next())
+                    .map(|s| s.to_lowercase());
+                if !stem_id.is_some_and(|id| valid_stems.contains(&id)) {
                     let _ = std::fs::remove_file(&path);
-                } else if let Some(asin) = current_asin {
-                    let asin_lower = asin.to_lowercase();
-                    let prefix: String = asin_lower.chars().take(9).collect();
-                    let asin_10 = if prefix.len() == 9 {
-                        format!("b{}", prefix)
-                    } else {
-                        asin_lower.clone()
-                    };
-                    if (fname_lower.contains(".kll") || fname_lower.contains(".asc"))
-                        && !fname_lower.contains(&asin_lower)
-                        && !fname_lower.contains(&asin_10)
-                    {
-                        let _ = std::fs::remove_file(&path);
-                    }
                 }
-            } else if path.is_dir() && path.file_name().is_some_and(|n| n == "data") {
-                let pag_cache = path.join(".pagination.cache");
-                if pag_cache.is_dir() {
-                    let _ = std::fs::remove_dir_all(&pag_cache);
-                }
+            }
+        } else if meta.is_dir() && path.file_name().is_some_and(|n| n == "data") {
+            let pag_cache = path.join(".pagination.cache");
+            if let Ok(cache_meta) = std::fs::symlink_metadata(&pag_cache)
+                && !cache_meta.file_type().is_symlink()
+                && cache_meta.is_dir()
+            {
+                let _ = std::fs::remove_dir_all(&pag_cache);
             }
         }
     }
+
+    Ok(())
+}
+
+/// Purges .bad_file markers, incompatible serialized state files, and orphaned enhancement sidecars.
+pub fn clean_stale_sdr_files(sdr_dir: &Path, current_asin: Option<&str>, purge_word_wise: bool) {
+    let _ = clean_stale_sdr_files_with_content_id(sdr_dir, current_asin, None, purge_word_wise);
 }
 
 #[cfg(test)]
@@ -519,6 +550,45 @@ mod tests {
         KindleSync::clean_stale_sdr_files(&sdr, Some("NEWASIN"), true);
         assert!(!sdr.join("LanguageLayer.en.NEWASIN.kll").exists());
         assert!(sdr.join("XRAY.entities.NEWASIN.asc").exists());
+    }
+
+    #[test]
+    fn test_clean_stale_sdr_files_preserves_content_id_sidecars() {
+        let temp = tempfile::tempdir().unwrap();
+        let sdr = temp.path().join("Book.sdr");
+        std::fs::create_dir_all(&sdr).unwrap();
+
+        let asin = "123456789ABCDEF0123456789ABCDEF0";
+        let asin_10 = "B123456789";
+        let cid = "CID_DIFFERENT_987654321";
+
+        let keep_asin_kll = sdr.join(format!("LanguageLayer.en.{}.kll", asin));
+        let keep_asin10_kll = sdr.join(format!("LanguageLayer.en.{}.kll", asin_10));
+        let keep_cid_kll = sdr.join(format!("LanguageLayer.en.{}.kll", cid));
+        let keep_cid_asc = sdr.join(format!("XRAY.entities.{}.asc", cid));
+        let stale_kll = sdr.join("LanguageLayer.en.OLDSTALE.kll");
+        let stale_asc = sdr.join("XRAY.entities.OLDSTALE.asc");
+
+        for p in [
+            &keep_asin_kll,
+            &keep_asin10_kll,
+            &keep_cid_kll,
+            &keep_cid_asc,
+            &stale_kll,
+            &stale_asc,
+        ] {
+            std::fs::write(p, b"data").unwrap();
+        }
+
+        KindleSync::clean_stale_sdr_files_with_content_id(&sdr, Some(asin), Some(cid), false)
+            .unwrap();
+
+        assert!(keep_asin_kll.exists());
+        assert!(keep_asin10_kll.exists());
+        assert!(keep_cid_kll.exists());
+        assert!(keep_cid_asc.exists());
+        assert!(!stale_kll.exists());
+        assert!(!stale_asc.exists());
     }
 
     #[cfg(unix)]

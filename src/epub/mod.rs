@@ -42,91 +42,332 @@ pub fn unescape_xml_or_html(e: &quick_xml::events::BytesText) -> String {
     }
 }
 
+pub(crate) fn unescape_attr_value(attr: &quick_xml::events::attributes::Attribute<'_>) -> String {
+    match attr.unescape_value() {
+        Ok(s) => s.into_owned(),
+        Err(_) => {
+            let raw = String::from_utf8_lossy(&attr.value);
+            decode_html_entities(&raw)
+        }
+    }
+}
+
+fn decode_named_entity(name: &str) -> Option<&'static str> {
+    match name {
+        // Core XML
+        "amp" => Some("&"),
+        "lt" => Some("<"),
+        "gt" => Some(">"),
+        "quot" => Some("\""),
+        "apos" => Some("'"),
+        // Spacing & typography
+        "nbsp" => Some("\u{00A0}"),
+        "ensp" => Some("\u{2002}"),
+        "emsp" => Some("\u{2003}"),
+        "thinsp" => Some("\u{2009}"),
+        "zwnj" => Some("\u{200C}"),
+        "zwj" => Some("\u{200D}"),
+        "lrm" => Some("\u{200E}"),
+        "rlm" => Some("\u{200F}"),
+        "shy" => Some(""),
+        "ndash" => Some("–"),
+        "mdash" => Some("—"),
+        "hellip" => Some("…"),
+        "lsquo" => Some("‘"),
+        "rsquo" => Some("’"),
+        "sbquo" => Some("‚"),
+        "ldquo" => Some("“"),
+        "rdquo" => Some("”"),
+        "bdquo" => Some("„"),
+        "laquo" => Some("«"),
+        "raquo" => Some("»"),
+        "lsaquo" => Some("‹"),
+        "rsaquo" => Some("›"),
+        "bull" => Some("•"),
+        "middot" => Some("·"),
+        "dagger" => Some("†"),
+        "Dagger" => Some("‡"),
+        "permil" => Some("‰"),
+        "prime" => Some("′"),
+        "Prime" => Some("″"),
+        "oline" => Some("‾"),
+        "frasl" => Some("⁄"),
+        "copy" => Some("©"),
+        "reg" => Some("®"),
+        "trade" => Some("™"),
+        "euro" => Some("€"),
+        "pound" => Some("£"),
+        "yen" => Some("¥"),
+        "cent" => Some("¢"),
+        "curren" => Some("¤"),
+        "sect" => Some("§"),
+        "para" => Some("¶"),
+        "deg" => Some("°"),
+        "plusmn" => Some("±"),
+        "times" => Some("×"),
+        "divide" => Some("÷"),
+        "minus" => Some("−"),
+        "iexcl" => Some("¡"),
+        "iquest" => Some("¿"),
+        "brvbar" => Some("¦"),
+        "uml" => Some("¨"),
+        "ordf" => Some("ª"),
+        "ordm" => Some("º"),
+        "not" => Some("¬"),
+        "macr" => Some("¯"),
+        "sup1" => Some("¹"),
+        "sup2" => Some("²"),
+        "sup3" => Some("³"),
+        "acute" => Some("´"),
+        "micro" => Some("µ"),
+        "cedil" => Some("¸"),
+        "frac14" => Some("¼"),
+        "frac12" => Some("½"),
+        "frac34" => Some("¾"),
+        "circ" => Some("ˆ"),
+        "tilde" => Some("˜"),
+        // Math & symbols
+        "lowast" => Some("∗"),
+        "radic" => Some("√"),
+        "infin" => Some("∞"),
+        "ang" => Some("∠"),
+        "and" => Some("∧"),
+        "or" => Some("∨"),
+        "cap" => Some("∩"),
+        "cup" => Some("∪"),
+        "int" => Some("∫"),
+        "there4" => Some("∴"),
+        "sim" => Some("∼"),
+        "cong" => Some("≅"),
+        "asymp" => Some("≈"),
+        "ne" => Some("≠"),
+        "equiv" => Some("≡"),
+        "le" => Some("≤"),
+        "ge" => Some("≥"),
+        "sub" => Some("⊂"),
+        "sup" => Some("⊃"),
+        "nsub" => Some("⊄"),
+        "sube" => Some("⊆"),
+        "supe" => Some("⊇"),
+        "oplus" => Some("⊕"),
+        "otimes" => Some("⊗"),
+        "perp" => Some("⊥"),
+        "sdot" => Some("⋅"),
+        "larr" => Some("←"),
+        "uarr" => Some("↑"),
+        "rarr" => Some("→"),
+        "darr" => Some("↓"),
+        "harr" => Some("↔"),
+        "crarr" => Some("↵"),
+        "loz" => Some("◊"),
+        "spades" => Some("♠"),
+        "clubs" => Some("♣"),
+        "hearts" => Some("♥"),
+        "diams" => Some("♦"),
+        // Latin-1 & Latin Extended-A
+        "Agrave" => Some("À"),
+        "Aacute" => Some("Á"),
+        "Acirc" => Some("Â"),
+        "Atilde" => Some("Ã"),
+        "Auml" => Some("Ä"),
+        "Aring" => Some("Å"),
+        "AElig" => Some("Æ"),
+        "Ccedil" => Some("Ç"),
+        "Egrave" => Some("È"),
+        "Eacute" => Some("É"),
+        "Ecirc" => Some("Ê"),
+        "Euml" => Some("Ë"),
+        "Igrave" => Some("Ì"),
+        "Iacute" => Some("Í"),
+        "Icirc" => Some("Î"),
+        "Iuml" => Some("Ï"),
+        "ETH" => Some("Ð"),
+        "Ntilde" => Some("Ñ"),
+        "Ograve" => Some("Ò"),
+        "Oacute" => Some("Ó"),
+        "Ocirc" => Some("Ô"),
+        "Otilde" => Some("Õ"),
+        "Ouml" => Some("Ö"),
+        "Oslash" => Some("Ø"),
+        "Ugrave" => Some("Ù"),
+        "Uacute" => Some("Ú"),
+        "Ucirc" => Some("Û"),
+        "Uuml" => Some("Ü"),
+        "Yacute" => Some("Ý"),
+        "THORN" => Some("Þ"),
+        "szlig" => Some("ß"),
+        "agrave" => Some("à"),
+        "aacute" => Some("á"),
+        "acirc" => Some("â"),
+        "atilde" => Some("ã"),
+        "auml" => Some("ä"),
+        "aring" => Some("å"),
+        "aelig" => Some("æ"),
+        "ccedil" => Some("ç"),
+        "egrave" => Some("è"),
+        "eacute" => Some("é"),
+        "ecirc" => Some("ê"),
+        "euml" => Some("ë"),
+        "igrave" => Some("ì"),
+        "iacute" => Some("í"),
+        "icirc" => Some("î"),
+        "iuml" => Some("ï"),
+        "eth" => Some("ð"),
+        "ntilde" => Some("ñ"),
+        "ograve" => Some("ò"),
+        "oacute" => Some("ó"),
+        "ocirc" => Some("ô"),
+        "otilde" => Some("õ"),
+        "ouml" => Some("ö"),
+        "oslash" => Some("ø"),
+        "ugrave" => Some("ù"),
+        "uacute" => Some("ú"),
+        "ucirc" => Some("û"),
+        "uuml" => Some("ü"),
+        "yacute" => Some("ý"),
+        "thorn" => Some("þ"),
+        "yuml" => Some("ÿ"),
+        "OElig" => Some("Œ"),
+        "oelig" => Some("œ"),
+        "Scaron" => Some("Š"),
+        "scaron" => Some("š"),
+        "Yuml" => Some("Ÿ"),
+        // Greek
+        "Alpha" => Some("Α"),
+        "Beta" => Some("Β"),
+        "Gamma" => Some("Γ"),
+        "Delta" => Some("Δ"),
+        "Epsilon" => Some("Ε"),
+        "Zeta" => Some("Ζ"),
+        "Eta" => Some("Η"),
+        "Theta" => Some("Θ"),
+        "Iota" => Some("Ι"),
+        "Kappa" => Some("Κ"),
+        "Lambda" => Some("Λ"),
+        "Mu" => Some("Μ"),
+        "Nu" => Some("Ν"),
+        "Xi" => Some("Ξ"),
+        "Omicron" => Some("Ο"),
+        "Pi" => Some("Π"),
+        "Rho" => Some("Ρ"),
+        "Sigma" => Some("Σ"),
+        "Tau" => Some("Τ"),
+        "Upsilon" => Some("Υ"),
+        "Phi" => Some("Φ"),
+        "Chi" => Some("Χ"),
+        "Psi" => Some("Ψ"),
+        "Omega" => Some("Ω"),
+        "alpha" => Some("α"),
+        "beta" => Some("β"),
+        "gamma" => Some("γ"),
+        "delta" => Some("δ"),
+        "epsilon" => Some("ε"),
+        "zeta" => Some("ζ"),
+        "eta" => Some("η"),
+        "theta" => Some("θ"),
+        "iota" => Some("ι"),
+        "kappa" => Some("κ"),
+        "lambda" => Some("λ"),
+        "mu" => Some("μ"),
+        "nu" => Some("ν"),
+        "xi" => Some("ξ"),
+        "omicron" => Some("ο"),
+        "pi" => Some("π"),
+        "rho" => Some("ρ"),
+        "sigmaf" => Some("ς"),
+        "sigma" => Some("σ"),
+        "tau" => Some("τ"),
+        "upsilon" => Some("υ"),
+        "phi" => Some("φ"),
+        "chi" => Some("χ"),
+        "psi" => Some("ψ"),
+        "omega" => Some("ω"),
+        "thetasym" => Some("ϑ"),
+        "upsih" => Some("ϒ"),
+        "piv" => Some("ϖ"),
+        _ => None,
+    }
+}
+
 pub fn decode_html_entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }
-    let mut replaced = s
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&mdash;", "—")
-        .replace("&ndash;", "–")
-        .replace("&hellip;", "…")
-        .replace("&lsquo;", "‘")
-        .replace("&rsquo;", "’")
-        .replace("&ldquo;", "“")
-        .replace("&rdquo;", "”")
-        .replace("&nbsp;", "\u{00A0}")
-        .replace("&copy;", "©")
-        .replace("&reg;", "®")
-        .replace("&trade;", "™")
-        .replace("&bull;", "•")
-        .replace("&pound;", "£")
-        .replace("&euro;", "€")
-        .replace("&yen;", "¥")
-        .replace("&sect;", "§")
-        .replace("&deg;", "°")
-        .replace("&times;", "×")
-        .replace("&divide;", "÷")
-        .replace("&shy;", "");
+    const MAX_ENTITY_LOOKAHEAD: usize = 16;
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut copy_from = 0usize;
+    let mut i = 0usize;
 
-    if replaced.contains("&#") {
-        let mut out = String::with_capacity(replaced.len());
-        let mut chars = replaced.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '&' && chars.peek() == Some(&'#') {
-                chars.next(); // consume '#'
-                let is_hex = chars.peek() == Some(&'x') || chars.peek() == Some(&'X');
-                if is_hex {
-                    chars.next(); // consume 'x'/'X'
-                }
-                let mut num_str = String::new();
-                while let Some(&nc) = chars.peek() {
-                    if (is_hex && nc.is_ascii_hexdigit()) || (!is_hex && nc.is_ascii_digit()) {
-                        num_str.push(nc);
-                        chars.next();
+    while i < bytes.len() {
+        if bytes[i] != b'&' {
+            i += 1;
+            continue;
+        }
+        let lookahead_end = (i + 1 + MAX_ENTITY_LOOKAHEAD).min(bytes.len());
+        let mut semi_pos = None;
+        let mut j = i + 1;
+        while j < lookahead_end {
+            let b = bytes[j];
+            if b == b';' {
+                semi_pos = Some(j);
+                break;
+            }
+            if b == b'&' || b == b'<' || b.is_ascii_whitespace() || !b.is_ascii() {
+                break;
+            }
+            j += 1;
+        }
+
+        if let Some(end_pos) = semi_pos
+            && end_pos > i + 1
+            && let Ok(entity) = std::str::from_utf8(&bytes[i + 1..end_pos])
+        {
+            if let Some(hex_or_dec) = entity.strip_prefix('#') {
+                let decoded_char = if let Some(hex) = hex_or_dec
+                    .strip_prefix('x')
+                    .or_else(|| hex_or_dec.strip_prefix('X'))
+                {
+                    if !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        u32::from_str_radix(hex, 16)
+                            .ok()
+                            .filter(|&cp| cp != 0)
+                            .and_then(char::from_u32)
                     } else {
-                        break;
+                        None
                     }
-                }
-                if chars.peek() == Some(&';') {
-                    chars.next(); // consume ';'
-                    let parsed = if is_hex {
-                        u32::from_str_radix(&num_str, 16).ok()
-                    } else {
-                        num_str.parse::<u32>().ok()
-                    };
-                    if let Some(ch) = parsed.and_then(char::from_u32) {
-                        out.push(ch);
-                        continue;
-                    } else {
-                        out.push('&');
-                        out.push('#');
-                        if is_hex {
-                            out.push('x');
-                        }
-                        out.push_str(&num_str);
-                        out.push(';');
-                        continue;
-                    }
+                } else if !hex_or_dec.is_empty() && hex_or_dec.bytes().all(|b| b.is_ascii_digit()) {
+                    hex_or_dec
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|&cp| cp != 0)
+                        .and_then(char::from_u32)
                 } else {
-                    out.push('&');
-                    out.push('#');
-                    if is_hex {
-                        out.push('x');
-                    }
-                    out.push_str(&num_str);
+                    None
+                };
+
+                if let Some(ch) = decoded_char {
+                    out.push_str(&s[copy_from..i]);
+                    out.push(ch);
+                    i = end_pos + 1;
+                    copy_from = i;
                     continue;
                 }
+            } else if let Some(replacement) = decode_named_entity(entity) {
+                out.push_str(&s[copy_from..i]);
+                out.push_str(replacement);
+                i = end_pos + 1;
+                copy_from = i;
+                continue;
             }
-            out.push(c);
         }
-        replaced = out;
+        i += 1;
     }
-    replaced
+
+    if copy_from < bytes.len() {
+        out.push_str(&s[copy_from..]);
+    }
+    out
 }
 
 #[derive(Error, Debug)]
@@ -164,8 +405,7 @@ impl EpubReader {
         let mut budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
         let opf_path = archive::find_opf_path_with_budget(&mut archive, &mut budget)?;
         let opf_content = {
-            let mut entry = archive
-                .by_name(&opf_path)
+            let mut entry = archive::open_zip_entry(&mut archive, &opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
             archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget)?
         };
@@ -234,8 +474,7 @@ impl EpubReader {
 
         // 3. Read and parse OPF file
         let opf_content = {
-            let mut entry = archive
-                .by_name(&opf_path)
+            let mut entry = archive::open_zip_entry(&mut archive, &opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
             archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget)?
         };
@@ -247,7 +486,7 @@ impl EpubReader {
         for item in manifest.values() {
             if item.media_type == "text/css" || item.href.to_ascii_lowercase().ends_with(".css") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
-                if let Ok(mut entry) = archive.by_name(&full_path) {
+                if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
                     match archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget) {
                         Ok(s) => book_css.add_css(&s),
                         Err(e @ EpubError::Security(_)) => return Err(e),
@@ -280,7 +519,7 @@ impl EpubReader {
 
             if item.media_type.starts_with("image/") || item.media_type.starts_with("font/") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
-                if let Ok(mut entry) = archive.by_name(&full_path) {
+                if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
                     match archive::read_entry_bytes(&mut entry, MAX_EPUB_FILE_SIZE, &mut budget) {
                         Ok(data) => {
                             resources.insert(
@@ -307,17 +546,29 @@ impl EpubReader {
         for (idx, item_id) in spine.iter().enumerate() {
             if let Some(item) = manifest.get(item_id) {
                 let sec_id = format!("section_{}", idx + 1);
+                let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
+                let clean_href = item.href.trim_start_matches("./").to_string();
+                let decoded_href = Self::decode_percent(&item.href);
+                let decoded_clean_href = Self::decode_percent(&clean_href);
+                let decoded_full_path = Self::decode_percent(&full_path);
+
                 href_to_section.insert(item.href.clone(), sec_id.clone());
+                href_to_section.insert(clean_href, sec_id.clone());
+                href_to_section.insert(decoded_href, sec_id.clone());
+                href_to_section.insert(decoded_clean_href, sec_id.clone());
+                href_to_section.insert(full_path.clone(), sec_id.clone());
+                href_to_section.insert(decoded_full_path, sec_id.clone());
                 let file_name = Path::new(&item.href)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
                 if !file_name.is_empty() {
+                    let decoded_file_name = Self::decode_percent(&file_name);
                     href_to_section.insert(file_name.clone(), sec_id.clone());
+                    href_to_section.insert(decoded_file_name, sec_id.clone());
                 }
 
-                let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
-                if let Ok(mut entry) = archive.by_name(&full_path) {
+                if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
                     let xhtml = match archive::read_entry_string(
                         &mut entry,
                         MAX_CHAPTER_XHTML_BYTES,
@@ -1985,5 +2236,100 @@ mod tests {
         } else {
             panic!("Expected paragraph 2");
         }
+    }
+
+    #[test]
+    fn test_decode_html_entities_single_pass_and_extended_entities() {
+        // Must NOT double-decode &amp;lt; or &amp;#8212;
+        assert_eq!(decode_html_entities("&amp;lt;tag&amp;gt;"), "&lt;tag&gt;");
+        assert_eq!(decode_html_entities("&amp;#8212;"), "&#8212;");
+        assert_eq!(decode_html_entities("&amp;amp;"), "&amp;");
+
+        // Reject NUL (&#0;) and surrogates (&#xD800;)
+        assert_eq!(
+            decode_html_entities("a&#0;b&#x0;c&#xD800;d"),
+            "a&#0;b&#x0;c&#xD800;d"
+        );
+
+        // Named typography, Latin-1, Greek, and numeric entities
+        assert_eq!(
+            decode_html_entities("Caf&eacute; &mdash; &alpha; + &beta; &#8212; &#x2014;"),
+            "Café — α + β — —"
+        );
+        assert_eq!(
+            decode_html_entities("Tom & Jerry &amp; Co."),
+            "Tom & Jerry & Co."
+        );
+    }
+
+    #[test]
+    fn test_epub_reader_tolerant_zip_lookup_and_root_relative_paths() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="/OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/content.opf", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Tolerant Zip</dc:title>
+  </metadata>
+  <manifest>
+    <item id="css1" href="/OEBPS/Styles/Main.CSS" media-type="text/css"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="c1" href="Text/Ch%201.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#,
+            )
+            .unwrap();
+            zip.start_file("oebps/styles/main.css", opts).unwrap();
+            zip.write_all(b"p.lead { font-style: italic; }").unwrap();
+            zip.start_file("OEBPS/nav.xhtml", opts).unwrap();
+            zip.write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body><nav epub:type="toc"><ol><li><a href="Text/Ch%201.xhtml#start">Start</a></li></ol></nav></body></html>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/Text/Ch 1.xhtml", opts).unwrap();
+            zip.write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p id="start" class="lead">Hello</p></body></html>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), buf.into_inner()).unwrap();
+
+        let book = EpubReader::read_from_file(tmp.path()).expect("read_from_file must succeed");
+        assert_eq!(book.sections.len(), 1);
+        assert_eq!(book.sections[0].blocks[0].plain_text(), "Hello");
+        assert!(
+            book.sections[0].blocks[0]
+                .resolved_style()
+                .custom_classes
+                .iter()
+                .any(|c| c == "italic"),
+            "Case-insensitive CSS lookup must apply italic: {:?}",
+            book.sections[0].blocks[0].resolved_style()
+        );
+        assert_eq!(book.toc.len(), 1);
+        assert_eq!(book.toc[0].target_section, "section_1");
+        assert_eq!(book.toc[0].target_anchor.as_deref(), Some("start"));
     }
 }

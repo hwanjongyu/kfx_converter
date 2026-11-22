@@ -20,23 +20,31 @@ fn test_sanitize_filename_all_dos_devices_with_various_extensions() {
     for dev in devices {
         // Uppercase bare
         let res = KindleSync::sanitize_filename(dev);
-        assert_eq!(res, format!("{}_book", dev));
+        assert_eq!(res, format!("book_{}", dev));
 
         // Lowercase bare
         let lower = dev.to_lowercase();
         let res_lower = KindleSync::sanitize_filename(&lower);
-        assert_eq!(res_lower, format!("{}_book", lower));
+        assert_eq!(res_lower, format!("book_{}", lower));
 
         // With extension .kfx
         let with_ext = format!("{}.kfx", dev);
         let res_ext = KindleSync::sanitize_filename(&with_ext);
-        assert_eq!(res_ext, format!("{}_book", with_ext));
+        assert_eq!(res_ext, format!("book_{}", with_ext));
 
         // Lowercase with extension
         let lower_ext = format!("{}.epub", lower);
         let res_lower_ext = KindleSync::sanitize_filename(&lower_ext);
-        assert_eq!(res_lower_ext, format!("{}_book", lower_ext));
+        assert_eq!(res_lower_ext, format!("book_{}", lower_ext));
     }
+
+    // Post-truncation DOS reserved re-check
+    let padded = format!("CON{}a", " ".repeat(130));
+    assert_eq!(KindleSync::sanitize_filename(&padded), "book_CON");
+    assert_eq!(
+        KindleSync::sanitize_filename(&format!("CON{}", " ".repeat(130))),
+        "book_CON"
+    );
 }
 
 #[test]

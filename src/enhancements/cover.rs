@@ -24,11 +24,74 @@ pub enum CoverError {
     EmptyData,
     #[error("Image dimensions ({0}x{1}) exceed safe limits")]
     ImageTooLarge(u32, u32),
+    #[error("Image decoding limit exceeded: {0}")]
+    LimitExceeded(String),
+}
+
+/// Valid minimal 1x1 white baseline RGB JPEG (JFIF) used as a safe fallback
+/// when an oversized or limit-exceeding image cannot be safely embedded.
+pub const FALLBACK_PLACEHOLDER_JPEG: &[u8] = &[
+    255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67, 0, 5,
+    3, 4, 4, 4, 3, 5, 4, 4, 4, 5, 5, 5, 6, 7, 12, 8, 7, 7, 7, 7, 15, 11, 11, 9, 12, 17, 15, 18, 18,
+    17, 15, 17, 17, 19, 22, 28, 23, 19, 20, 26, 21, 17, 17, 24, 33, 24, 26, 29, 29, 31, 31, 31, 19,
+    23, 34, 36, 34, 30, 36, 28, 30, 31, 30, 255, 219, 0, 67, 1, 5, 5, 5, 7, 6, 7, 14, 8, 8, 14, 30,
+    20, 17, 20, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+    30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+    30, 30, 30, 30, 30, 255, 192, 0, 17, 8, 0, 1, 0, 1, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196,
+    0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+    255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125, 1, 2, 3, 0, 4, 17, 5,
+    18, 33, 49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35, 66, 177, 193, 21, 82,
+    209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54,
+    55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101,
+    102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136,
+    137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169,
+    170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202,
+    210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234,
+    241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 196, 0, 31, 1, 0, 3, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 17, 0, 2, 1, 2,
+    4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119, 0, 1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113,
+    19, 34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21, 98, 114, 209, 10, 22,
+    36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39, 40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69,
+    70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115,
+    116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148,
+    149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181,
+    182, 183, 184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214,
+    215, 216, 217, 218, 226, 227, 228, 229, 230, 231, 232, 233, 234, 242, 243, 244, 245, 246, 247,
+    248, 249, 250, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 251, 46, 138, 40, 160, 15,
+    255, 217,
+];
+
+/// Detects image format from magic bytes first, falling back to `ext_hint` (or JPEG if unknown).
+/// Returns `(kfx_ext, format_sid, mime_type)`.
+pub fn detect_image_format(data: &[u8], ext_hint: &str) -> (&'static str, u32, &'static str) {
+    if data.starts_with(b"\xFF\xD8\xFF") {
+        return ("jpg", 285, "image/jpeg");
+    }
+    if data.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return ("png", 284, "image/png");
+    }
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return ("gif", 286, "image/gif");
+    }
+
+    let norm = ext_hint.trim().trim_start_matches('.').to_ascii_lowercase();
+    match norm.as_str() {
+        "png" | "image/png" => ("png", 284, "image/png"),
+        "gif" | "image/gif" => ("gif", 286, "image/gif"),
+        _ => ("jpg", 285, "image/jpeg"),
+    }
 }
 
 pub struct CoverOptimizer;
 
 impl CoverOptimizer {
+    fn map_image_error(err: image::ImageError) -> CoverError {
+        match err {
+            image::ImageError::Limits(lim) => CoverError::LimitExceeded(lim.to_string()),
+            other => CoverError::Decode(other),
+        }
+    }
+
     /// Decodes an image with strict safety limits on dimensions and allocations (CWE-400 guard).
     fn decode_with_safety_limits(data: &[u8]) -> Result<DynamicImage, CoverError> {
         if let Some((w, h)) = Self::get_image_dimensions(data) {
@@ -52,7 +115,7 @@ impl CoverOptimizer {
         limits.max_image_height = Some(MAX_SAFE_IMAGE_DIMENSION);
         limits.max_alloc = Some(128 * 1024 * 1024);
         reader.limits(limits);
-        Ok(reader.decode()?)
+        reader.decode().map_err(Self::map_image_error)
     }
 
     /// Resizes down high-resolution content images exceeding max_dim (default 2560x2560) to protect
@@ -92,11 +155,13 @@ impl CoverOptimizer {
         let mut out = Cursor::new(Vec::new());
         let is_png = data.starts_with(b"\x89PNG");
         if is_png && resized.color().has_alpha() {
-            resized.write_to(&mut out, image::ImageFormat::Png)?;
+            resized
+                .write_to(&mut out, image::ImageFormat::Png)
+                .map_err(Self::map_image_error)?;
         } else {
             let rgb = Self::to_rgb_with_white_bg(&resized);
             let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-            encoder.encode_image(&rgb)?;
+            encoder.encode_image(&rgb).map_err(Self::map_image_error)?;
         }
 
         Ok(out.into_inner())
@@ -122,7 +187,7 @@ impl CoverOptimizer {
         let rgb = Self::to_rgb_with_white_bg(&resized);
         let mut out = Cursor::new(Vec::new());
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
-        encoder.encode_image(&rgb)?;
+        encoder.encode_image(&rgb).map_err(Self::map_image_error)?;
 
         Ok(out.into_inner())
     }
@@ -166,7 +231,9 @@ impl CoverOptimizer {
         let mut out = Cursor::new(Vec::new());
         // Encode standard baseline JPEG (quality 85)
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-        encoder.encode_image(&resized)?;
+        encoder
+            .encode_image(&resized)
+            .map_err(Self::map_image_error)?;
 
         Ok(out.into_inner())
     }
@@ -373,6 +440,77 @@ mod tests {
         assert!(matches!(
             CoverOptimizer::optimize_thumbnail(corrupt),
             Err(CoverError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn test_fallback_placeholder_jpeg_is_valid_1x1_baseline() {
+        assert_eq!(&FALLBACK_PLACEHOLDER_JPEG[0..3], b"\xFF\xD8\xFF");
+        assert!(
+            FALLBACK_PLACEHOLDER_JPEG
+                .windows(2)
+                .any(|w| w == [0xFF, 0xC0]),
+            "Fallback JPEG must contain SOF0 baseline marker"
+        );
+        assert!(
+            !FALLBACK_PLACEHOLDER_JPEG
+                .windows(2)
+                .any(|w| w == [0xFF, 0xC2]),
+            "Fallback JPEG must not contain SOF2 progressive marker"
+        );
+        let decoded = image::load_from_memory(FALLBACK_PLACEHOLDER_JPEG)
+            .expect("FALLBACK_PLACEHOLDER_JPEG must decode cleanly");
+        assert_eq!((decoded.width(), decoded.height()), (1, 1));
+        assert_eq!(
+            CoverOptimizer::get_image_dimensions(FALLBACK_PLACEHOLDER_JPEG),
+            Some((1, 1))
+        );
+    }
+
+    #[test]
+    fn test_detect_image_format_magic_bytes_and_fallback() {
+        // PNG magic bytes override spoofed .jpg hint
+        assert_eq!(
+            detect_image_format(b"\x89PNG\r\n\x1A\nMOCK", "jpg"),
+            ("png", 284, "image/png")
+        );
+        // JPEG magic bytes override spoofed .png hint
+        assert_eq!(
+            detect_image_format(b"\xFF\xD8\xFF\xE0MOCK", "png"),
+            ("jpg", 285, "image/jpeg")
+        );
+        // GIF magic bytes override spoofed .jpg hint
+        assert_eq!(
+            detect_image_format(b"GIF89aMOCK", "jpg"),
+            ("gif", 286, "image/gif")
+        );
+        assert_eq!(
+            detect_image_format(b"GIF87aMOCK", "png"),
+            ("gif", 286, "image/gif")
+        );
+        // Unknown magic falls back to ext_hint, defaulting unknown to JPEG
+        assert_eq!(
+            detect_image_format(b"UNKNOWN", "image/png"),
+            ("png", 284, "image/png")
+        );
+        assert_eq!(
+            detect_image_format(b"UNKNOWN", ".gif"),
+            ("gif", 286, "image/gif")
+        );
+        assert_eq!(
+            detect_image_format(b"UNKNOWN", "webp"),
+            ("jpg", 285, "image/jpeg")
+        );
+    }
+
+    #[test]
+    fn test_map_image_error_maps_limits_to_limit_exceeded() {
+        let limit_err = image::ImageError::Limits(image::error::LimitError::from_kind(
+            image::error::LimitErrorKind::DimensionError,
+        ));
+        assert!(matches!(
+            CoverOptimizer::map_image_error(limit_err),
+            CoverError::LimitExceeded(_)
         ));
     }
 }
