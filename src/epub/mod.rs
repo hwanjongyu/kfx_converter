@@ -161,16 +161,13 @@ impl EpubReader {
             )));
         }
 
-        let opf_path = Self::find_opf_path(&mut archive)?;
+        let mut budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
+        let opf_path = archive::find_opf_path_with_budget(&mut archive, &mut budget)?;
         let opf_content = {
             let mut entry = archive
                 .by_name(&opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
-            let mut s = String::new();
-            (&mut entry)
-                .take(MAX_METADATA_BYTES)
-                .read_to_string(&mut s)?;
-            s
+            archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget)?
         };
 
         let (metadata, _, _) = Self::parse_opf(&opf_content)?;
@@ -194,7 +191,7 @@ impl EpubReader {
 
         let mut total_uncompressed: u64 = 0;
         for i in 0..num_files {
-            let entry = archive.by_index(i)?;
+            let entry = archive.by_index_raw(i)?;
             let size = entry.size();
             let compressed = entry.compressed_size();
 
@@ -216,7 +213,9 @@ impl EpubReader {
                 }
             }
 
-            total_uncompressed += size;
+            total_uncompressed = total_uncompressed.checked_add(size).ok_or_else(|| {
+                EpubError::Security("Total uncompressed size overflows u64 limit".to_string())
+            })?;
             if total_uncompressed > MAX_EPUB_UNCOMPRESSED_TOTAL {
                 return Err(EpubError::Security(
                     "Total uncompressed size exceeds 1 GB limit".to_string(),
@@ -225,20 +224,9 @@ impl EpubReader {
         }
 
         // 2. Locate OPF file via META-INF/container.xml
-        let mut cumulative_decompressed: u64 = 0;
-        let mut add_decompressed = |bytes: usize| -> Result<(), EpubError> {
-            cumulative_decompressed = cumulative_decompressed
-                .checked_add(bytes as u64)
-                .filter(|&total| total <= MAX_EPUB_UNCOMPRESSED_TOTAL)
-                .ok_or_else(|| {
-                    EpubError::Security(
-                        "Total cumulative decompressed payload exceeds 1 GB limit".to_string(),
-                    )
-                })?;
-            Ok(())
-        };
+        let mut budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
 
-        let opf_path = Self::find_opf_path(&mut archive)?;
+        let opf_path = archive::find_opf_path_with_budget(&mut archive, &mut budget)?;
         let opf_dir = Path::new(&opf_path)
             .parent()
             .map(|p| p.to_string_lossy().to_string())
@@ -249,12 +237,7 @@ impl EpubReader {
             let mut entry = archive
                 .by_name(&opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
-            let mut s = String::new();
-            (&mut entry)
-                .take(MAX_METADATA_BYTES)
-                .read_to_string(&mut s)?;
-            add_decompressed(s.len())?;
-            s
+            archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget)?
         };
 
         let (metadata, manifest, spine) = Self::parse_opf(&opf_content)?;
@@ -265,14 +248,10 @@ impl EpubReader {
             if item.media_type == "text/css" || item.href.to_ascii_lowercase().ends_with(".css") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
-                    let mut s = String::new();
-                    if (&mut entry)
-                        .take(MAX_METADATA_BYTES)
-                        .read_to_string(&mut s)
-                        .is_ok()
-                    {
-                        add_decompressed(s.len())?;
-                        book_css.add_css(&s);
+                    match archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget) {
+                        Ok(s) => book_css.add_css(&s),
+                        Err(e @ EpubError::Security(_)) => return Err(e),
+                        Err(_) => {}
                     }
                 }
             }
@@ -302,20 +281,19 @@ impl EpubReader {
             if item.media_type.starts_with("image/") || item.media_type.starts_with("font/") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
-                    let mut data = Vec::with_capacity(entry.size().min(64 * 1024) as usize);
-                    let mut limited = (&mut entry).take(MAX_EPUB_FILE_SIZE + 1);
-                    if limited.read_to_end(&mut data).is_ok()
-                        && (data.len() as u64) <= MAX_EPUB_FILE_SIZE
-                    {
-                        add_decompressed(data.len())?;
-                        resources.insert(
-                            item.id.clone(),
-                            ResourceAsset {
-                                id: item.id.clone(),
-                                mime_type: item.media_type.clone(),
-                                data,
-                            },
-                        );
+                    match archive::read_entry_bytes(&mut entry, MAX_EPUB_FILE_SIZE, &mut budget) {
+                        Ok(data) => {
+                            resources.insert(
+                                item.id.clone(),
+                                ResourceAsset {
+                                    id: item.id.clone(),
+                                    mime_type: item.media_type.clone(),
+                                    data,
+                                },
+                            );
+                        }
+                        Err(e @ EpubError::Security(_)) => return Err(e),
+                        Err(_) => {}
                     }
                 }
             }
@@ -340,60 +318,62 @@ impl EpubReader {
 
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive.by_name(&full_path) {
-                    let mut xhtml = String::new();
-                    let mut limited = (&mut entry).take(MAX_CHAPTER_XHTML_BYTES + 1);
-                    if limited.read_to_string(&mut xhtml).is_ok()
-                        && (xhtml.len() as u64) <= MAX_CHAPTER_XHTML_BYTES
-                    {
-                        add_decompressed(xhtml.len())?;
-                        let (blocks, sec_footnotes) =
-                            Self::parse_xhtml_with_css(&xhtml, &href_to_id, &book_css);
-                        for (fn_id, fn_text) in sec_footnotes {
+                    let xhtml = match archive::read_entry_string(
+                        &mut entry,
+                        MAX_CHAPTER_XHTML_BYTES,
+                        &mut budget,
+                    ) {
+                        Ok(s) => s,
+                        Err(e @ EpubError::Security(_)) => return Err(e),
+                        Err(_) => continue,
+                    };
+                    let (blocks, sec_footnotes) =
+                        Self::parse_xhtml_with_css(&xhtml, &href_to_id, &book_css);
+                    for (fn_id, fn_text) in sec_footnotes {
+                        all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
+                        if !file_name.is_empty() {
                             all_footnotes
-                                .insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
-                            if !file_name.is_empty() {
-                                all_footnotes
-                                    .insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
-                            }
-                            all_footnotes.insert(format!("{}#{}", sec_id, fn_id), fn_text.clone());
-                            all_footnotes.entry(fn_id).or_insert(fn_text);
+                                .insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
                         }
-                        let detected_title = blocks
-                            .iter()
-                            .find_map(|b| {
-                                if let Block::Heading { spans, .. } = b {
-                                    let t = spans
-                                        .iter()
-                                        .map(|s| s.text.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(" ")
-                                        .trim()
-                                        .to_string();
-                                    if !t.is_empty() { Some(t) } else { None }
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or_else(|| format!("Chapter {}", idx + 1));
-
-                        sections.push(Section {
-                            id: sec_id,
-                            title: detected_title,
-                            blocks,
-                        });
+                        all_footnotes.insert(format!("{}#{}", sec_id, fn_id), fn_text.clone());
+                        all_footnotes.entry(fn_id).or_insert(fn_text);
                     }
+                    let detected_title = blocks
+                        .iter()
+                        .find_map(|b| {
+                            if let Block::Heading { spans, .. } = b {
+                                let t = spans
+                                    .iter()
+                                    .map(|s| s.text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                                    .trim()
+                                    .to_string();
+                                if !t.is_empty() { Some(t) } else { None }
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| format!("Chapter {}", idx + 1));
+
+                    sections.push(Section {
+                        id: sec_id,
+                        title: detected_title,
+                        blocks,
+                    });
                 }
             }
         }
 
         // 6. Extract Table of Contents and Page List (NCX, NAV, or Section Headings Fallback)
-        let (toc, page_list) = Self::extract_navigation(
+        let (toc, page_list) = nav::extract_navigation_with_budget(
             &mut archive,
             &opf_dir,
             &manifest,
             &href_to_section,
             &sections,
-        );
+            &mut budget,
+        )?;
 
         Ok(BookIR {
             metadata,
@@ -1518,57 +1498,380 @@ mod tests {
     #[test]
     fn test_epub_cumulative_decompression_bomb_rejected() {
         use std::io::Cursor;
+        use zip::CompressionMethod;
         use zip::write::{SimpleFileOptions, ZipWriter};
 
-        let mut buf = Cursor::new(Vec::new());
-        {
-            let mut zip = ZipWriter::new(&mut buf);
-            let opts = SimpleFileOptions::default();
+        fn build_test_epub(
+            chapter_bytes: &[u8],
+            method: CompressionMethod,
+            extra_css: Option<&[u8]>,
+        ) -> Vec<u8> {
+            let mut buf = Cursor::new(Vec::new());
+            {
+                let mut zip = ZipWriter::new(&mut buf);
+                let opts = SimpleFileOptions::default().compression_method(method);
+                let meta_opts = SimpleFileOptions::default();
 
-            zip.start_file("mimetype", opts).unwrap();
-            std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
+                zip.start_file("mimetype", meta_opts).unwrap();
+                std::io::Write::write_all(&mut zip, b"application/epub+zip").unwrap();
 
-            zip.start_file("META-INF/container.xml", opts).unwrap();
-            std::io::Write::write_all(
-                &mut zip,
-                br#"<?xml version="1.0"?>
+                zip.start_file("META-INF/container.xml", meta_opts).unwrap();
+                std::io::Write::write_all(
+                    &mut zip,
+                    br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
     <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>"#,
-            )
-            .unwrap();
+                )
+                .unwrap();
 
-            zip.start_file("content.opf", opts).unwrap();
-            std::io::Write::write_all(
-                &mut zip,
-                br#"<?xml version="1.0"?>
+                let css_manifest = if extra_css.is_some() {
+                    r#"<item id="css1" href="style.css" media-type="text/css"/>"#
+                } else {
+                    ""
+                };
+
+                zip.start_file("content.opf", meta_opts).unwrap();
+                let opf = format!(
+                    r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>Normal Book</dc:title>
+    <dc:title>Bomb Audit Book</dc:title>
   </metadata>
   <manifest>
+    {}
     <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
   <spine><itemref idref="c1"/></spine>
 </package>"#,
-            )
-            .unwrap();
+                    css_manifest
+                );
+                std::io::Write::write_all(&mut zip, opf.as_bytes()).unwrap();
 
-            zip.start_file("c1.xhtml", opts).unwrap();
-            std::io::Write::write_all(&mut zip, br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Safe content</p></body></html>"#).unwrap();
+                if let Some(css) = extra_css {
+                    zip.start_file("style.css", opts).unwrap();
+                    std::io::Write::write_all(&mut zip, css).unwrap();
+                }
+
+                zip.start_file("c1.xhtml", opts).unwrap();
+                std::io::Write::write_all(&mut zip, chapter_bytes).unwrap();
+
+                zip.finish().unwrap();
+            }
+            buf.into_inner()
+        }
+
+        // 1. Normal archive must pass
+        let normal_bytes = build_test_epub(
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Safe content</p></body></html>"#,
+            CompressionMethod::Deflated,
+            None,
+        );
+        let temp_normal = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp_normal.path(), &normal_bytes).unwrap();
+        assert!(
+            EpubReader::read_from_file(temp_normal.path()).is_ok(),
+            "Normal archive must pass cumulative decompression checks"
+        );
+
+        // 2. High compression-ratio deflate bomb (> 1 MiB, > 100:1 ratio) must return Err(EpubError::Security(_))
+        let bomb_payload = vec![b'A'; 2 * 1024 * 1024];
+        let ratio_bomb = build_test_epub(&bomb_payload, CompressionMethod::Deflated, None);
+        let temp_ratio = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp_ratio.path(), &ratio_bomb).unwrap();
+        let err_ratio = EpubReader::read_from_file(temp_ratio.path()).unwrap_err();
+        assert!(
+            matches!(err_ratio, EpubError::Security(_)),
+            "Expected EpubError::Security for deflate ratio bomb, got {:?}",
+            err_ratio
+        );
+
+        // 3. Oversized chapter exceeding MAX_CHAPTER_XHTML_BYTES (Stored so ratio == 1.0 passes pre-scan)
+        // must propagate Err(EpubError::Security(_)) rather than being swallowed.
+        let oversized_chapter = vec![b' '; MAX_CHAPTER_XHTML_BYTES as usize + 4096];
+        let chapter_bomb = build_test_epub(&oversized_chapter, CompressionMethod::Stored, None);
+        let temp_chapter = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp_chapter.path(), &chapter_bomb).unwrap();
+        let err_chapter = EpubReader::read_from_file(temp_chapter.path()).unwrap_err();
+        assert!(
+            matches!(err_chapter, EpubError::Security(_)),
+            "Expected EpubError::Security for oversized chapter, got {:?}",
+            err_chapter
+        );
+
+        // 4. Oversized CSS exceeding MAX_METADATA_BYTES (Stored) must propagate Err(EpubError::Security(_))
+        let oversized_css = vec![b' '; MAX_METADATA_BYTES as usize + 4096];
+        let css_bomb = build_test_epub(
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Ok</p></body></html>"#,
+            CompressionMethod::Stored,
+            Some(&oversized_css),
+        );
+        let temp_css = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp_css.path(), &css_bomb).unwrap();
+        let err_css = EpubReader::read_from_file(temp_css.path()).unwrap_err();
+        assert!(
+            matches!(err_css, EpubError::Security(_)),
+            "Expected EpubError::Security for oversized CSS, got {:?}",
+            err_css
+        );
+    }
+
+    #[test]
+    fn test_read_entry_bytes_enforces_entry_limit_and_cumulative_budget() {
+        use std::io::Cursor;
+        use zip::CompressionMethod;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let deflated =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+            zip.start_file("small.txt", stored).unwrap();
+            std::io::Write::write_all(&mut zip, &[b'x'; 128]).unwrap();
+
+            zip.start_file("bad_utf8.bin", stored).unwrap();
+            let mut invalid_utf8 = vec![0xFFu8; 64];
+            invalid_utf8[1] = 0xFE;
+            std::io::Write::write_all(&mut zip, &invalid_utf8).unwrap();
+
+            zip.start_file("chunked.bin", stored).unwrap();
+            std::io::Write::write_all(&mut zip, &[b'y'; 96 * 1024]).unwrap();
+
+            zip.start_file("ratio_bomb.bin", deflated).unwrap();
+            std::io::Write::write_all(&mut zip, &[b'0'; 2 * 1024 * 1024]).unwrap();
 
             zip.finish().unwrap();
         }
 
-        let temp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(temp.path(), buf.into_inner()).unwrap();
-        let res = EpubReader::read_from_file(temp.path());
+        let raw_zip = buf.into_inner();
+        let mut archive = ZipArchive::new(Cursor::new(&raw_zip)).unwrap();
+
+        // 1. Valid read charges cumulative budget
+        let mut budget = DecompressionBudget::new(1024 * 1024);
+        {
+            let mut e = archive.by_name("small.txt").unwrap();
+            let bytes = archive::read_entry_bytes(&mut e, 256, &mut budget).unwrap();
+            assert_eq!(bytes.len(), 128);
+            assert_eq!(budget.total_decompressed, 128);
+        }
+
+        // 2. Failed UTF-8 conversion still retains charged bytes in budget.total_decompressed
+        {
+            let mut e = archive.by_name("bad_utf8.bin").unwrap();
+            let err = archive::read_entry_string(&mut e, 256, &mut budget).unwrap_err();
+            assert!(matches!(err, EpubError::Invalid(_)));
+            assert_eq!(budget.total_decompressed, 192);
+        }
+
+        // 3. Multi-chunk entry exceeding max_entry_bytes fails with Security AND keeps prior chunk charge
+        {
+            let mut e = archive.by_name("chunked.bin").unwrap();
+            let err = archive::read_entry_bytes(&mut e, 70 * 1024, &mut budget).unwrap_err();
+            assert!(matches!(err, EpubError::Security(_)));
+            assert_eq!(budget.total_decompressed, 192 + 64 * 1024);
+        }
+
+        // 4. Small entry exceeding max_entry_bytes immediately fails with Security
+        {
+            let mut tiny_budget = DecompressionBudget::new(1024);
+            let mut e = archive.by_name("small.txt").unwrap();
+            let err = archive::read_entry_bytes(&mut e, 64, &mut tiny_budget).unwrap_err();
+            assert!(matches!(err, EpubError::Security(_)));
+        }
+
+        // 5. Cumulative budget exhaustion fails with Security
+        {
+            let mut tight_budget = DecompressionBudget::new(150);
+            {
+                let mut e1 = archive.by_name("small.txt").unwrap();
+                assert_eq!(
+                    archive::read_entry_bytes(&mut e1, 256, &mut tight_budget)
+                        .unwrap()
+                        .len(),
+                    128
+                );
+                assert_eq!(tight_budget.total_decompressed, 128);
+            }
+            {
+                let mut e2 = archive.by_name("bad_utf8.bin").unwrap();
+                let err = archive::read_entry_bytes(&mut e2, 256, &mut tight_budget).unwrap_err();
+                assert!(matches!(err, EpubError::Security(_)));
+                assert_eq!(tight_budget.total_decompressed, 128);
+            }
+        }
+
+        // 6. Live compression ratio > 100:1 over 1 MiB fails with Security even when max_entry_bytes allows it
+        {
+            let mut large_budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
+            let mut e = archive.by_name("ratio_bomb.bin").unwrap();
+            let err = archive::read_entry_bytes(&mut e, MAX_CHAPTER_XHTML_BYTES, &mut large_budget)
+                .unwrap_err();
+            assert!(matches!(err, EpubError::Security(_)));
+        }
+    }
+
+    #[test]
+    fn test_epub_oversized_nav_or_metadata_bomb_rejected() {
+        use std::io::Cursor;
+        use zip::CompressionMethod;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        fn write_zip_entries(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+            let mut buf = Cursor::new(Vec::new());
+            {
+                let mut zip = ZipWriter::new(&mut buf);
+                let opts =
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+                for (name, data) in entries {
+                    zip.start_file(*name, opts).unwrap();
+                    std::io::Write::write_all(&mut zip, data).unwrap();
+                }
+                zip.finish().unwrap();
+            }
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), buf.into_inner()).unwrap();
+            tmp
+        }
+
+        let valid_container = br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+
+        let valid_opf = br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Nav Bomb Test</dc:title>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+
+        let valid_ch =
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Hello</p></body></html>"#;
+
+        let oversized_meta = vec![b' '; MAX_METADATA_BYTES as usize + 1024];
+
+        // 1. Oversized META-INF/container.xml
+        let f_container = write_zip_entries(&[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", &oversized_meta),
+            ("content.opf", valid_opf),
+        ]);
+        assert!(matches!(
+            EpubReader::read_from_file(f_container.path()),
+            Err(EpubError::Security(_))
+        ));
+        assert!(matches!(
+            EpubReader::read_metadata_from_file(f_container.path()),
+            Err(EpubError::Security(_))
+        ));
+
+        // 2. Oversized content.opf
+        let f_opf = write_zip_entries(&[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", valid_container),
+            ("content.opf", &oversized_meta),
+        ]);
+        assert!(matches!(
+            EpubReader::read_from_file(f_opf.path()),
+            Err(EpubError::Security(_))
+        ));
+        assert!(matches!(
+            EpubReader::read_metadata_from_file(f_opf.path()),
+            Err(EpubError::Security(_))
+        ));
+
+        // 3. Oversized nav.xhtml
+        let f_nav = write_zip_entries(&[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", valid_container),
+            ("content.opf", valid_opf),
+            ("nav.xhtml", &oversized_meta),
+            ("c1.xhtml", valid_ch),
+        ]);
+        assert!(matches!(
+            EpubReader::read_from_file(f_nav.path()),
+            Err(EpubError::Security(_))
+        ));
+    }
+
+    #[test]
+    fn test_epub_deeply_nested_list_bounded_no_stack_overflow() {
+        fn max_list_depth(blocks: &[Block]) -> usize {
+            let mut max_depth = 0usize;
+            let mut stack: Vec<(&Block, usize)> = blocks.iter().map(|b| (b, 0usize)).collect();
+            while let Some((b, depth)) = stack.pop() {
+                if let Block::List { items, .. } = b {
+                    let next_depth = depth + 1;
+                    max_depth = max_depth.max(next_depth);
+                    for item in items {
+                        for child in item {
+                            stack.push((child, next_depth));
+                        }
+                    }
+                }
+            }
+            max_depth
+        }
+
+        let depth = 5_000usize;
+        let mut xhtml = String::with_capacity(depth * 24 + 256);
+        xhtml.push_str(r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>"#);
+        for level in 1..=depth {
+            xhtml.push_str("<ul><li>");
+            if level == 1 {
+                xhtml.push_str("Outer item");
+            } else if level == crate::epub::xhtml::MAX_LIST_DEPTH {
+                xhtml.push_str("Boundary item");
+            } else if level == depth {
+                xhtml.push_str("Deep leaf item");
+            }
+        }
+        for _ in 1..=depth {
+            xhtml.push_str("</li></ul>");
+        }
+        xhtml.push_str("</body></html>");
+
+        let blocks = EpubReader::parse_xhtml_blocks(&xhtml);
+        assert_eq!(blocks.len(), 1);
+        let measured_depth = max_list_depth(&blocks);
         assert!(
-            res.is_ok(),
-            "Normal archive must pass cumulative decompression checks"
+            measured_depth <= crate::epub::xhtml::MAX_LIST_DEPTH,
+            "Block::List nesting depth {} exceeded MAX_LIST_DEPTH ({})",
+            measured_depth,
+            crate::epub::xhtml::MAX_LIST_DEPTH
         );
+        assert_eq!(measured_depth, crate::epub::xhtml::MAX_LIST_DEPTH);
+
+        let text = blocks[0].plain_text();
+        assert!(text.contains("Outer item"), "Lost outer item text");
+        assert!(text.contains("Boundary item"), "Lost boundary item text");
+        assert!(text.contains("Deep leaf item"), "Lost deep leaf item text");
+
+        // Verify empty nested <ul></ul> / <ol></ol> inside <li> preserves parent item content
+        let empty_nested_xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+            <ul>
+                <li>Before<ul></ul>After</li>
+                <li>KeepMe<ol></ol></li>
+            </ul>
+        </body></html>"#;
+        let empty_blocks = EpubReader::parse_xhtml_blocks(empty_nested_xhtml);
+        assert_eq!(empty_blocks.len(), 1);
+        let empty_text = empty_blocks[0].plain_text();
+        assert!(empty_text.contains("Before"), "text: {:?}", empty_text);
+        assert!(empty_text.contains("After"), "text: {:?}", empty_text);
+        assert!(empty_text.contains("KeepMe"), "text: {:?}", empty_text);
     }
 
     #[test]

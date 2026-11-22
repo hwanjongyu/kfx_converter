@@ -34,10 +34,65 @@ pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+const DRIVE_REMOVABLE: u32 = 2;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
+    fn GetVolumeInformationW(
+        lpRootPathName: *const u16,
+        lpVolumeNameBuffer: *mut u16,
+        nVolumeNameSize: u32,
+        lpVolumeSerialNumber: *mut u32,
+        lpMaximumComponentLength: *mut u32,
+        lpFileSystemFlags: *mut u32,
+        lpFileSystemNameBuffer: *mut u16,
+        nFileSystemNameSize: u32,
+    ) -> i32;
+    fn GetDiskFreeSpaceExW(
+        lpDirectoryName: *const u16,
+        lpFreeBytesAvailableToCaller: *mut u64,
+        lpTotalNumberOfBytes: *mut u64,
+        lpTotalNumberOfFreeBytes: *mut u64,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_bytes_available: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free_bytes: u64 = 0;
+
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_bytes_available,
+            &mut total_bytes,
+            &mut total_free_bytes,
+        )
+    };
+    if ok == 0 || total_bytes == 0 {
+        return None;
+    }
+
+    let used_bytes = total_bytes.saturating_sub(free_bytes_available);
+    let total_gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let used_gb = used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    Some((used_gb as f32, total_gb as f32))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub fn get_storage_stats(_path: &Path) -> Option<(f32, f32)> {
-    // Fallback placeholder for non-Unix targets
-    Some((8.0, 16.0))
+    None
 }
 
 /// Checks if a device or directory name corresponds to a Kindle device.
@@ -51,6 +106,35 @@ pub fn is_kindle_name(name: &str) -> bool {
         || n.contains("oasis")
         || n.contains("colorsoft")
         || n.contains("voyage")
+}
+
+/// Verifies that a Windows drive candidate is genuinely a removable Kindle device
+/// rather than an internal HDD/SSD or arbitrary USB drive.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_verified_windows_kindle_candidate(
+    is_removable: bool,
+    volume_label: Option<&str>,
+    root: &Path,
+) -> bool {
+    if !is_removable {
+        return false;
+    }
+
+    let has_kindle_layout = root.join("documents").is_dir()
+        || root.join("system").is_dir()
+        || root.join(".system").is_dir();
+
+    if volume_label.is_some_and(is_kindle_name) && has_kindle_layout {
+        return true;
+    }
+
+    let has_kindle_marker = root.join("system").join("version.txt").is_file()
+        || root.join(".system").join("version.txt").is_file()
+        || root.join("system").join("dev_reg.log").is_file()
+        || root.join(".system").join("dev_reg.log").is_file()
+        || root.join(".active_content_sandbox").is_dir();
+
+    root.join("documents").is_dir() && has_kindle_marker
 }
 
 /// Accurately resolves the specific Kindle hardware model from mount hint or on-device files.
@@ -280,7 +364,7 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
     }
 
     // 2. Check UMS mount points across Linux, macOS, and Windows
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<(PathBuf, Option<String>)> = Vec::new();
 
     // macOS standard mount location
     #[cfg(target_os = "macos")]
@@ -289,25 +373,72 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if is_kindle_name(&name) {
-                    candidates.push(entry.path());
+                    candidates.push((entry.path(), None));
                 }
             }
         }
-        candidates.push(PathBuf::from("/Volumes/Kindle"));
-        candidates.push(PathBuf::from("/Volumes/Kindle Paperwhite"));
-        candidates.push(PathBuf::from("/Volumes/Kindle Oasis"));
-        candidates.push(PathBuf::from("/Volumes/Kindle Scribe"));
-        candidates.push(PathBuf::from("/Volumes/Kindle Colorsoft"));
-        candidates.push(PathBuf::from("/Volumes/Kindle Voyage"));
-        candidates.push(PathBuf::from("/Volumes/Kindle Basic"));
+        candidates.push((PathBuf::from("/Volumes/Kindle"), None));
+        candidates.push((PathBuf::from("/Volumes/Kindle Paperwhite"), None));
+        candidates.push((PathBuf::from("/Volumes/Kindle Oasis"), None));
+        candidates.push((PathBuf::from("/Volumes/Kindle Scribe"), None));
+        candidates.push((PathBuf::from("/Volumes/Kindle Colorsoft"), None));
+        candidates.push((PathBuf::from("/Volumes/Kindle Voyage"), None));
+        candidates.push((PathBuf::from("/Volumes/Kindle Basic"), None));
     }
 
     // Windows drive letter mount discovery (D: through Z:)
     #[cfg(windows)]
     {
+        use std::os::windows::ffi::OsStrExt;
+
         for drive in b'D'..=b'Z' {
             let drive_str = format!("{}:\\", drive as char);
-            candidates.push(PathBuf::from(drive_str));
+            let drive_path = PathBuf::from(&drive_str);
+            let wide: Vec<u16> = drive_path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let is_removable = unsafe { GetDriveTypeW(wide.as_ptr()) } == DRIVE_REMOVABLE;
+            if !is_removable {
+                continue;
+            }
+
+            let mut vol_buf = [0u16; 261];
+            let vol_ok = unsafe {
+                GetVolumeInformationW(
+                    wide.as_ptr(),
+                    vol_buf.as_mut_ptr(),
+                    vol_buf.len() as u32,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            let vol_label = if vol_ok != 0 {
+                let nul_pos = vol_buf
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(vol_buf.len());
+                let decoded = String::from_utf16_lossy(&vol_buf[..nul_pos])
+                    .trim()
+                    .to_string();
+                if decoded.is_empty() {
+                    None
+                } else {
+                    Some(decoded)
+                }
+            } else {
+                None
+            };
+
+            if is_verified_windows_kindle_candidate(is_removable, vol_label.as_deref(), &drive_path)
+            {
+                candidates.push((drive_path, vol_label));
+            }
         }
     }
 
@@ -323,34 +454,35 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if is_kindle_name(&name) {
-                            candidates.push(entry.path());
+                            candidates.push((entry.path(), None));
                         }
                     }
                 }
             }
-            candidates.push(PathBuf::from(format!("/run/media/{}/Kindle", username)));
-            candidates.push(PathBuf::from(format!("/media/{}/Kindle", username)));
+            candidates.push((
+                PathBuf::from(format!("/run/media/{}/Kindle", username)),
+                None,
+            ));
+            candidates.push((PathBuf::from(format!("/media/{}/Kindle", username)), None));
         }
         if let Ok(entries) = std::fs::read_dir("/media") {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if is_kindle_name(&name) {
-                    candidates.push(entry.path());
+                    candidates.push((entry.path(), None));
                 }
             }
         }
-        candidates.push(PathBuf::from("/media/Kindle"));
-        candidates.push(PathBuf::from("/mnt/Kindle"));
+        candidates.push((PathBuf::from("/media/Kindle"), None));
+        candidates.push((PathBuf::from("/mnt/Kindle"), None));
 
         // Headless / FUSE mount fallback candidates
         if let Ok(home) = std::env::var("HOME") {
-            candidates.push(PathBuf::from(format!("{}/kindle", home)));
-            candidates.push(PathBuf::from(format!("{}/Kindle", home)));
+            candidates.push((PathBuf::from(format!("{}/kindle", home)), None));
+            candidates.push((PathBuf::from(format!("{}/Kindle", home)), None));
         }
-        candidates.push(PathBuf::from("/tmp/kindle"));
-        candidates.push(PathBuf::from("/tmp/kindle_mtp"));
-        candidates.push(PathBuf::from("/media/kindle"));
-        candidates.push(PathBuf::from("/mnt/kindle"));
+        candidates.push((PathBuf::from("/media/kindle"), None));
+        candidates.push((PathBuf::from("/mnt/kindle"), None));
 
         // Also inspect /proc/mounts to find any mounted filesystem labeled or pointing to Kindle
         if let Ok(mounts_content) = std::fs::read_to_string("/proc/mounts") {
@@ -359,15 +491,17 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
                 if parts.len() >= 2 {
                     let mount_point = parts[1];
                     let p = PathBuf::from(mount_point);
-                    if is_kindle_name(mount_point) && !candidates.contains(&p) {
-                        candidates.push(p);
+                    if is_kindle_name(mount_point)
+                        && !candidates.iter().any(|(existing, _)| existing == &p)
+                    {
+                        candidates.push((p, None));
                     }
                 }
             }
         }
     }
 
-    for cand in candidates {
+    for (cand, label_hint) in candidates {
         if cand.is_dir() {
             let doc_path = cand.join("documents");
             // Confirm it has either documents directory or system directory (typical Kindle layout)
@@ -378,8 +512,12 @@ pub fn detect_device_info() -> Option<KindleDeviceInfo> {
                     continue;
                 }
 
-                let cand_str = cand.to_string_lossy();
-                let model_name = resolve_model_name(&cand, &cand_str);
+                let fallback_hint = cand.to_string_lossy();
+                let hint = label_hint
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&fallback_hint);
+                let model_name = resolve_model_name(&cand, hint);
 
                 return Some(KindleDeviceInfo {
                     root: cand,
@@ -668,5 +806,117 @@ mod tests {
         let dev = info.unwrap();
         assert_eq!(dev.root, root);
         assert_eq!(dev.documents_dir, docs);
+    }
+
+    #[test]
+    fn test_windows_kindle_drive_verification_guards() {
+        // 1. Fixed/remote drive (is_removable = false) even with "Kindle" label + markers -> false
+        let fixed_temp = tempfile::tempdir().unwrap();
+        let fixed_root = fixed_temp.path();
+        std::fs::create_dir_all(fixed_root.join("documents")).unwrap();
+        std::fs::create_dir_all(fixed_root.join("system")).unwrap();
+        std::fs::write(
+            fixed_root.join("system").join("version.txt"),
+            b"Kindle 5.16",
+        )
+        .unwrap();
+        assert!(!is_verified_windows_kindle_candidate(
+            false,
+            Some("Kindle"),
+            fixed_root
+        ));
+
+        // 2. Removable drive with generic label + documents/ + system/ (no concrete Kindle markers) -> false
+        let usb_temp = tempfile::tempdir().unwrap();
+        let usb_root = usb_temp.path();
+        std::fs::create_dir_all(usb_root.join("documents")).unwrap();
+        std::fs::create_dir_all(usb_root.join("system")).unwrap();
+        assert!(!is_verified_windows_kindle_candidate(
+            true,
+            Some("USB_DATA"),
+            usb_root
+        ));
+
+        // 3. Removable drive with "Kindle Paperwhite" label + documents/ -> true
+        let pw_temp = tempfile::tempdir().unwrap();
+        let pw_root = pw_temp.path();
+        std::fs::create_dir_all(pw_root.join("documents")).unwrap();
+        assert!(is_verified_windows_kindle_candidate(
+            true,
+            Some("Kindle Paperwhite"),
+            pw_root
+        ));
+
+        // Removable with "Kindle" label but missing layout directories -> false
+        let empty_temp = tempfile::tempdir().unwrap();
+        assert!(!is_verified_windows_kindle_candidate(
+            true,
+            Some("Kindle"),
+            empty_temp.path()
+        ));
+
+        // 4. Removable drive with non-Kindle label + documents/ + concrete markers -> true
+        let ver_temp = tempfile::tempdir().unwrap();
+        let ver_root = ver_temp.path();
+        std::fs::create_dir_all(ver_root.join("documents")).unwrap();
+        std::fs::create_dir_all(ver_root.join("system")).unwrap();
+        std::fs::write(ver_root.join("system").join("version.txt"), b"5.16.2").unwrap();
+        assert!(is_verified_windows_kindle_candidate(
+            true,
+            Some("MY_EBOOK"),
+            ver_root
+        ));
+
+        let sandbox_temp = tempfile::tempdir().unwrap();
+        let sandbox_root = sandbox_temp.path();
+        std::fs::create_dir_all(sandbox_root.join("documents")).unwrap();
+        std::fs::create_dir_all(sandbox_root.join(".active_content_sandbox")).unwrap();
+        assert!(is_verified_windows_kindle_candidate(
+            true,
+            Some("MY_EBOOK"),
+            sandbox_root
+        ));
+
+        let reg_temp = tempfile::tempdir().unwrap();
+        let reg_root = reg_temp.path();
+        std::fs::create_dir_all(reg_root.join("documents")).unwrap();
+        std::fs::create_dir_all(reg_root.join(".system")).unwrap();
+        std::fs::write(reg_root.join(".system").join("dev_reg.log"), b"reg").unwrap();
+        assert!(is_verified_windows_kindle_candidate(
+            true,
+            Some("MY_EBOOK"),
+            reg_root
+        ));
+
+        // Concrete marker without documents/ -> false
+        let no_docs_temp = tempfile::tempdir().unwrap();
+        let no_docs_root = no_docs_temp.path();
+        std::fs::create_dir_all(no_docs_root.join("system")).unwrap();
+        std::fs::write(no_docs_root.join("system").join("version.txt"), b"5.16.2").unwrap();
+        assert!(!is_verified_windows_kindle_candidate(
+            true,
+            Some("MY_EBOOK"),
+            no_docs_root
+        ));
+    }
+
+    #[test]
+    fn test_tmp_kindle_not_auto_discovered() {
+        let device_src_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sync/device.rs");
+        let content =
+            std::fs::read_to_string(&device_src_path).expect("Read src/sync/device.rs source");
+        let prod_end = content
+            .find("#[cfg(test)]")
+            .expect("Locate #[cfg(test)] in device.rs");
+        let prod_code = &content[..prod_end];
+        let detect_start = prod_code
+            .find("fn detect_device_info(")
+            .expect("Locate detect_device_info");
+        let detect_body = &prod_code[detect_start..];
+
+        assert!(
+            !detect_body.contains("/tmp/kindle") && !detect_body.contains("/tmp/kindle_mtp"),
+            "detect_device_info() must NOT auto-register world-writable /tmp/kindle or /tmp/kindle_mtp"
+        );
     }
 }

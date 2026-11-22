@@ -5,7 +5,7 @@
 
 use super::DEVICE_SYNC_LOCK;
 use super::types::KindleBookFile;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Scans the Kindle documents directory (including author subfolders up to max_depth 3) for valid e-book files.
 pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
@@ -193,9 +193,68 @@ pub fn delete_book_file_safe(
         ));
     }
 
-    if let Some(root) = allowed_root {
+    let file_name = full_path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Target path {:?} has no file name", full_path),
+        )
+    })?;
+    let file_stem = full_path.file_stem().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Target path {:?} has no file stem", full_path),
+        )
+    })?;
+    let raw_parent = match full_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+
+    let target_exists = match std::fs::symlink_metadata(full_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Refusing to delete symlink target {:?}", full_path),
+            ));
+        }
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Refusing to delete non-regular target {:?}", full_path),
+            ));
+        }
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && allowed_root.is_none() => false,
+        Err(e) => return Err(e),
+    };
+
+    let (target_path, effective_parent, canon_root_opt) = if let Some(root) = allowed_root {
         let canon_root = root.canonicalize()?;
-        let canon_target = full_path.canonicalize()?;
+        let canon_parent = raw_parent.canonicalize()?;
+        if !canon_parent.starts_with(&canon_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Target parent {:?} is outside allowed directory {:?}",
+                    raw_parent, root
+                ),
+            ));
+        }
+        let target_path = canon_parent.join(file_name);
+        let re_meta = std::fs::symlink_metadata(&target_path)?;
+        if re_meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Refusing to delete symlink target {:?}", target_path),
+            ));
+        }
+        if !re_meta.file_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Refusing to delete non-regular target {:?}", target_path),
+            ));
+        }
+        let canon_target = target_path.canonicalize()?;
         if !canon_target.starts_with(&canon_root) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -205,38 +264,60 @@ pub fn delete_book_file_safe(
                 ),
             ));
         }
+        (target_path, canon_parent, Some(canon_root))
+    } else {
+        (full_path.to_path_buf(), raw_parent.to_path_buf(), None)
+    };
+
+    let mut part_name = std::ffi::OsString::from(file_name);
+    part_name.push(".part");
+    let part_path = effective_parent.join(part_name);
+
+    let mut sdr_name = std::ffi::OsString::from(file_stem);
+    sdr_name.push(".sdr");
+    let sdr_path = effective_parent.join(sdr_name);
+
+    if target_exists {
+        std::fs::remove_file(&target_path)?;
     }
 
-    if full_path.is_file() {
-        std::fs::remove_file(full_path)?;
-    }
-    let part_path = PathBuf::from(format!("{}.part", full_path.display()));
-    if part_path.is_file() {
+    if let Ok(part_meta) = std::fs::symlink_metadata(&part_path)
+        && part_meta.file_type().is_file()
+    {
+        if let Some(ref canon_root) = canon_root_opt {
+            let canon_part = part_path.canonicalize()?;
+            if !canon_part.starts_with(canon_root) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Part path {:?} is outside allowed directory {:?}",
+                        part_path, canon_root
+                    ),
+                ));
+            }
+        }
         let _ = std::fs::remove_file(&part_path);
     }
-    let file_stem = full_path.file_stem().unwrap_or_default().to_string_lossy();
-    if let Some(parent) = full_path.parent() {
-        let sdr_path = parent.join(format!("{}.sdr", file_stem));
-        if sdr_path.is_dir()
-            && !sdr_path.is_symlink()
-            && sdr_path.extension().and_then(|e| e.to_str()) == Some("sdr")
-        {
-            if let Some(root) = allowed_root
-                && let (Ok(canon_root), Ok(canon_sdr)) =
-                    (root.canonicalize(), sdr_path.canonicalize())
-                && !canon_sdr.starts_with(&canon_root)
-            {
+
+    if let Ok(sdr_meta) = std::fs::symlink_metadata(&sdr_path)
+        && sdr_meta.file_type().is_dir()
+        && sdr_path.extension() == Some(std::ffi::OsStr::new("sdr"))
+    {
+        if let Some(ref canon_root) = canon_root_opt {
+            let canon_sdr = sdr_path.canonicalize()?;
+            if !canon_sdr.starts_with(canon_root) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!(
                         "SDR path {:?} is outside allowed directory {:?}",
-                        sdr_path, root
+                        sdr_path, canon_root
                     ),
                 ));
             }
-            let _ = std::fs::remove_dir_all(&sdr_path);
         }
+        let _ = std::fs::remove_dir_all(&sdr_path);
     }
+
     Ok(())
 }
 
@@ -438,5 +519,103 @@ mod tests {
         KindleSync::clean_stale_sdr_files(&sdr, Some("NEWASIN"), true);
         assert!(!sdr.join("LanguageLayer.en.NEWASIN.kll").exists());
         assert!(sdr.join("XRAY.entities.NEWASIN.asc").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_delete_book_file_safe_symlink_and_jail_hardening() {
+        use std::io::ErrorKind;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // 1. Symlink outside allowed_root pointing to a .kfx inside allowed_root
+        let inside_target = docs.join("InsideTarget.kfx");
+        std::fs::write(&inside_target, b"INSIDE_DATA").unwrap();
+        let outside_link = outside.join("AliasToInside.kfx");
+        symlink(&inside_target, &outside_link).unwrap();
+        let outside_link_part = outside.join("AliasToInside.kfx.part");
+        std::fs::write(&outside_link_part, b"OUTSIDE_PART").unwrap();
+
+        let err1 = KindleSync::delete_book_file_safe(Some(&docs), &outside_link).unwrap_err();
+        assert_eq!(err1.kind(), ErrorKind::PermissionDenied);
+        assert!(outside_link.symlink_metadata().is_ok());
+        assert!(outside_link_part.exists());
+        assert_eq!(std::fs::read(&inside_target).unwrap(), b"INSIDE_DATA");
+
+        // 2. Symlink inside allowed_root pointing to a file outside allowed_root
+        let outside_victim = outside.join("Victim.kfx");
+        std::fs::write(&outside_victim, b"KEEP_OUTSIDE").unwrap();
+        let inside_escape_link = docs.join("Escape.kfx");
+        symlink(&outside_victim, &inside_escape_link).unwrap();
+
+        let err2 = KindleSync::delete_book_file_safe(Some(&docs), &inside_escape_link).unwrap_err();
+        assert_eq!(err2.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&outside_victim).unwrap(), b"KEEP_OUTSIDE");
+
+        let err2_unjailed = KindleSync::delete_book_file(&inside_escape_link).unwrap_err();
+        assert_eq!(err2_unjailed.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&outside_victim).unwrap(), b"KEEP_OUTSIDE");
+
+        // 3. Symlinked intermediate parent directory inside allowed_root pointing outside
+        let outside_subdir = outside.join("escaped_dir");
+        std::fs::create_dir_all(&outside_subdir).unwrap();
+        let outside_nested_file = outside_subdir.join("Nested.kfx");
+        std::fs::write(&outside_nested_file, b"NESTED_VICTIM").unwrap();
+        let inside_dir_link = docs.join("dir_escape");
+        symlink(&outside_subdir, &inside_dir_link).unwrap();
+
+        let err3 =
+            KindleSync::delete_book_file_safe(Some(&docs), &inside_dir_link.join("Nested.kfx"))
+                .unwrap_err();
+        assert_eq!(err3.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(&outside_nested_file).unwrap(),
+            b"NESTED_VICTIM"
+        );
+
+        // 4. .sdr symlink and .part symlink inside allowed_root pointing outside must never touch outside targets
+        let victim_sdr_dir = outside.join("VictimSdr");
+        std::fs::create_dir_all(&victim_sdr_dir).unwrap();
+        let victim_sdr_file = victim_sdr_dir.join("keep.txt");
+        std::fs::write(&victim_sdr_file, b"KEEP_SDR").unwrap();
+
+        let victim_part_file = outside.join("VictimPart.bin");
+        std::fs::write(&victim_part_file, b"KEEP_PART").unwrap();
+
+        let real_book = docs.join("CleanBook.kfx");
+        std::fs::write(&real_book, b"CLEAN_KFX").unwrap();
+        symlink(&victim_sdr_dir, docs.join("CleanBook.sdr")).unwrap();
+        symlink(&victim_part_file, docs.join("CleanBook.kfx.part")).unwrap();
+
+        KindleSync::delete_book_file_safe(Some(&docs), &real_book).unwrap();
+        assert!(!real_book.exists());
+        assert_eq!(std::fs::read(&victim_sdr_file).unwrap(), b"KEEP_SDR");
+        assert_eq!(std::fs::read(&victim_part_file).unwrap(), b"KEEP_PART");
+
+        // 5. Directory named fake.kfx/ must return InvalidInput and preserve fake.kfx/ and fake.sdr/
+        let fake_kfx_dir = docs.join("fake.kfx");
+        let fake_sdr_dir = docs.join("fake.sdr");
+        std::fs::create_dir_all(&fake_kfx_dir).unwrap();
+        std::fs::create_dir_all(&fake_sdr_dir).unwrap();
+        std::fs::write(fake_sdr_dir.join("notes.txt"), b"KEEP").unwrap();
+
+        let err5 = KindleSync::delete_book_file_safe(Some(&docs), &fake_kfx_dir).unwrap_err();
+        assert_eq!(err5.kind(), ErrorKind::InvalidInput);
+        assert!(fake_kfx_dir.is_dir());
+        assert!(fake_sdr_dir.is_dir());
+        assert!(fake_sdr_dir.join("notes.txt").is_file());
+
+        // 6. Missing target with Some(allowed_root) fails closed and leaves companion Missing.sdr intact
+        let missing_book = docs.join("Missing.kfx");
+        let missing_sdr = docs.join("Missing.sdr");
+        std::fs::create_dir_all(&missing_sdr).unwrap();
+        let err6 = KindleSync::delete_book_file_safe(Some(&docs), &missing_book).unwrap_err();
+        assert_eq!(err6.kind(), ErrorKind::NotFound);
+        assert!(missing_sdr.is_dir());
     }
 }

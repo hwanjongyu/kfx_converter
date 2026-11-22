@@ -11,7 +11,8 @@ pub struct SdrDeployer;
 impl SdrDeployer {
     /// Prepares a destination file path for overwriting, stripping read-only permissions if present.
     fn prepare_for_overwrite(path: &Path) {
-        if let Ok(metadata) = path.metadata()
+        if let Ok(metadata) = std::fs::symlink_metadata(path)
+            && !metadata.file_type().is_symlink()
             && metadata.permissions().readonly()
         {
             let mut perms = metadata.permissions();
@@ -55,13 +56,28 @@ impl SdrDeployer {
             });
         }
 
-        Self::prepare_for_overwrite(path);
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Refusing to overwrite symlink destination: {:?}", path),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
         let mut tmp_file = tempfile::Builder::new()
             .prefix(".sdr_tmp.")
             .tempfile_in(parent)?;
         std::io::Write::write_all(&mut tmp_file, bytes)?;
         std::io::Write::flush(&mut tmp_file)?;
+        Self::prepare_for_overwrite(path);
         tmp_file.persist(path).map_err(|e| e.error)?;
         Ok(())
     }
@@ -253,6 +269,100 @@ mod tests {
             sdr_path
                 .join(format!("thumbnail_{}_EBOK_portrait.jpg", content_id))
                 .is_file()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sdr_write_file_rejects_symlink_destination() {
+        use std::io::ErrorKind;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        // Isolated child branch for bare relative filename destination without mutating parent CWD
+        if std::env::var_os("KFX_REL_SDR_CHILD").is_some() {
+            assert_eq!(Path::new("rel_sidecar.kll").parent(), Some(Path::new("")));
+            SdrDeployer::write_file(Path::new("rel_sidecar.kll"), b"REL_KLL_DATA").unwrap();
+            assert_eq!(std::fs::read("rel_sidecar.kll").unwrap(), b"REL_KLL_DATA");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+
+        // 1. Live symlink destination pointing to read-only victim file
+        let victim = temp.path().join("sdr_victim.txt");
+        std::fs::write(&victim, b"UNTOUCHED_SDR_VICTIM").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let live_link = temp.path().join("cover.jpg");
+        symlink(&victim, &live_link).unwrap();
+
+        let err_live = SdrDeployer::write_file(&live_link, b"OVERWRITE").unwrap_err();
+        assert_eq!(err_live.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"UNTOUCHED_SDR_VICTIM");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+
+        // 2. Dangling symlink destination
+        let missing = temp.path().join("missing_sdr_target.txt");
+        let dangling_link = temp.path().join("dangling.kll");
+        symlink(&missing, &dangling_link).unwrap();
+
+        let err_dangling = SdrDeployer::write_file(&dangling_link, b"OVERWRITE").unwrap_err();
+        assert_eq!(err_dangling.kind(), ErrorKind::PermissionDenied);
+        assert!(!missing.exists());
+
+        // 3. SdrDeployer::deploy leaves pre-planted symlink targets inside .sdr untouched
+        let sdr_dir = temp.path().join("Book.sdr");
+        std::fs::create_dir_all(&sdr_dir).unwrap();
+        let deploy_victim = temp.path().join("deploy_victim.jpg");
+        std::fs::write(&deploy_victim, b"DEPLOY_VICTIM").unwrap();
+        symlink(&deploy_victim, sdr_dir.join("cover.jpg")).unwrap();
+
+        let kll_victim = temp.path().join("kll_victim.db");
+        std::fs::write(&kll_victim, b"KLL_VICTIM").unwrap();
+        symlink(&kll_victim, sdr_dir.join("LanguageLayer.en.B00SYMLINK.kll")).unwrap();
+
+        SdrDeployer::deploy(
+            &sdr_dir,
+            "B00SYMLINK",
+            None,
+            Some("EBOK"),
+            Some("en"),
+            Some(b"NEW_JPEG"),
+            Some(b"NEW_KLL"),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&deploy_victim).unwrap(), b"DEPLOY_VICTIM");
+        assert_eq!(std::fs::read(&kll_victim).unwrap(), b"KLL_VICTIM");
+        assert_eq!(
+            std::fs::read(sdr_dir.join("thumbnail_B00SYMLINK_EBOK_portrait.jpg")).unwrap(),
+            b"NEW_JPEG"
+        );
+
+        // 4. Relative filename destination in isolated child process CWD
+        let rel_dir = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "enhancements::sdr::tests::test_sdr_write_file_rejects_symlink_destination",
+            ])
+            .current_dir(rel_dir.path())
+            .env("KFX_REL_SDR_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Relative SDR child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read(rel_dir.path().join("rel_sidecar.kll")).unwrap(),
+            b"REL_KLL_DATA"
         );
     }
 }

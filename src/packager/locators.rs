@@ -195,7 +195,8 @@ impl<'a> KfxPackager<'a> {
 
         // Helper to collect all image resources in a section
         fn collect_img_res(blocks: &[Block], out: &mut Vec<String>) {
-            for b in blocks {
+            let mut stack: Vec<&Block> = blocks.iter().rev().collect();
+            while let Some(b) = stack.pop() {
                 match b {
                     Block::Image { resource_id, .. } => {
                         if !out.contains(resource_id) {
@@ -203,8 +204,10 @@ impl<'a> KfxPackager<'a> {
                         }
                     }
                     Block::List { items, .. } => {
-                        for sub_blocks in items {
-                            collect_img_res(sub_blocks, out);
+                        for sub_blocks in items.iter().rev() {
+                            for child in sub_blocks.iter().rev() {
+                                stack.push(child);
+                            }
                         }
                     }
                     _ => {}
@@ -279,5 +282,114 @@ impl<'a> KfxPackager<'a> {
             chunk_type: sym_cem,
             data: cem_writer.into_bytes(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{BookIR, Section};
+
+    #[test]
+    fn test_collect_img_res_deeply_nested_list_no_stack_overflow() {
+        let mut nested = Block::Image {
+            id: "img_deep".to_string(),
+            resource_id: "res_deep".to_string(),
+            alt: None,
+            width: None,
+            height: None,
+        };
+        for i in 0..20_000usize {
+            nested = Block::List {
+                id: format!("l_{}", i),
+                ordered: false,
+                items: vec![vec![nested]],
+            };
+        }
+
+        // Populate packager.sections directly so we test collect_img_res (and Block::drop)
+        // without triggering #[derive(Clone)] on a 20,000-level Block::List inside KfxPackager::new.
+        let empty_book = BookIR::default();
+        let mut packager = KfxPackager::new(&empty_book, "EBOK");
+        packager.sections.push(Section {
+            id: "sec1".to_string(),
+            title: "Section 1".to_string(),
+            blocks: vec![
+                Block::Image {
+                    id: "img_first".to_string(),
+                    resource_id: "res_first".to_string(),
+                    alt: None,
+                    width: None,
+                    height: None,
+                },
+                nested,
+                Block::Image {
+                    id: "img_last".to_string(),
+                    resource_id: "res_last".to_string(),
+                    alt: None,
+                    width: None,
+                    height: None,
+                },
+            ],
+        });
+        let mut symbols = LocalSymbols::new();
+        let sec_sym_id = symbols.intern("section_1");
+        let sec_pack = SectionPackData {
+            raw_id: "sec1".to_string(),
+            name: "section_1".to_string(),
+            sec_sym_id,
+            sec_eid: 1000,
+            story_sym_id: symbols.intern("story_1"),
+            block_info: vec![(1001, 1)],
+        };
+
+        packager.build_container_entity_map(&[sec_pack], &mut symbols);
+
+        let cem = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == SYM_CONTAINER_ENTITY_MAP)
+            .expect("CEM entity emitted");
+
+        let decoded = crate::ion::IonReader::new(&cem.data)
+            .decode_all()
+            .expect("CEM Ion must decode");
+
+        let sym_entity_dependencies = symbol_id("entity_dependencies").unwrap_or(253);
+        let sym_mandatory_dependencies = symbol_id("mandatory_dependencies").unwrap_or(254);
+
+        let expected_syms = vec![
+            IonValue::Symbol(symbols.intern("res_first")),
+            IonValue::Symbol(symbols.intern("res_deep")),
+            IonValue::Symbol(symbols.intern("res_last")),
+        ];
+
+        let mut found_deps = None;
+        for val in &decoded {
+            if let IonValue::Annotated(_, inner) = val
+                && let IonValue::Struct(fields) = inner.as_ref()
+            {
+                for (k, v) in fields {
+                    if *k == sym_entity_dependencies
+                        && let IonValue::List(dep_entries) = v
+                        && let Some(IonValue::Struct(dep_fields)) = dep_entries.first()
+                    {
+                        for (dk, dv) in dep_fields {
+                            if *dk == sym_mandatory_dependencies
+                                && let IonValue::List(syms) = dv
+                            {
+                                found_deps = Some(syms.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            found_deps,
+            Some(expected_syms),
+            "collect_img_res must traverse 20,000-level nested list iteratively in pre-order"
+        );
     }
 }

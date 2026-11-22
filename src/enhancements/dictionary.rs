@@ -921,9 +921,7 @@ impl LemmaDictionary {
 
         // Suffix stemming fallback
         for suffix in &["ed", "ing", "ly", "es", "s"] {
-            if clean.ends_with(suffix) {
-                let stem = &clean[..clean.len() - suffix.len()];
-
+            if let Some(stem) = clean.strip_suffix(suffix) {
                 // English Orthography Guard:
                 // Regular English verbs/adjectives with a short stem (<= 3 letters) ending in a single consonant
                 // NEVER take -ed, -ing, or -ly directly without doubling the consonant (e.g. hop -> hopped).
@@ -948,10 +946,11 @@ impl LemmaDictionary {
                 }
 
                 // Doubled consonant (e.g. "compelled" -> "compel", "hopped" -> "hop")
-                if stem.len() > 2 {
-                    let bytes = stem.as_bytes();
-                    if bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
-                        let single = &stem[..stem.len() - 1];
+                let bytes = stem.as_bytes();
+                if bytes.len() > 2 {
+                    let last = bytes[bytes.len() - 1];
+                    if last.is_ascii_alphabetic() && last == bytes[bytes.len() - 2] {
+                        let single = &stem[..bytes.len() - 1];
                         if single.len() >= min_word_len
                             && let Some(&res) = vocab.get(single)
                         {
@@ -1063,5 +1062,39 @@ mod tests {
         let diff5 = dict.lookup("handbook", 3);
         assert!(diff5.is_some());
         assert_eq!(diff5.unwrap().0, 5);
+    }
+
+    #[test]
+    fn test_lookup_multibyte_utf8_doubled_trailing_bytes_no_panic() {
+        let dict = LemmaDictionary::new();
+
+        // Multi-byte UTF-8 characters whose final two continuation bytes are identical
+        // (e.g., '丸' = [0xE4, 0xB8, 0xB8], '充' = [0xE5, 0x85, 0x85], '興' = [0xE8, 0x88, 0x88],
+        // '쀀' = [0xEC, 0x80, 0x80], 'ṹ' = [0xE1, 0xB9, 0xB9]) followed by English suffixes
+        // previously triggered a char-boundary slice panic in doubled-consonant stemming.
+        for candidate in [
+            "丸s", "充s", "興ed", "쀀s", "ṹs", "丸ing", "丸ly", "丸es", "丸ed",
+        ] {
+            assert_eq!(
+                dict.lookup(candidate, 3),
+                None,
+                "Expected None without panic for {:?}",
+                candidate
+            );
+        }
+
+        // Positive ASCII stemming must remain intact
+        assert!(
+            dict.lookup("compelled", 3).is_some(),
+            "Doubled-consonant stemming for 'compelled' should return Some"
+        );
+        assert!(
+            dict.lookup("hopped", 3).is_some(),
+            "Doubled-consonant stemming for 'hopped' should return Some"
+        );
+        assert!(
+            dict.lookup("ameliorating", 3).is_some(),
+            "Lookup for 'ameliorating' should return Some"
+        );
     }
 }

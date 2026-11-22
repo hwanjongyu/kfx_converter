@@ -352,48 +352,85 @@ impl Block {
 
     /// Extracts plain text representation of this block.
     pub fn plain_text(&self) -> String {
-        match self {
-            Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
-                let mut out = String::new();
-                for s in spans {
-                    out.push_str(&s.text);
-                }
-                out
-            }
-            Block::Table { rows, .. } => rows
-                .iter()
-                .map(|r| r.join("\t"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Block::List { items, .. } => items
-                .iter()
-                .flat_map(|it| it.iter().map(|b| b.plain_text()))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Block::Image { alt, .. } => alt.clone().unwrap_or_default(),
-            Block::HorizontalRule => "---".to_string(),
+        enum Frame<'a> {
+            Block(&'a Block),
+            Sep,
         }
+        let mut out = String::new();
+        let mut stack = vec![Frame::Block(self)];
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Sep => out.push('\n'),
+                Frame::Block(block) => match block {
+                    Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+                        for s in spans {
+                            out.push_str(&s.text);
+                        }
+                    }
+                    Block::Table { rows, .. } => {
+                        for (r_idx, r) in rows.iter().enumerate() {
+                            if r_idx > 0 {
+                                out.push('\n');
+                            }
+                            for (c_idx, cell) in r.iter().enumerate() {
+                                if c_idx > 0 {
+                                    out.push('\t');
+                                }
+                                out.push_str(cell);
+                            }
+                        }
+                    }
+                    Block::List { items, .. } => {
+                        let children: Vec<&Block> = items.iter().flat_map(|it| it.iter()).collect();
+                        for i in (0..children.len()).rev() {
+                            stack.push(Frame::Block(children[i]));
+                            if i > 0 {
+                                stack.push(Frame::Sep);
+                            }
+                        }
+                    }
+                    Block::Image { alt, .. } => {
+                        if let Some(a) = alt {
+                            out.push_str(a);
+                        }
+                    }
+                    Block::HorizontalRule => out.push_str("---"),
+                },
+            }
+        }
+        out
     }
 
     /// Returns the total character count of text content in this block.
     pub fn char_count(&self) -> usize {
-        match self {
-            Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
-                spans.iter().map(|s| s.text.chars().count()).sum()
+        let mut total = 0usize;
+        let mut stack = vec![self];
+        while let Some(block) = stack.pop() {
+            match block {
+                Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+                    total += spans.iter().map(|s| s.text.chars().count()).sum::<usize>();
+                }
+                Block::Table { rows, .. } => {
+                    total += rows
+                        .iter()
+                        .flat_map(|r| r.iter())
+                        .map(|c| c.chars().count())
+                        .sum::<usize>();
+                }
+                Block::List { items, .. } => {
+                    for item in items.iter().rev() {
+                        for b in item.iter().rev() {
+                            stack.push(b);
+                        }
+                    }
+                }
+                Block::Image { alt, .. } => {
+                    total += alt.as_ref().map(|a| a.chars().count()).unwrap_or(0);
+                }
+                Block::HorizontalRule => total += 3,
             }
-            Block::Table { rows, .. } => rows
-                .iter()
-                .flat_map(|r| r.iter())
-                .map(|c| c.chars().count())
-                .sum(),
-            Block::List { items, .. } => items
-                .iter()
-                .flat_map(|it| it.iter())
-                .map(|b| b.char_count())
-                .sum(),
-            Block::Image { alt, .. } => alt.as_ref().map(|a| a.chars().count()).unwrap_or(0),
-            Block::HorizontalRule => 3,
         }
+        total
     }
 
     pub fn has_page_break_before(&self) -> bool {
@@ -417,6 +454,27 @@ impl Block {
                 style: Some(st), ..
             } => st.contains("page_break_after"),
             _ => false,
+        }
+    }
+}
+
+impl Drop for Block {
+    /// Iteratively tears down arbitrarily deep `Block::List` trees in O(1) call-stack space.
+    fn drop(&mut self) {
+        let Block::List { items, .. } = self else {
+            return;
+        };
+        let mut stack: Vec<Vec<Block>> = std::mem::take(items);
+        while let Some(mut item_blocks) = stack.pop() {
+            while let Some(mut block) = item_blocks.pop() {
+                if let Block::List {
+                    items: child_items, ..
+                } = &mut block
+                {
+                    let taken = std::mem::take(child_items);
+                    stack.extend(taken);
+                }
+            }
         }
     }
 }
@@ -536,7 +594,8 @@ impl BookIR {
             anchor_map: &HashMap<(String, String), String>,
             section_map: &HashMap<String, String>,
         ) {
-            for item in items.iter_mut() {
+            let mut stack: Vec<&mut TocItem> = items.iter_mut().rev().collect();
+            while let Some(item) = stack.pop() {
                 if let Some(ref anchor) = item.target_anchor {
                     if let Some(part_id) =
                         anchor_map.get(&(item.target_section.clone(), anchor.clone()))
@@ -548,7 +607,9 @@ impl BookIR {
                 } else if let Some(first_part) = section_map.get(&item.target_section) {
                     item.target_section = first_part.clone();
                 }
-                update_toc_items(&mut item.children, anchor_map, section_map);
+                for child in item.children.iter_mut().rev() {
+                    stack.push(child);
+                }
             }
         }
         update_toc_items(&mut self.toc, &anchor_part_map, &section_first_part_map);
@@ -1091,5 +1152,195 @@ mod tests {
         };
         assert_eq!(list.char_count(), 6);
         assert_eq!(list.plain_text(), "Item 1");
+    }
+
+    #[test]
+    fn test_ir_deeply_nested_list_iterative_ops_and_drop() {
+        // 1. Construct a 20,000-level deeply nested Block::List programmatically
+        let mut deep_block = Block::Paragraph {
+            id: "leaf_p".to_string(),
+            spans: vec![TextSpan {
+                text: "deepest".to_string(),
+                style: None,
+                anchor_id: Some("end_anchor".to_string()),
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        };
+        for i in 0..20_000usize {
+            deep_block = Block::List {
+                id: format!("list_{}", i),
+                ordered: i % 2 == 0,
+                items: vec![vec![deep_block]],
+            };
+        }
+
+        assert_eq!(deep_block.char_count(), 7);
+        assert_eq!(deep_block.plain_text(), "deepest");
+        drop(deep_block);
+
+        // 2. Construct a 10,000-level nested Block::List + 10,000-level nested TocItem
+        // and run BookIR::fragment_large_sections (exercising iterative update_toc_items).
+        let mut sec_deep_list = Block::Paragraph {
+            id: "sec_leaf".to_string(),
+            spans: vec![TextSpan {
+                text: "item".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        };
+        for i in 0..10_000usize {
+            sec_deep_list = Block::List {
+                id: format!("sec_list_{}", i),
+                ordered: false,
+                items: vec![vec![sec_deep_list]],
+            };
+        }
+
+        let mut deep_toc = TocItem {
+            title: "Leaf TOC".to_string(),
+            target_section: "sec_1".to_string(),
+            target_anchor: Some("end_anchor".to_string()),
+            children: Vec::new(),
+        };
+        for i in (0..9_999usize).rev() {
+            deep_toc = TocItem {
+                title: format!("TOC {}", i),
+                target_section: "sec_1".to_string(),
+                target_anchor: None,
+                children: vec![deep_toc],
+            };
+        }
+
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "sec_1".to_string(),
+            title: "Section 1".to_string(),
+            blocks: vec![
+                sec_deep_list,
+                Block::Paragraph {
+                    id: "tail_p".to_string(),
+                    spans: vec![TextSpan {
+                        text: "tail".to_string(),
+                        style: None,
+                        anchor_id: Some("end_anchor".to_string()),
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                },
+            ],
+        });
+        book.toc.push(deep_toc);
+
+        book.fragment_large_sections(100_000, 1);
+
+        assert_eq!(book.sections.len(), 2);
+        assert_eq!(book.toc[0].target_section, "sec_1_p1");
+
+        // Walk iteratively to the deepest TocItem to avoid stack overflow in test verification
+        let mut curr = &book.toc[0];
+        let mut depth = 1usize;
+        while let Some(next) = curr.children.first() {
+            curr = next;
+            depth += 1;
+        }
+        assert_eq!(depth, 10_000);
+        assert_eq!(curr.target_section, "sec_1_p2");
+    }
+
+    #[test]
+    fn test_block_plain_text_nested_and_empty_list_joining() {
+        fn p(id: &str, text: &str) -> Block {
+            Block::Paragraph {
+                id: id.to_string(),
+                spans: vec![TextSpan {
+                    text: text.to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }
+        }
+
+        fn reference_recursive_plain_text(block: &Block) -> String {
+            match block {
+                Block::List { items, .. } => items
+                    .iter()
+                    .flat_map(|item| item.iter().map(reference_recursive_plain_text))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                other => other.plain_text(),
+            }
+        }
+
+        let empty_list = Block::List {
+            id: "empty".to_string(),
+            ordered: false,
+            items: Vec::new(),
+        };
+        assert_eq!(empty_list.plain_text(), "");
+
+        // ["a", empty_list, "b"] -> "a\n\nb"
+        let list_with_empty_middle = Block::List {
+            id: "outer_empty_mid".to_string(),
+            ordered: false,
+            items: vec![
+                vec![p("p1", "a")],
+                vec![empty_list.clone()],
+                vec![p("p2", "b")],
+            ],
+        };
+        assert_eq!(list_with_empty_middle.plain_text(), "a\n\nb");
+        assert_eq!(
+            list_with_empty_middle.plain_text(),
+            reference_recursive_plain_text(&list_with_empty_middle)
+        );
+
+        // Leading and trailing empty nested lists
+        let leading_empty = Block::List {
+            id: "leading_empty".to_string(),
+            ordered: true,
+            items: vec![vec![empty_list.clone()], vec![p("p3", "only")]],
+        };
+        assert_eq!(leading_empty.plain_text(), "\nonly");
+        assert_eq!(
+            leading_empty.plain_text(),
+            reference_recursive_plain_text(&leading_empty)
+        );
+
+        let trailing_empty = Block::List {
+            id: "trailing_empty".to_string(),
+            ordered: false,
+            items: vec![vec![p("p4", "only")], vec![empty_list]],
+        };
+        assert_eq!(trailing_empty.plain_text(), "only\n");
+        assert_eq!(
+            trailing_empty.plain_text(),
+            reference_recursive_plain_text(&trailing_empty)
+        );
+
+        // Multi-level nested list with multiple blocks in a single item
+        let nested = Block::List {
+            id: "nested_outer".to_string(),
+            ordered: false,
+            items: vec![vec![
+                p("x", "x"),
+                Block::List {
+                    id: "nested_inner".to_string(),
+                    ordered: true,
+                    items: vec![vec![p("y", "y")], vec![p("z", "z")]],
+                },
+                p("w", "w"),
+            ]],
+        };
+        assert_eq!(nested.plain_text(), "x\ny\nz\nw");
+        assert_eq!(nested.plain_text(), reference_recursive_plain_text(&nested));
     }
 }

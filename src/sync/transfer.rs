@@ -183,10 +183,24 @@ pub fn sync_to_device(
     Ok(dest_kfx_path)
 }
 
+/// Rejects destinations that already exist as symbolic links (including dangling symlinks).
+fn reject_symlink_destination(dst: &Path) -> Result<(), SyncError> {
+    match std::fs::symlink_metadata(dst) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(SyncError::SecurityViolation(format!(
+            "Refusing to overwrite symlink destination: {:?}",
+            dst
+        ))),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(SyncError::Io(e)),
+    }
+}
+
 /// Clears the read-only attribute on an existing destination file so that atomic overwrites or renames succeed.
 #[allow(clippy::permissions_set_readonly_false)]
 pub fn prepare_destination_for_overwrite(dst: &Path) {
-    if let Ok(meta) = std::fs::metadata(dst)
+    if let Ok(meta) = std::fs::symlink_metadata(dst)
+        && !meta.file_type().is_symlink()
         && meta.permissions().readonly()
     {
         let mut perms = meta.permissions();
@@ -206,9 +220,16 @@ pub fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
         execute_gio_copy_with_timeout(src, dst, Duration::from_secs(60))?;
     } else {
         use std::io::{Read, Write};
+        reject_symlink_destination(dst)?;
+        let parent = match dst.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
         let mut r = std::fs::File::open(src)?;
-        let part_dst = PathBuf::from(format!("{}.part", dst.display()));
-        let mut w = std::fs::File::create(&part_dst)?;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".kfx_tmp.")
+            .suffix(".part")
+            .tempfile_in(parent)?;
         // Stream in bounded 64KB chunks to avoid overflowing Kindle USB gadget FIFO buffers
         let mut buf = [0u8; 64 * 1024];
         loop {
@@ -216,13 +237,12 @@ pub fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
             if n == 0 {
                 break;
             }
-            w.write_all(&buf[..n])?;
+            tmp.write_all(&buf[..n])?;
         }
-        w.flush()?;
-        drop(w);
+        tmp.flush()?;
         drop(r);
         prepare_destination_for_overwrite(dst);
-        std::fs::rename(&part_dst, dst)?;
+        tmp.persist(dst).map_err(|e| SyncError::Io(e.error))?;
         // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -296,13 +316,19 @@ pub fn write_bytes(dst: &Path, data: &[u8]) -> Result<(), SyncError> {
         copy_file(tmp.path(), dst)?;
     } else {
         use std::io::Write;
-        let part_dst = PathBuf::from(format!("{}.part", dst.display()));
-        let mut f = std::fs::File::create(&part_dst)?;
-        f.write_all(data)?;
-        f.flush()?;
-        drop(f);
+        reject_symlink_destination(dst)?;
+        let parent = match dst.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".kfx_tmp.")
+            .suffix(".part")
+            .tempfile_in(parent)?;
+        tmp.write_all(data)?;
+        tmp.flush()?;
         prepare_destination_for_overwrite(dst);
-        std::fs::rename(&part_dst, dst)?;
+        tmp.persist(dst).map_err(|e| SyncError::Io(e.error))?;
     }
     Ok(())
 }
@@ -515,5 +541,107 @@ mod tests {
 
         KindleSync::copy_file(&src, &target).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new kfx contents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_file_and_write_bytes_reject_symlink_and_preexisting_part_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        // Isolated child branch for bare relative filename destination ("rel_*.kfx") without mutating parent CWD
+        if std::env::var_os("KFX_REL_TRANSFER_CHILD").is_some() {
+            assert_eq!(Path::new("rel_write.kfx").parent(), Some(Path::new("")));
+            KindleSync::write_bytes(Path::new("rel_write.kfx"), b"REL_WRITE_BYTES").unwrap();
+            assert_eq!(std::fs::read("rel_write.kfx").unwrap(), b"REL_WRITE_BYTES");
+
+            std::fs::write("rel_src.kfx", b"REL_COPY_BYTES").unwrap();
+            KindleSync::copy_file(Path::new("rel_src.kfx"), Path::new("rel_copy.kfx")).unwrap();
+            assert_eq!(std::fs::read("rel_copy.kfx").unwrap(), b"REL_COPY_BYTES");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src.kfx");
+        std::fs::write(&src, b"NEW_KFX_PAYLOAD").unwrap();
+
+        // 1. Live symlink destination pointing to read-only victim file
+        let victim = temp.path().join("victim.txt");
+        std::fs::write(&victim, b"UNTOUCHED_VICTIM").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let live_link = temp.path().join("live_dest.kfx");
+        symlink(&victim, &live_link).unwrap();
+
+        let err_write = KindleSync::write_bytes(&live_link, b"EVIL").unwrap_err();
+        assert!(matches!(err_write, SyncError::SecurityViolation(_)));
+
+        let err_copy = KindleSync::copy_file(&src, &live_link).unwrap_err();
+        assert!(matches!(err_copy, SyncError::SecurityViolation(_)));
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"UNTOUCHED_VICTIM");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+
+        // 2. Dangling symlink destination
+        let missing_target = temp.path().join("never_created.txt");
+        let dangling_link = temp.path().join("dangling_dest.kfx");
+        symlink(&missing_target, &dangling_link).unwrap();
+
+        let err_dangling_w = KindleSync::write_bytes(&dangling_link, b"EVIL").unwrap_err();
+        assert!(matches!(err_dangling_w, SyncError::SecurityViolation(_)));
+        let err_dangling_c = KindleSync::copy_file(&src, &dangling_link).unwrap_err();
+        assert!(matches!(err_dangling_c, SyncError::SecurityViolation(_)));
+        assert!(!missing_target.exists());
+
+        // 3. Pre-existing <dst>.part symlink pointing to a victim file must NOT be clobbered
+        let part_victim = temp.path().join("part_victim.txt");
+        std::fs::write(&part_victim, b"SAFE_PART_VICTIM").unwrap();
+
+        let dst = temp.path().join("safe_dest.kfx");
+        let legacy_part_link = temp.path().join("safe_dest.kfx.part");
+        symlink(&part_victim, &legacy_part_link).unwrap();
+
+        KindleSync::write_bytes(&dst, b"DIRECT_BYTES").unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"DIRECT_BYTES");
+        assert_eq!(std::fs::read(&part_victim).unwrap(), b"SAFE_PART_VICTIM");
+        assert!(
+            std::fs::symlink_metadata(&legacy_part_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        KindleSync::copy_file(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"NEW_KFX_PAYLOAD");
+        assert_eq!(std::fs::read(&part_victim).unwrap(), b"SAFE_PART_VICTIM");
+
+        // 4. Relative filename destination in isolated child process CWD
+        let rel_dir = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let output = Command::new(exe)
+            .args([
+                "--exact",
+                "sync::transfer::tests::test_copy_file_and_write_bytes_reject_symlink_and_preexisting_part_symlink",
+            ])
+            .current_dir(rel_dir.path())
+            .env("KFX_REL_TRANSFER_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Relative transfer child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read(rel_dir.path().join("rel_write.kfx")).unwrap(),
+            b"REL_WRITE_BYTES"
+        );
+        assert_eq!(
+            std::fs::read(rel_dir.path().join("rel_copy.kfx")).unwrap(),
+            b"REL_COPY_BYTES"
+        );
     }
 }

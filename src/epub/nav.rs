@@ -7,19 +7,24 @@ use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
 
-use crate::epub::archive::{MAX_METADATA_BYTES, resolve_zip_path};
+use crate::epub::EpubError;
+use crate::epub::archive::{
+    DecompressionBudget, MAX_EPUB_UNCOMPRESSED_TOTAL, MAX_METADATA_BYTES, read_entry_string,
+    resolve_zip_path,
+};
 use crate::epub::opf::ManifestItem;
 use crate::ir::{PageEntry, Section, TocItem};
 
-/// Extracts navigation structure (TOC hierarchy and page-list) by inspecting
-/// EPUB 3 `nav.xhtml`, EPUB 2 `toc.ncx`, or falling back to linear sections.
-pub fn extract_navigation<R: Read + std::io::Seek>(
+/// Extracts navigation structure (TOC hierarchy and page-list) under a shared decompression budget
+/// by inspecting EPUB 3 `nav.xhtml`, EPUB 2 `toc.ncx`, or falling back to linear sections.
+pub fn extract_navigation_with_budget<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     opf_dir: &str,
     manifest: &HashMap<String, ManifestItem>,
     href_to_section: &HashMap<String, String>,
     sections: &[Section],
-) -> (Vec<TocItem>, Vec<PageEntry>) {
+    budget: &mut DecompressionBudget,
+) -> Result<(Vec<TocItem>, Vec<PageEntry>), EpubError> {
     // 1. Try EPUB 3 Navigation Document (nav.xhtml or properties="nav")
     for item in manifest.values() {
         let is_nav = item
@@ -32,16 +37,15 @@ pub fn extract_navigation<R: Read + std::io::Seek>(
         if is_nav && item.media_type.contains("xml") {
             let full_path = resolve_zip_path(opf_dir, &item.href);
             if let Ok(mut entry) = archive.by_name(&full_path) {
-                let mut s = String::new();
-                if (&mut entry)
-                    .take(MAX_METADATA_BYTES)
-                    .read_to_string(&mut s)
-                    .is_ok()
-                {
-                    let (toc, page_list) = parse_nav_xhtml(&s, href_to_section);
-                    if !toc.is_empty() {
-                        return (toc, page_list);
+                match read_entry_string(&mut entry, MAX_METADATA_BYTES, budget) {
+                    Ok(s) => {
+                        let (toc, page_list) = parse_nav_xhtml(&s, href_to_section);
+                        if !toc.is_empty() {
+                            return Ok((toc, page_list));
+                        }
                     }
+                    Err(e @ EpubError::Security(_)) => return Err(e),
+                    Err(_) => {}
                 }
             }
         }
@@ -55,16 +59,15 @@ pub fn extract_navigation<R: Read + std::io::Seek>(
         if is_ncx {
             let full_path = resolve_zip_path(opf_dir, &item.href);
             if let Ok(mut entry) = archive.by_name(&full_path) {
-                let mut s = String::new();
-                if (&mut entry)
-                    .take(MAX_METADATA_BYTES)
-                    .read_to_string(&mut s)
-                    .is_ok()
-                {
-                    let (toc, page_list) = parse_ncx(&s, href_to_section);
-                    if !toc.is_empty() {
-                        return (toc, page_list);
+                match read_entry_string(&mut entry, MAX_METADATA_BYTES, budget) {
+                    Ok(s) => {
+                        let (toc, page_list) = parse_ncx(&s, href_to_section);
+                        if !toc.is_empty() {
+                            return Ok((toc, page_list));
+                        }
                     }
+                    Err(e @ EpubError::Security(_)) => return Err(e),
+                    Err(_) => {}
                 }
             }
         }
@@ -88,7 +91,28 @@ pub fn extract_navigation<R: Read + std::io::Seek>(
             children: Vec::new(),
         });
     }
-    (fallback_toc, Vec::new())
+    Ok((fallback_toc, Vec::new()))
+}
+
+/// Extracts navigation structure (TOC hierarchy and page-list) by inspecting
+/// EPUB 3 `nav.xhtml`, EPUB 2 `toc.ncx`, or falling back to linear sections.
+pub fn extract_navigation<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    opf_dir: &str,
+    manifest: &HashMap<String, ManifestItem>,
+    href_to_section: &HashMap<String, String>,
+    sections: &[Section],
+) -> (Vec<TocItem>, Vec<PageEntry>) {
+    let mut budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
+    extract_navigation_with_budget(
+        archive,
+        opf_dir,
+        manifest,
+        href_to_section,
+        sections,
+        &mut budget,
+    )
+    .unwrap_or_else(|_| (Vec::new(), Vec::new()))
 }
 
 /// Parses EPUB 2 NCX XML into hierarchical TOC items and page targets.

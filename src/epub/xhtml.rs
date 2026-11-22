@@ -13,6 +13,10 @@ use crate::ir::{Block, TextSpan};
 pub use crate::epub::dropcap::finish_paragraph_dropcaps as finish_paragraph_spans;
 pub use crate::epub::dropcap::{finish_paragraph_dropcaps, is_opening_quote};
 
+/// Maximum HTML list nesting depth (`<ul>` / `<ol>`) preserved as recursive `Block::List` nodes
+/// before deeper levels are flattened into the active depth-bounded list item.
+pub const MAX_LIST_DEPTH: usize = 32;
+
 pub fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
     parse_xhtml_blocks_with_manifest(xhtml, &HashMap::new())
 }
@@ -150,6 +154,7 @@ pub fn parse_xhtml_with_css(
     let mut list_stack: Vec<(bool, Vec<Vec<Block>>, Vec<Block>)> = Vec::new(); // (is_ordered, items, saved_parent_blocks)
     let mut current_list_item_blocks: Vec<Block> = Vec::new();
     let mut in_li = false;
+    let mut list_overflow_depth: usize = 0;
 
     let flush_current_span = |text: &mut String,
                               spans: &mut Vec<TextSpan>,
@@ -835,17 +840,49 @@ pub fn parse_xhtml_with_css(
                                     current_spans.clear();
                                 }
                             }
-                            list_stack.push((
-                                local_bytes == b"ol",
-                                Vec::new(),
-                                std::mem::take(&mut current_list_item_blocks),
-                            ));
+                            if list_stack.len() >= MAX_LIST_DEPTH {
+                                list_overflow_depth += 1;
+                            } else {
+                                list_stack.push((
+                                    local_bytes == b"ol",
+                                    Vec::new(),
+                                    std::mem::take(&mut current_list_item_blocks),
+                                ));
+                            }
                         }
                         b"li" => {
-                            in_li = true;
-                            current_list_item_blocks.clear();
-                            current_span_text.clear();
-                            current_spans.clear();
+                            if list_overflow_depth > 0 {
+                                flush_current_span(
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    code,
+                                    strike,
+                                    sup,
+                                    sub,
+                                    &current_href,
+                                    &current_anchor,
+                                    &current_style,
+                                );
+                                if current_spans.iter().any(|s| !s.text.trim().is_empty()) {
+                                    current_list_item_blocks.push(Block::Paragraph {
+                                        id: format!("li_{}", blocks.len() + 1),
+                                        spans: std::mem::take(&mut current_spans),
+                                        style: None,
+                                    });
+                                } else {
+                                    current_spans.clear();
+                                }
+                                current_span_text.clear();
+                                in_li = true;
+                            } else {
+                                in_li = true;
+                                current_list_item_blocks.clear();
+                                current_span_text.clear();
+                                current_spans.clear();
+                            }
                         }
                         b"img" | b"image" => {
                             if let Some(img_block) = parse_image_block(e, blocks.len()) {
@@ -1393,27 +1430,37 @@ pub fn parse_xhtml_with_css(
                                     current_spans.clear();
                                 }
                             }
-                            if let Some((_, items, _)) = list_stack.last_mut() {
+                            if list_overflow_depth == 0
+                                && let Some((_, items, _)) = list_stack.last_mut()
+                            {
                                 items.push(std::mem::take(&mut current_list_item_blocks));
                             }
                         }
                         b"ul" | b"ol" => {
-                            if let Some((ordered, items, saved_parent_blocks)) = list_stack.pop()
-                                && !items.is_empty()
+                            if list_overflow_depth > 0 {
+                                list_overflow_depth -= 1;
+                            } else if let Some((ordered, items, saved_parent_blocks)) =
+                                list_stack.pop()
                             {
-                                let list_block = Block::List {
-                                    id: format!("list_{}", blocks.len() + 1),
-                                    ordered,
-                                    items,
-                                };
+                                let has_items = !items.is_empty();
                                 if !list_stack.is_empty() {
                                     current_list_item_blocks = saved_parent_blocks;
-                                    current_list_item_blocks.push(list_block);
-                                } else {
-                                    blocks.push(list_block);
+                                    if has_items {
+                                        current_list_item_blocks.push(Block::List {
+                                            id: format!("list_{}", blocks.len() + 1),
+                                            ordered,
+                                            items,
+                                        });
+                                    }
+                                } else if has_items {
+                                    blocks.push(Block::List {
+                                        id: format!("list_{}", blocks.len() + 1),
+                                        ordered,
+                                        items,
+                                    });
                                 }
                             }
-                            in_li = !list_stack.is_empty();
+                            in_li = !list_stack.is_empty() || list_overflow_depth > 0;
                         }
                         _ => {}
                     }

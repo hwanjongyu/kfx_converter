@@ -203,7 +203,9 @@ pub struct CssStylesheet {
 }
 
 /// Upper bound on accepted rules to guard against pathological stylesheets.
-const MAX_CSS_RULES: usize = 50_000;
+pub const MAX_CSS_RULES: usize = 50_000;
+/// Upper bound on declarations accepted per CSS rule to prevent allocation amplification.
+pub const MAX_DECLARATIONS_PER_RULE: usize = 256;
 
 impl CssStylesheet {
     pub fn new() -> Self {
@@ -234,6 +236,9 @@ impl CssStylesheet {
                 continue;
             }
             for raw_sel in sel_part.split(',') {
+                if self.rules.len() >= MAX_CSS_RULES {
+                    break;
+                }
                 let s = raw_sel.trim();
                 let (target_sel, is_first_letter) =
                     if let Some(stripped) = s.strip_suffix("::first-letter") {
@@ -366,6 +371,7 @@ fn parse_declarations(body: &str) -> Vec<(Cow<'static, str>, String)> {
                 Some((intern_css_property(&p_lc), v))
             }
         })
+        .take(MAX_DECLARATIONS_PER_RULE)
         .collect()
 }
 
@@ -621,5 +627,41 @@ mod tests {
         assert!(matches!(decls[0].0, Cow::Borrowed("font-size")));
         assert!(matches!(decls[1].0, Cow::Owned(_)));
         assert!(matches!(decls[2].0, Cow::Borrowed("color")));
+    }
+
+    #[test]
+    fn test_css_comma_selector_bomb_respects_max_rules() {
+        let selector_count = MAX_CSS_RULES + 5_000;
+        let decl_count = MAX_DECLARATIONS_PER_RULE + 50;
+
+        let selectors: String = (0..selector_count)
+            .map(|i| format!(".c{}", i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let decls: String = (0..decl_count)
+            .map(|i| format!("margin-top: {}px", i))
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        let css = format!(
+            "{} {{ {} }} p.after {{ color: #123456; }}",
+            selectors, decls
+        );
+
+        let mut sheet = CssStylesheet::new();
+        sheet.add_css(&css);
+
+        assert_eq!(
+            sheet.rules.len(),
+            MAX_CSS_RULES,
+            "Comma-separated selector bomb must be capped at MAX_CSS_RULES"
+        );
+        assert!(
+            sheet
+                .rules
+                .iter()
+                .all(|r| r.decls.len() == MAX_DECLARATIONS_PER_RULE),
+            "Every rule must cap declarations at MAX_DECLARATIONS_PER_RULE"
+        );
     }
 }

@@ -3,6 +3,17 @@ use crate::state::{EpubSortField, SortDirection};
 use crate::theme::Theme;
 use gpui::*;
 
+/// Computes clamped scrollbar thumb height while ensuring `min_thumb <= max_thumb`
+/// for all viewport heights (including tight heights `20.0 < viewport_h < 46.0`).
+fn compute_thumb_height(viewport_h: Pixels, total_content: Pixels) -> Pixels {
+    let safe_content = total_content.max(viewport_h + px(1.0));
+    let raw_thumb_h = (viewport_h / safe_content) * viewport_h;
+    let max_cap = (viewport_h - px(10.0)).max(px(4.0));
+    let max_thumb = (viewport_h * 0.70).max(px(36.0)).min(max_cap);
+    let min_thumb = px(36.0).min(max_thumb);
+    raw_thumb_h.clamp(min_thumb, max_thumb)
+}
+
 impl KindleStudio {
     pub(super) fn render_sort_column_cell(
         &self,
@@ -235,12 +246,9 @@ impl KindleStudio {
                             let scroll_ratio = (scroll_offset_y / effective_max).clamp(0.0, 1.0);
 
                             // Proportional thumb size, clamped:
-                            // Min: 36px so it's always easily draggable
-                            // Max: 70% of viewport so it NEVER fills the entire height and always leaves dragging room
-                            let raw_thumb_h = (viewport_h / total_content) * viewport_h;
-                            let max_allowed_thumb = (viewport_h * 0.70).max(px(36.0));
-                            let thumb_h = raw_thumb_h
-                                .clamp(px(36.0), max_allowed_thumb.min(viewport_h - px(10.0)));
+                            // Min: 36px when viewport allows, scaling safely down for tight viewports
+                            // Max: 70% of viewport (and never exceeding track minus padding)
+                            let thumb_h = compute_thumb_height(viewport_h, total_content);
 
                             let available_travel = (viewport_h - thumb_h - px(6.0)).max(px(0.0));
                             let thumb_top =
@@ -264,5 +272,42 @@ impl KindleStudio {
                 )
                 .size_full(),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_thumb_height;
+    use gpui::px;
+
+    #[test]
+    fn test_compute_thumb_height_small_viewports_no_panic() {
+        let viewport_heights = [0.0, 10.0, 20.0, 20.5, 25.0, 35.0, 45.9, 46.0, 100.0, 600.0];
+        let content_heights = [50.0, 500.0, 10_000.0];
+
+        for vh in viewport_heights {
+            let viewport_h = px(vh);
+            for ch in content_heights {
+                let thumb_h = compute_thumb_height(viewport_h, px(ch));
+                assert!(
+                    thumb_h >= px(4.0),
+                    "thumb_h ({:?}) must be >= 4px for viewport_h={vh}, total_content={ch}",
+                    thumb_h
+                );
+                assert!(
+                    thumb_h <= viewport_h.max(px(4.0)),
+                    "thumb_h ({:?}) must be <= viewport_h.max(4px) for viewport_h={vh}, total_content={ch}",
+                    thumb_h
+                );
+                if vh >= 46.0 {
+                    assert!(
+                        thumb_h >= px(36.0) && thumb_h <= viewport_h - px(10.0),
+                        "normal viewport_h={vh} (content={ch}) thumb_h={:?} out of [36.0, {}]",
+                        thumb_h,
+                        vh - 10.0
+                    );
+                }
+            }
+        }
     }
 }
