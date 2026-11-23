@@ -498,11 +498,13 @@ impl BookIR {
     /// Also rewrites `toc` and `page_list` targets so navigation remains intact after fragmentation.
     pub fn fragment_large_sections(&mut self, max_chars: usize, max_blocks: usize) {
         let mut new_sections = Vec::new();
+        let mut sec_orig_ids: Vec<String> = Vec::new();
         let mut section_first_part_map: HashMap<String, String> = HashMap::new();
         let mut anchor_part_map: HashMap<(String, String), String> = HashMap::new();
 
         for section in std::mem::take(&mut self.sections) {
             if section.blocks.is_empty() {
+                sec_orig_ids.push(section.id.clone());
                 new_sections.push(section);
                 continue;
             }
@@ -514,12 +516,15 @@ impl BookIR {
                 .any(|b| b.has_page_break_before() || b.has_page_break_after());
 
             if !has_forced_break && total_chars <= max_chars && section.blocks.len() <= max_blocks {
-                // Not fragmented: map anchors directly
+                // Not fragmented: map anchors directly (first occurrence wins for synthetic IDs)
                 for block in &section.blocks {
-                    for anchor in extract_anchors_from_block(block) {
-                        anchor_part_map.insert((section.id.clone(), anchor), section.id.clone());
+                    for anchor in collect_block_anchors(block, true) {
+                        anchor_part_map
+                            .entry((section.id.clone(), anchor))
+                            .or_insert_with(|| section.id.clone());
                     }
                 }
+                sec_orig_ids.push(section.id.clone());
                 new_sections.push(section);
                 continue;
             }
@@ -545,10 +550,13 @@ impl BookIR {
                 {
                     let part_id = format!("{}_p{}", orig_id, part_idx);
                     for b in &current_blocks {
-                        for anchor in extract_anchors_from_block(b) {
-                            anchor_part_map.insert((orig_id.clone(), anchor), part_id.clone());
+                        for anchor in collect_block_anchors(b, true) {
+                            anchor_part_map
+                                .entry((orig_id.clone(), anchor))
+                                .or_insert_with(|| part_id.clone());
                         }
                     }
+                    sec_orig_ids.push(orig_id.clone());
                     new_sections.push(Section {
                         id: part_id,
                         title: if part_idx == 1 {
@@ -577,10 +585,13 @@ impl BookIR {
                     format!("{} (part {})", orig_title, part_idx)
                 };
                 for b in &current_blocks {
-                    for anchor in extract_anchors_from_block(b) {
-                        anchor_part_map.insert((orig_id.clone(), anchor), final_id.clone());
+                    for anchor in collect_block_anchors(b, true) {
+                        anchor_part_map
+                            .entry((orig_id.clone(), anchor))
+                            .or_insert_with(|| final_id.clone());
                     }
                 }
+                sec_orig_ids.push(orig_id.clone());
                 new_sections.push(Section {
                     id: final_id,
                     title: final_title,
@@ -632,6 +643,42 @@ impl BookIR {
                 }
             } else if let Some(first_part) = section_first_part_map.get(&page.target_section) {
                 page.target_section = first_part.clone();
+            }
+        }
+
+        // Iteratively remap internal TextSpan.href targets across fragmented sections
+        if !anchor_part_map.is_empty() || !section_first_part_map.is_empty() {
+            for (sec, orig_id) in self.sections.iter_mut().zip(sec_orig_ids.iter()) {
+                let current_sec_id = sec.id.clone();
+                let mut stack: Vec<&mut Block> = sec.blocks.iter_mut().rev().collect();
+                while let Some(block) = stack.pop() {
+                    match block {
+                        Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+                            for span in spans {
+                                let Some(ref raw_href) = span.href else {
+                                    continue;
+                                };
+                                if let Some(rewritten) = remap_internal_href(
+                                    raw_href,
+                                    &current_sec_id,
+                                    orig_id,
+                                    &anchor_part_map,
+                                    &section_first_part_map,
+                                ) {
+                                    span.href = Some(rewritten);
+                                }
+                            }
+                        }
+                        Block::List { items, .. } => {
+                            for item in items.iter_mut().rev() {
+                                for child in item.iter_mut().rev() {
+                                    stack.push(child);
+                                }
+                            }
+                        }
+                        Block::Image { .. } | Block::HorizontalRule | Block::Table { .. } => {}
+                    }
+                }
             }
         }
     }
@@ -758,29 +805,166 @@ impl BookIR {
     }
 }
 
-fn extract_anchors_from_block(block: &Block) -> Vec<String> {
+/// Classification of a raw URI or href against the security scheme allowlist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UriKind {
+    /// Allowlisted external URI normalized with lowercase scheme (`http://`, `https://`, `mailto:`).
+    External(String),
+    /// Disallowed URI scheme or protocol-relative URI (`javascript:`, `data:`, `//...`, etc.).
+    Blocked,
+    /// Relative EPUB archive path or fragment without an explicit URI scheme.
+    InternalOrRelative,
+}
+
+/// Strips ASCII control characters and trims surrounding whitespace from a raw href.
+pub(crate) fn sanitize_href_whitespace(raw: &str) -> String {
+    let stripped: String = raw.chars().filter(|ch| !ch.is_ascii_control()).collect();
+    stripped.trim().to_string()
+}
+
+/// Classifies a raw href/URI into an allowlisted external URI, blocked scheme, or internal link.
+///
+/// Only `http://`, `https://`, and `mailto:` (with non-empty host/recipient) are permitted
+/// as external URIs. All other explicit schemes (including `javascript:`, `data:`, `vbscript:`,
+/// `file:`, `about:`, `blob:`, `ftp:`) and protocol-relative `//...` URIs are rejected.
+pub(crate) fn classify_uri(raw: &str) -> Option<UriKind> {
+    let cleaned = sanitize_href_whitespace(raw);
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.starts_with("//") {
+        return Some(UriKind::Blocked);
+    }
+
+    if let Some(delim_idx) = cleaned.find([':', '/', '?', '#'])
+        && cleaned.as_bytes()[delim_idx] == b':'
+    {
+        let scheme = &cleaned[..delim_idx];
+        let rest = &cleaned[delim_idx + 1..];
+        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+            let Some(after_slashes) = rest.strip_prefix("//") else {
+                return Some(UriKind::Blocked);
+            };
+            let authority = after_slashes.split(['/', '?', '#']).next().unwrap_or("");
+            if authority.trim().is_empty() || authority.chars().any(char::is_whitespace) {
+                return Some(UriKind::Blocked);
+            }
+            return Some(UriKind::External(format!(
+                "{}://{}",
+                scheme.to_ascii_lowercase(),
+                after_slashes
+            )));
+        }
+        if scheme.eq_ignore_ascii_case("mailto") {
+            let recipient = rest.trim();
+            if recipient.is_empty() {
+                return Some(UriKind::Blocked);
+            }
+            return Some(UriKind::External(format!("mailto:{}", recipient)));
+        }
+        return Some(UriKind::Blocked);
+    }
+
+    Some(UriKind::InternalOrRelative)
+}
+
+/// Returns `true` iff `uri` is a clean, non-empty, allowlisted external URI (`http://`, `https://`, `mailto:`).
+pub(crate) fn is_allowlisted_external_uri(uri: &str) -> bool {
+    !uri.is_empty()
+        && uri.trim() == uri
+        && !uri.chars().any(|ch| ch.is_ascii_control())
+        && matches!(classify_uri(uri), Some(UriKind::External(_)))
+}
+
+fn remap_internal_href(
+    raw_href: &str,
+    current_sec_id: &str,
+    orig_id: &str,
+    anchor_part_map: &HashMap<(String, String), String>,
+    section_first_part_map: &HashMap<String, String>,
+) -> Option<String> {
+    if !matches!(classify_uri(raw_href), Some(UriKind::InternalOrRelative)) {
+        return None;
+    }
+
+    let (sec_part, frag_part) = match raw_href.split_once('#') {
+        Some((s, a)) => (s.trim(), Some(a.trim().trim_start_matches('#'))),
+        None => (raw_href.trim(), None),
+    };
+    let eff_anchor = frag_part.filter(|a| !a.is_empty());
+
+    if sec_part.is_empty() {
+        if let Some(anchor) = eff_anchor
+            && let Some(part_id) = anchor_part_map.get(&(orig_id.to_string(), anchor.to_string()))
+            && part_id != current_sec_id
+        {
+            return Some(format!("{}#{}", part_id, anchor));
+        }
+        return None;
+    }
+
+    if let Some(anchor) = eff_anchor {
+        if let Some(part_id) = anchor_part_map.get(&(sec_part.to_string(), anchor.to_string())) {
+            let rewritten = format!("{}#{}", part_id, anchor);
+            if rewritten != raw_href {
+                return Some(rewritten);
+            }
+            return None;
+        }
+        if let Some(first_part) = section_first_part_map.get(sec_part) {
+            let rewritten = format!("{}#{}", first_part, anchor);
+            if rewritten != raw_href {
+                return Some(rewritten);
+            }
+        }
+        return None;
+    }
+
+    section_first_part_map.get(sec_part).cloned()
+}
+
+fn collect_block_anchors(block: &Block, include_block_ids: bool) -> Vec<String> {
     let mut anchors = Vec::new();
     let mut stack = vec![block];
     while let Some(current) = stack.pop() {
         match current {
-            Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+            Block::Paragraph { id, spans, .. } | Block::Heading { id, spans, .. } => {
+                if include_block_ids && !id.is_empty() {
+                    anchors.push(id.clone());
+                }
                 for s in spans {
                     if let Some(ref anchor) = s.anchor_id {
-                        anchors.push(anchor.clone());
+                        let clean = anchor.trim().trim_start_matches('#');
+                        if !clean.is_empty() {
+                            anchors.push(clean.to_string());
+                        }
                     }
                 }
             }
-            Block::List { items, .. } => {
+            Block::List { id, items, .. } => {
+                if include_block_ids && !id.is_empty() {
+                    anchors.push(id.clone());
+                }
                 for item in items.iter().rev() {
                     for child in item.iter().rev() {
                         stack.push(child);
                     }
                 }
             }
-            Block::Image { .. } | Block::HorizontalRule | Block::Table { .. } => {}
+            Block::Image { id, .. } | Block::Table { id, .. } => {
+                if include_block_ids && !id.is_empty() {
+                    anchors.push(id.clone());
+                }
+            }
+            Block::HorizontalRule => {}
         }
     }
     anchors
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn extract_anchors_from_block(block: &Block) -> Vec<String> {
+    collect_block_anchors(block, false)
 }
 
 #[cfg(test)]
@@ -1443,5 +1627,161 @@ mod tests {
 
         let block_style = BlockStyle::from_tokens("align_center align_left");
         assert_eq!(block_style.alignment, TextAlignment::Left);
+    }
+
+    #[test]
+    fn test_fragment_large_sections_remaps_internal_hrefs_iteratively_and_idempotently() {
+        let mut deep_list_link = Block::Paragraph {
+            id: "leaf_link_p".to_string(),
+            spans: vec![
+                TextSpan {
+                    text: "SameSecFrag".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("#anc_p2".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "OtherSecFrag".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("sec_2#b_id".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "BareSec".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("sec_2".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "External".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("https://Example.com/path?a=1#frag".to_string()),
+                    ruby: None,
+                },
+            ],
+            style: None,
+        };
+        for i in 0..10_000usize {
+            deep_list_link = Block::List {
+                id: format!("deep_l_{}", i),
+                ordered: false,
+                items: vec![vec![deep_list_link]],
+            };
+        }
+
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "sec_1".to_string(),
+            title: "Section 1".to_string(),
+            blocks: vec![
+                deep_list_link,
+                Block::Paragraph {
+                    id: "p2_block".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Target in p2".to_string(),
+                        style: None,
+                        anchor_id: Some("anc_p2".to_string()),
+                        href: Some("#anc_p2".to_string()),
+                        ruby: None,
+                    }],
+                    style: Some("page_break_before".to_string()),
+                },
+            ],
+        });
+        book.sections.push(Section {
+            id: "sec_2".to_string(),
+            title: "Section 2".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "first_s2".to_string(),
+                    spans: vec![TextSpan {
+                        text: "S2 part 1".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: Some("sec_1#anc_p2".to_string()),
+                        ruby: None,
+                    }],
+                    style: None,
+                },
+                Block::Paragraph {
+                    id: "b_id".to_string(),
+                    spans: vec![TextSpan {
+                        text: "S2 part 2".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: Some("sec_1".to_string()),
+                        ruby: None,
+                    }],
+                    style: Some("page_break_before".to_string()),
+                },
+            ],
+        });
+
+        book.normalize();
+        assert_eq!(book.sections.len(), 4);
+        assert_eq!(book.sections[0].id, "sec_1_p1");
+        assert_eq!(book.sections[1].id, "sec_1_p2");
+        assert_eq!(book.sections[2].id, "sec_2_p1");
+        assert_eq!(book.sections[3].id, "sec_2_p2");
+
+        // Walk iteratively down the 10,000-level nested list in sec_1_p1
+        let mut cur = &book.sections[0].blocks[0];
+        while let Block::List { items, .. } = cur {
+            cur = &items[0][0];
+        }
+        let Block::Paragraph { spans, .. } = cur else {
+            panic!("Expected leaf paragraph");
+        };
+        assert_eq!(spans[0].href.as_deref(), Some("sec_1_p2#anc_p2"));
+        assert_eq!(spans[1].href.as_deref(), Some("sec_2_p2#b_id"));
+        assert_eq!(spans[2].href.as_deref(), Some("sec_2_p1"));
+        assert_eq!(
+            spans[3].href.as_deref(),
+            Some("https://Example.com/path?a=1#frag")
+        );
+
+        // Same-part anchor stays #anc_p2 in sec_1_p2
+        let Block::Paragraph {
+            spans: s1_p2_spans, ..
+        } = &book.sections[1].blocks[0]
+        else {
+            panic!("Expected p2 block");
+        };
+        assert_eq!(s1_p2_spans[0].href.as_deref(), Some("#anc_p2"));
+
+        // Cross-section links in sec_2_p1 / sec_2_p2
+        let Block::Paragraph {
+            spans: s2_p1_spans, ..
+        } = &book.sections[2].blocks[0]
+        else {
+            panic!("Expected s2_p1 block");
+        };
+        assert_eq!(s2_p1_spans[0].href.as_deref(), Some("sec_1_p2#anc_p2"));
+
+        let Block::Paragraph {
+            spans: s2_p2_spans, ..
+        } = &book.sections[3].blocks[0]
+        else {
+            panic!("Expected s2_p2 block");
+        };
+        assert_eq!(s2_p2_spans[0].href.as_deref(), Some("sec_1_p1"));
+
+        // Idempotency: second normalize() preserves all remapped hrefs identically
+        book.normalize();
+        assert_eq!(book.sections.len(), 4);
+        let mut cur2 = &book.sections[0].blocks[0];
+        while let Block::List { items, .. } = cur2 {
+            cur2 = &items[0][0];
+        }
+        let Block::Paragraph { spans: spans2, .. } = cur2 else {
+            panic!("Expected leaf paragraph");
+        };
+        assert_eq!(spans2[0].href.as_deref(), Some("sec_1_p2#anc_p2"));
+        assert_eq!(spans2[1].href.as_deref(), Some("sec_2_p2#b_id"));
+        assert_eq!(spans2[2].href.as_deref(), Some("sec_2_p1"));
     }
 }

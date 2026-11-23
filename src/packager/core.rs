@@ -248,15 +248,16 @@ impl<'a> KfxPackager<'a> {
                 157 => 9,  // style
                 391 => 10, // nav_container
                 393 => 11, // nav_unit
-                264 => 12, // position_map
-                265 => 13, // position_id_map
-                550 => 14, // location_map
-                609 => 15, // section_position_id_map
-                597 => 16, // auxiliary_data
-                164 => 17, // external_resource
-                417 => 18, // bcRawMedia
-                419 => 19, // container_entity_map
-                621 => 20, // location_pid_map
+                266 => 12, // anchor
+                264 => 13, // position_map
+                265 => 14, // position_id_map
+                550 => 15, // location_map
+                609 => 16, // section_position_id_map
+                597 => 17, // auxiliary_data
+                164 => 18, // external_resource
+                417 => 19, // bcRawMedia
+                419 => 20, // container_entity_map
+                621 => 21, // location_pid_map
                 _ => 100,
             }
         }

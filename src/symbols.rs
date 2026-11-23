@@ -862,6 +862,7 @@ pub const SYM_STYLE: u32 = 157;
 pub const SYM_METADATA: u32 = 258;
 pub const SYM_STORYLINE: u32 = 259;
 pub const SYM_SECTION: u32 = 260;
+pub const SYM_ANCHOR: u32 = 266;
 pub const SYM_CONTAINER_ENTITY_MAP: u32 = 419;
 pub const SYM_BOOK_METADATA: u32 = 490;
 pub const SYM_DOCUMENT_DATA: u32 = 538;

@@ -114,6 +114,7 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
             let drop_text = format!("{}{}", leading_ws, drop_chars);
             let rest_text = orig_text[rest_start_byte..].to_string();
             let orig_style = spans[first_idx].style.take();
+            let orig_href = spans[first_idx].href.clone();
             let drop_tag = match (is_two_char, p_l2) {
                 (true, true) => "dropcap_l2 dropcap_2",
                 (false, true) => "dropcap_l2 dropcap",
@@ -133,7 +134,7 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
                         text: rest_text,
                         style: orig_style,
                         anchor_id: None,
-                        href: None,
+                        href: orig_href,
                         ruby: None,
                     },
                 );

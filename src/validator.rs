@@ -7,6 +7,7 @@
 
 use crate::container::KfxEntity;
 use crate::ion::{IonReader, IonValue};
+use crate::ir::is_allowlisted_external_uri;
 use crate::packager::{FIRST_LOCAL_SYMBOL_ID, LocalSymbols, SINGLETON_ID};
 use crate::symbols::symbol_name;
 use std::collections::{HashMap, HashSet};
@@ -333,6 +334,9 @@ impl<'a> KfxPreflightValidator<'a> {
         let mut ref_count = 0;
 
         for (ent, root_values) in &decoded_entities {
+            if ent.chunk_type == 266 {
+                Self::validate_anchor_entity(ent, &root_values[0], &defined_eids, &internal_eids)?;
+            }
             for val in root_values {
                 self.walk_value(
                     val,
@@ -388,6 +392,272 @@ impl<'a> KfxPreflightValidator<'a> {
             }
         }
         Ok(report)
+    }
+
+    /// Validates a `$266 anchor` entity payload (`$180 anchor_name` matching `ent.entity_id`,
+    /// and mutually exclusive `$183 position` or allowlisted `$186 uri`).
+    fn validate_anchor_entity(
+        ent: &KfxEntity,
+        root_val: &IonValue,
+        defined_eids: &HashSet<u32>,
+        internal_eids: &HashSet<i64>,
+    ) -> Result<(), ValidationError> {
+        let root_struct = match root_val {
+            IonValue::Struct(fields) => Some(fields),
+            IonValue::Annotated(_, inner) => match inner.as_ref() {
+                IonValue::Struct(fields) => Some(fields),
+                _ => None,
+            },
+            _ => None,
+        };
+        let fields = root_struct.ok_or_else(|| ValidationError::IllegalField {
+            chunk_type: 266,
+            eid: ent.entity_id,
+            field_id: 0,
+            field_name: "anchor".to_string(),
+            reason: "Anchor entity ($266) must be an Ion struct".to_string(),
+        })?;
+
+        match fields.iter().find(|(k, _)| *k == 180).map(|(_, v)| v) {
+            Some(IonValue::Symbol(sym)) if *sym == ent.entity_id => {}
+            other => {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: 266,
+                    eid: ent.entity_id,
+                    field_id: 180,
+                    field_name: "anchor_name".to_string(),
+                    reason: format!(
+                        "Anchor entity ($266) 'anchor_name' ($180) must equal Symbol({}), found {:?}",
+                        ent.entity_id, other
+                    ),
+                });
+            }
+        }
+
+        let pos_count = fields.iter().filter(|(k, _)| *k == 183).count();
+        let uri_count = fields.iter().filter(|(k, _)| *k == 186).count();
+        if pos_count + uri_count != 1 {
+            return Err(ValidationError::IllegalField {
+                chunk_type: 266,
+                eid: ent.entity_id,
+                field_id: if uri_count > 0 { 186 } else { 183 },
+                field_name: if uri_count > 0 {
+                    "uri".to_string()
+                } else {
+                    "position".to_string()
+                },
+                reason: format!(
+                    "Anchor entity ($266) must contain exactly one of position ($183) or uri ($186), found {} position and {} uri",
+                    pos_count, uri_count
+                ),
+            });
+        }
+
+        if let Some((_, pos_val)) = fields.iter().find(|(k, _)| *k == 183) {
+            let IonValue::Struct(pos_fields) = pos_val else {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: 266,
+                    eid: ent.entity_id,
+                    field_id: 183,
+                    field_name: "position".to_string(),
+                    reason: "Anchor position ($183) must be a Struct".to_string(),
+                });
+            };
+            let target_eid = match pos_fields.iter().find(|(k, _)| *k == 155).map(|(_, v)| v) {
+                Some(IonValue::Int(v)) if *v >= i64::from(FIRST_LOCAL_SYMBOL_ID) => *v,
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: 266,
+                        eid: ent.entity_id,
+                        field_id: 183,
+                        field_name: "position".to_string(),
+                        reason: format!(
+                            "Anchor position ($183) requires Int 'id' ($155 >= {}), found {:?}",
+                            FIRST_LOCAL_SYMBOL_ID, other
+                        ),
+                    });
+                }
+            };
+            let in_defined = u32::try_from(target_eid)
+                .ok()
+                .is_some_and(|e| defined_eids.contains(&e));
+            if !internal_eids.contains(&target_eid) && !in_defined {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: 266,
+                    eid: ent.entity_id,
+                    field_id: 183,
+                    field_name: "position".to_string(),
+                    reason: format!("Dangling anchor position ($183) target EID {}", target_eid),
+                });
+            }
+            if let Some((_, off_val)) = pos_fields.iter().find(|(k, _)| *k == 143) {
+                match off_val {
+                    IonValue::Int(off) if *off >= 0 => {}
+                    other => {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: 266,
+                            eid: ent.entity_id,
+                            field_id: 143,
+                            field_name: "offset".to_string(),
+                            reason: format!(
+                                "Anchor position offset ($143) must be non-negative Int, found {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+            }
+        } else if let Some((_, uri_val)) = fields.iter().find(|(k, _)| *k == 186) {
+            match uri_val {
+                IonValue::String(u) if is_allowlisted_external_uri(u) => {}
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: 266,
+                        eid: ent.entity_id,
+                        field_id: 186,
+                        field_name: "uri".to_string(),
+                        reason: format!(
+                            "Anchor uri ($186) must be a valid http://, https://, or mailto: URI, found {:?}",
+                            other
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates `$142 style_events` entries containing `$179 link_to` (`offset >= 0`, `length > 0`).
+    fn validate_link_style_events(
+        referrer: &KfxEntity,
+        events: &[IonValue],
+    ) -> Result<(), ValidationError> {
+        for ev in events {
+            if let IonValue::Struct(ev_fields) = ev
+                && ev_fields.iter().any(|(k, _)| *k == 179)
+            {
+                match ev_fields.iter().find(|(k, _)| *k == 143).map(|(_, v)| v) {
+                    Some(IonValue::Int(off)) if *off >= 0 => {}
+                    other => {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: referrer.chunk_type,
+                            eid: referrer.entity_id,
+                            field_id: 143,
+                            field_name: "offset".to_string(),
+                            reason: format!(
+                                "Link style_event ($142) requires non-negative Int 'offset' ($143), found {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+                match ev_fields.iter().find(|(k, _)| *k == 144).map(|(_, v)| v) {
+                    Some(IonValue::Int(len)) if *len > 0 => {}
+                    other => {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: referrer.chunk_type,
+                            eid: referrer.entity_id,
+                            field_id: 144,
+                            field_name: "length".to_string(),
+                            reason: format!(
+                                "Link style_event ($142) requires positive Int 'length' ($144 > 0), found {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates `$617 yj.note` entries inside `$597 auxiliary_data`.
+    fn validate_yj_note_list(referrer: &KfxEntity, fval: &IonValue) -> Result<(), ValidationError> {
+        let IonValue::List(notes) = fval else {
+            return Err(ValidationError::IllegalField {
+                chunk_type: referrer.chunk_type,
+                eid: referrer.entity_id,
+                field_id: 617,
+                field_name: "yj.note".to_string(),
+                reason: "Field 'yj.note' ($617) in auxiliary_data ($597) must be a List"
+                    .to_string(),
+            });
+        };
+        for note in notes {
+            let IonValue::Struct(n_fields) = note else {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: referrer.chunk_type,
+                    eid: referrer.entity_id,
+                    field_id: 617,
+                    field_name: "yj.note".to_string(),
+                    reason: "Each yj.note ($617) entry must be a Struct".to_string(),
+                });
+            };
+            match n_fields.iter().find(|(k, _)| *k == 492).map(|(_, v)| v) {
+                Some(IonValue::String(k)) if !k.trim().is_empty() => {}
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: referrer.chunk_type,
+                        eid: referrer.entity_id,
+                        field_id: 492,
+                        field_name: "key".to_string(),
+                        reason: format!(
+                            "yj.note ($617) requires non-empty String 'key' ($492), found {:?}",
+                            other
+                        ),
+                    });
+                }
+            }
+            match n_fields.iter().find(|(k, _)| *k == 159).map(|(_, v)| v) {
+                Some(IonValue::Symbol(281)) => {}
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: referrer.chunk_type,
+                        eid: referrer.entity_id,
+                        field_id: 159,
+                        field_name: "type".to_string(),
+                        reason: format!(
+                            "yj.note ($617) requires 'type' ($159) == Symbol(281 /* footnote */), found {:?}",
+                            other
+                        ),
+                    });
+                }
+            }
+            let popup_enabled = match n_fields.iter().find(|(k, _)| *k == 440).map(|(_, v)| v) {
+                Some(IonValue::Bool(b)) => *b,
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: referrer.chunk_type,
+                        eid: referrer.entity_id,
+                        field_id: 440,
+                        field_name: "popup".to_string(),
+                        reason: format!(
+                            "yj.note ($617) requires Bool 'popup' ($440), found {:?}",
+                            other
+                        ),
+                    });
+                }
+            };
+            if popup_enabled {
+                match n_fields.iter().find(|(k, _)| *k == 444).map(|(_, v)| v) {
+                    Some(IonValue::String(txt)) if !txt.trim().is_empty() => {}
+                    other => {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: referrer.chunk_type,
+                            eid: referrer.entity_id,
+                            field_id: 444,
+                            field_name: "popup_text".to_string(),
+                            reason: format!(
+                                "yj.note ($617) with popup=true requires non-empty String 'popup_text' ($444), found {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -906,6 +1176,48 @@ impl<'a> KfxPreflightValidator<'a> {
                                     }
                                 }
                             }
+                        }
+
+                        // $179 = link_to -> symbol referencing $266 (anchor)
+                        179 => match fval {
+                            IonValue::Symbol(target_sym) => {
+                                if *target_sym == 0 || !entity_map.contains_key(&(266, *target_sym))
+                                {
+                                    return Err(ValidationError::MissingFragment {
+                                        referrer_chunk: referrer.chunk_type,
+                                        referrer_eid: referrer.entity_id,
+                                        field_id: 179,
+                                        field_name: "link_to".to_string(),
+                                        target_sym: *target_sym,
+                                        target_name: self.resolve_symbol_name(*target_sym),
+                                        expected_chunk: 266,
+                                    });
+                                }
+                            }
+                            other => {
+                                return Err(ValidationError::IllegalField {
+                                    chunk_type: referrer.chunk_type,
+                                    eid: referrer.entity_id,
+                                    field_id: 179,
+                                    field_name: "link_to".to_string(),
+                                    reason: format!(
+                                        "Field 'link_to' ($179) must be a Symbol referencing an anchor ($266), found {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        },
+
+                        // $142 = style_events -> verify link event offsets and positive lengths
+                        142 => {
+                            if let IonValue::List(events) = fval {
+                                Self::validate_link_style_events(referrer, events)?;
+                            }
+                        }
+
+                        // $617 = yj.note in auxiliary_data ($597)
+                        617 if referrer.chunk_type == 597 => {
+                            Self::validate_yj_note_list(referrer, fval)?;
                         }
 
                         _ => {}
@@ -1635,6 +1947,613 @@ mod tests {
         assert!(matches!(
             KfxPreflightValidator::new(&nav_pos_bad, Some(&symbols)).validate(),
             Err(ValidationError::IllegalField { field_id: 246, .. })
+        ));
+    }
+
+    #[test]
+    fn test_validator_rejects_dangling_links_bad_anchors_and_malformed_yj_notes() {
+        fn encode(val: &IonValue) -> Vec<u8> {
+            let mut w = IonWriter::new();
+            w.write_bvm();
+            w.write_value(val);
+            w.into_bytes()
+        }
+
+        let mut symbols = LocalSymbols::new();
+        let sec_sym = symbols.intern("c_sec_1");
+        let story_sym = symbols.intern("c_sec_1-story");
+        let style_sym = symbols.intern("style_link");
+        let anchor_sym = symbols.intern("a_1");
+        let ad_sym = symbols.intern("c_sec_1-ad");
+
+        let valid_style = KfxEntity {
+            entity_id: style_sym,
+            chunk_type: 157,
+            data: encode(&IonValue::Struct(vec![(173, IonValue::Symbol(style_sym))])),
+        };
+        let valid_sec = KfxEntity {
+            entity_id: sec_sym,
+            chunk_type: 260,
+            data: encode(&IonValue::Struct(vec![
+                (174, IonValue::Symbol(sec_sym)),
+                (155, IonValue::Int(900)),
+            ])),
+        };
+        let valid_anchor = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![
+                (180, IonValue::Symbol(anchor_sym)),
+                (
+                    183,
+                    IonValue::Struct(vec![(155, IonValue::Int(900)), (143, IonValue::Int(0))]),
+                ),
+            ])),
+        };
+        let valid_story = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: 259,
+            data: encode(&IonValue::Struct(vec![
+                (176, IonValue::Symbol(story_sym)),
+                (
+                    146,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (155, IonValue::Int(901)),
+                        (
+                            142,
+                            IonValue::List(vec![IonValue::Struct(vec![
+                                (143, IonValue::Int(0)),
+                                (144, IonValue::Int(4)),
+                                (157, IonValue::Symbol(style_sym)),
+                                (179, IonValue::Symbol(anchor_sym)),
+                            ])]),
+                        ),
+                    ])]),
+                ),
+            ])),
+        };
+
+        // 1. Dangling $179 link_to (missing $266 anchor)
+        let missing_anchor_story = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: 259,
+            data: encode(&IonValue::Struct(vec![(
+                142,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (143, IonValue::Int(0)),
+                    (144, IonValue::Int(3)),
+                    (179, IonValue::Symbol(anchor_sym)),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[missing_anchor_story], Some(&symbols)).validate(),
+            Err(ValidationError::MissingFragment {
+                field_id: 179,
+                expected_chunk: 266,
+                ..
+            })
+        ));
+
+        // 2. Non-Symbol $179 link_to
+        let bad_179_type = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: 259,
+            data: encode(&IonValue::Struct(vec![(
+                179,
+                IonValue::String("not_a_sym".to_string()),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[bad_179_type], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField { field_id: 179, .. })
+        ));
+
+        // 3. Zero-length and negative-offset $142 link style_events
+        let zero_len_ev = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: 259,
+            data: encode(&IonValue::Struct(vec![(
+                142,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (143, IonValue::Int(0)),
+                    (144, IonValue::Int(0)),
+                    (157, IonValue::Symbol(style_sym)),
+                    (179, IonValue::Symbol(anchor_sym)),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[
+                    valid_style.clone(),
+                    valid_sec.clone(),
+                    valid_anchor.clone(),
+                    zero_len_ev
+                ],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField { field_id: 144, .. })
+        ));
+
+        let neg_off_ev = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: 259,
+            data: encode(&IonValue::Struct(vec![(
+                142,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (143, IonValue::Int(-1)),
+                    (144, IonValue::Int(2)),
+                    (157, IonValue::Symbol(style_sym)),
+                    (179, IonValue::Symbol(anchor_sym)),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[
+                    valid_style.clone(),
+                    valid_sec.clone(),
+                    valid_anchor.clone(),
+                    neg_off_ev
+                ],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField { field_id: 143, .. })
+        ));
+
+        // 4. $266 missing or mismatched $180 anchor_name
+        let mismatched_180 = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![
+                (180, IonValue::Symbol(sec_sym)),
+                (186, IonValue::String("https://example.com".to_string())),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[mismatched_180], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 266,
+                field_id: 180,
+                ..
+            })
+        ));
+
+        // 5. $266 with both or neither $183 / $186
+        let both_183_186 = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![
+                (180, IonValue::Symbol(anchor_sym)),
+                (183, IonValue::Struct(vec![(155, IonValue::Int(900))])),
+                (186, IonValue::String("https://example.com".to_string())),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[valid_sec.clone(), both_183_186], Some(&symbols))
+                .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 266,
+                ..
+            })
+        ));
+
+        let neither_183_186 = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![(180, IonValue::Symbol(anchor_sym))])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[neither_183_186], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 266,
+                ..
+            })
+        ));
+
+        // 6. $266 $183 pointing to nonexistent $155 or negative $143
+        let bad_target_155 = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![
+                (180, IonValue::Symbol(anchor_sym)),
+                (
+                    183,
+                    IonValue::Struct(vec![(155, IonValue::Int(99999)), (143, IonValue::Int(0))]),
+                ),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[valid_sec.clone(), bad_target_155], Some(&symbols))
+                .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 266,
+                field_id: 183,
+                ..
+            })
+        ));
+
+        let bad_neg_offset = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![
+                (180, IonValue::Symbol(anchor_sym)),
+                (
+                    183,
+                    IonValue::Struct(vec![(155, IonValue::Int(900)), (143, IonValue::Int(-5))]),
+                ),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[valid_sec.clone(), bad_neg_offset], Some(&symbols))
+                .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 266,
+                field_id: 143,
+                ..
+            })
+        ));
+
+        // 7. $266 $186 with blocked schemes / control chars
+        for bad_uri in [
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "file:///etc/passwd",
+            "https://\nevil.com",
+            "http://",
+            "mailto:",
+            "",
+        ] {
+            let bad_uri_ent = KfxEntity {
+                entity_id: anchor_sym,
+                chunk_type: 266,
+                data: encode(&IonValue::Struct(vec![
+                    (180, IonValue::Symbol(anchor_sym)),
+                    (186, IonValue::String(bad_uri.to_string())),
+                ])),
+            };
+            assert!(
+                matches!(
+                    KfxPreflightValidator::new(&[bad_uri_ent], Some(&symbols)).validate(),
+                    Err(ValidationError::IllegalField {
+                        chunk_type: 266,
+                        field_id: 186,
+                        ..
+                    })
+                ),
+                "URI {:?} must be rejected in $266",
+                bad_uri
+            );
+        }
+
+        // 8. $266 missing from $419 $181 contains
+        let cem_missing_anchor = KfxEntity {
+            entity_id: SINGLETON_ID,
+            chunk_type: 419,
+            data: encode(&IonValue::Struct(vec![(
+                181,
+                IonValue::List(vec![
+                    IonValue::Symbol(style_sym),
+                    IonValue::Symbol(sec_sym),
+                    IonValue::Symbol(story_sym),
+                ]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[valid_style, valid_sec, valid_anchor, valid_story, cem_missing_anchor],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::MissingFromContains {
+                chunk_type: 266,
+                eid,
+                ..
+            }) if eid == anchor_sym
+        ));
+
+        // 9. Malformed $617 yj.note in $597 auxiliary_data
+        let bad_note_empty_popup = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![(
+                617,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (492, IonValue::String("fn1".to_string())),
+                    (159, IonValue::Symbol(281)),
+                    (440, IonValue::Bool(true)),
+                    (444, IonValue::String("   ".to_string())),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[bad_note_empty_popup], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 597,
+                field_id: 444,
+                ..
+            })
+        ));
+
+        let bad_note_wrong_type = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![(
+                617,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (492, IonValue::String("fn1".to_string())),
+                    (159, IonValue::Symbol(280)), // sidebar instead of footnote (281)
+                    (440, IonValue::Bool(false)),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[bad_note_wrong_type], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 597,
+                field_id: 159,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_validator_anchor_missing_180_malformed_yj_note_variants_and_valid_control() {
+        fn encode(val: &IonValue) -> Vec<u8> {
+            let mut w = IonWriter::new();
+            w.write_bvm();
+            w.write_value(val);
+            w.into_bytes()
+        }
+
+        let mut symbols = LocalSymbols::new();
+        let sec_sym = symbols.intern("c_sec_1");
+        let story_sym = symbols.intern("c_sec_1-story");
+        let style_sym = symbols.intern("style_link");
+        let anchor_sym = symbols.intern("a_1");
+        let ad_sym = symbols.intern("c_sec_1-ad");
+        let note_sym = symbols.intern("note_1");
+
+        let valid_style = KfxEntity {
+            entity_id: style_sym,
+            chunk_type: 157,
+            data: encode(&IonValue::Struct(vec![
+                (173, IonValue::Symbol(style_sym)),
+                (23, IonValue::Bool(true)),
+            ])),
+        };
+        let valid_sec = KfxEntity {
+            entity_id: sec_sym,
+            chunk_type: 260,
+            data: encode(&IonValue::Struct(vec![
+                (174, IonValue::Symbol(sec_sym)),
+                (155, IonValue::Int(900)),
+            ])),
+        };
+        let valid_anchor = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![
+                (180, IonValue::Symbol(anchor_sym)),
+                (
+                    183,
+                    IonValue::Struct(vec![(155, IonValue::Int(900)), (143, IonValue::Int(0))]),
+                ),
+            ])),
+        };
+        let valid_story = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: 259,
+            data: encode(&IonValue::Struct(vec![
+                (176, IonValue::Symbol(story_sym)),
+                (
+                    146,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (155, IonValue::Int(901)),
+                        (
+                            142,
+                            IonValue::List(vec![IonValue::Struct(vec![
+                                (143, IonValue::Int(0)),
+                                (144, IonValue::Int(4)),
+                                (157, IonValue::Symbol(style_sym)),
+                                (179, IonValue::Symbol(anchor_sym)),
+                            ])]),
+                        ),
+                    ])]),
+                ),
+            ])),
+        };
+        let valid_ad = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![
+                (598, IonValue::Symbol(ad_sym)),
+                (
+                    617,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (155, IonValue::Symbol(note_sym)),
+                        (492, IonValue::String("fn1".to_string())),
+                        (159, IonValue::Symbol(281)),
+                        (440, IonValue::Bool(true)),
+                        (444, IonValue::String("Footnote text.".to_string())),
+                    ])]),
+                ),
+            ])),
+        };
+        let valid_cem = KfxEntity {
+            entity_id: SINGLETON_ID,
+            chunk_type: 419,
+            data: encode(&IonValue::Struct(vec![(
+                181,
+                IonValue::List(vec![
+                    IonValue::Symbol(style_sym),
+                    IonValue::Symbol(sec_sym),
+                    IonValue::Symbol(anchor_sym),
+                    IonValue::Symbol(story_sym),
+                    IonValue::Symbol(ad_sym),
+                ]),
+            )])),
+        };
+
+        // Positive control: complete valid anchor + link + yj.note + $419 graph passes validate()
+        KfxPreflightValidator::new(
+            &[
+                valid_style.clone(),
+                valid_sec.clone(),
+                valid_anchor,
+                valid_story,
+                valid_ad,
+                valid_cem,
+            ],
+            Some(&symbols),
+        )
+        .validate()
+        .expect("Valid link, anchor, and yj.note entities must pass validate()");
+
+        // Missing $180 anchor_name in $266
+        let missing_180 = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![(
+                186,
+                IonValue::String("https://example.com".to_string()),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[missing_180], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 266,
+                field_id: 180,
+                ..
+            })
+        ));
+
+        // Negative $144 length in $142 link style_event
+        let neg_len_ev = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: 259,
+            data: encode(&IonValue::Struct(vec![(
+                142,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (143, IonValue::Int(0)),
+                    (144, IonValue::Int(-2)),
+                    (157, IonValue::Symbol(style_sym)),
+                    (179, IonValue::Symbol(anchor_sym)),
+                ])]),
+            )])),
+        };
+        let valid_anchor_for_story = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: 266,
+            data: encode(&IonValue::Struct(vec![
+                (180, IonValue::Symbol(anchor_sym)),
+                (186, IonValue::String("https://example.com".to_string())),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[valid_style, valid_anchor_for_story, neg_len_ev],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField { field_id: 144, .. })
+        ));
+
+        // Malformed $617 yj.note variants
+        let note_non_list = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![(617, IonValue::Int(1))])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[note_non_list], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 597,
+                field_id: 617,
+                ..
+            })
+        ));
+
+        let note_entry_non_struct = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![(
+                617,
+                IonValue::List(vec![IonValue::String("bad".to_string())]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[note_entry_non_struct], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 597,
+                field_id: 617,
+                ..
+            })
+        ));
+
+        let note_empty_key = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![(
+                617,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (492, IonValue::String("  ".to_string())),
+                    (159, IonValue::Symbol(281)),
+                    (440, IonValue::Bool(false)),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[note_empty_key], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 597,
+                field_id: 492,
+                ..
+            })
+        ));
+
+        let note_missing_popup_flag = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![(
+                617,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (492, IonValue::String("fn1".to_string())),
+                    (159, IonValue::Symbol(281)),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[note_missing_popup_flag], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 597,
+                field_id: 440,
+                ..
+            })
+        ));
+
+        let note_missing_popup_text = KfxEntity {
+            entity_id: ad_sym,
+            chunk_type: 597,
+            data: encode(&IonValue::Struct(vec![(
+                617,
+                IonValue::List(vec![IonValue::Struct(vec![
+                    (492, IonValue::String("fn1".to_string())),
+                    (159, IonValue::Symbol(281)),
+                    (440, IonValue::Bool(true)),
+                ])]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[note_missing_popup_text], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: 597,
+                field_id: 444,
+                ..
+            })
         ));
     }
 }

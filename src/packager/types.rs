@@ -9,4 +9,5 @@ pub struct SectionPackData {
     pub sec_eid: u32,
     pub story_sym_id: u32,
     pub block_info: Vec<(u32, usize)>,
+    pub outbound_anchors: Vec<u32>,
 }

@@ -45,6 +45,7 @@ pub struct StyleSymMap {
     pub dropcap_l3_bold: u32,
     pub dropcap_l3_c2_bold: u32,
     pub hanging_indent: u32,
+    pub link: u32,
 }
 
 /// Extracts block-level text styling tokens that must cascade down to child spans
@@ -131,6 +132,7 @@ impl<'a> KfxPackager<'a> {
         let dropcap_l3_bold_sym = symbols.intern("style_dropcap_l3_bold");
         let dropcap_l3_c2_bold_sym = symbols.intern("style_dropcap_l3_c2_bold");
         let hanging_indent_sym = symbols.intern("style_hanging_indent");
+        let link_sym = symbols.intern("style_link");
 
         let sym_font_variant = symbol_id("font_variant").unwrap_or(14);
         let sym_small_caps = symbol_id("small_caps").unwrap_or(369);
@@ -483,6 +485,12 @@ impl<'a> KfxPackager<'a> {
             (sym_text_alignment, IonValue::Symbol(sym_justify)),
         ]);
 
+        // 38. inline hyperlink style (underline without text_color for Light/Dark/Sepia safety)
+        let link_val = IonValue::Struct(vec![
+            (sym_style_name, IonValue::Symbol(link_sym)),
+            (sym_underline, IonValue::Bool(true)),
+        ]);
+
         let style_list = [
             (h1_sym, h1_val),
             (h2_sym, h2_val),
@@ -522,6 +530,7 @@ impl<'a> KfxPackager<'a> {
             (dropcap_l3_bold_sym, dropcap_l3_bold_val),
             (dropcap_l3_c2_bold_sym, dropcap_l3_c2_bold_val),
             (hanging_indent_sym, hanging_indent_val),
+            (link_sym, link_val),
         ];
 
         let map = StyleSymMap {
@@ -563,6 +572,7 @@ impl<'a> KfxPackager<'a> {
             dropcap_l3_bold: dropcap_l3_bold_sym,
             dropcap_l3_c2_bold: dropcap_l3_c2_bold_sym,
             hanging_indent: hanging_indent_sym,
+            link: link_sym,
         };
 
         (map, style_list.to_vec())

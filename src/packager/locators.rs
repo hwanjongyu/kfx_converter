@@ -189,6 +189,7 @@ impl<'a> KfxPackager<'a> {
         let sym_contains = symbol_id("contains").unwrap_or(181);
         let sym_entity_dependencies = symbol_id("entity_dependencies").unwrap_or(253);
         let sym_mandatory_dependencies = symbol_id("mandatory_dependencies").unwrap_or(254);
+        let sym_optional_dependencies = symbol_id("optional_dependencies").unwrap_or(255);
 
         let mut non_singleton_syms: Vec<u32> = self
             .entities
@@ -228,14 +229,14 @@ impl<'a> KfxPackager<'a> {
 
         let mut entity_dependencies = Vec::new();
 
-        // 1. Section -> external_resource dependencies
+        // 1. Section -> external_resource ($254) and outbound anchor ($255) dependencies
         let has_built_storylines = self.entities.iter().any(|e| e.chunk_type == SYM_STORYLINE);
         for (idx, sec_pack) in section_data.iter().enumerate() {
+            let mut img_syms = Vec::new();
             if let Some(sec) = self.sections.get(idx) {
                 let mut res_ids = Vec::new();
                 collect_img_res(&sec.blocks, &mut res_ids);
 
-                let mut img_syms = Vec::new();
                 for r_id in res_ids {
                     let target_id = if has_built_storylines {
                         self.resolve_resource_key(&r_id)
@@ -249,15 +250,26 @@ impl<'a> KfxPackager<'a> {
                         }
                     }
                 }
+            }
 
-                if !img_syms.is_empty() {
-                    let dep_syms: Vec<IonValue> =
-                        img_syms.into_iter().map(IonValue::Symbol).collect();
-                    entity_dependencies.push(IonValue::Struct(vec![
-                        (sym_id, IonValue::Symbol(sec_pack.sec_sym_id)),
-                        (sym_mandatory_dependencies, IonValue::List(dep_syms)),
-                    ]));
-                }
+            let mut dep_fields = Vec::new();
+            if !img_syms.is_empty() {
+                let dep_syms: Vec<IonValue> = img_syms.into_iter().map(IonValue::Symbol).collect();
+                dep_fields.push((sym_mandatory_dependencies, IonValue::List(dep_syms)));
+            }
+            if !sec_pack.outbound_anchors.is_empty() {
+                let opt_syms: Vec<IonValue> = sec_pack
+                    .outbound_anchors
+                    .iter()
+                    .copied()
+                    .map(IonValue::Symbol)
+                    .collect();
+                dep_fields.push((sym_optional_dependencies, IonValue::List(opt_syms)));
+            }
+            if !dep_fields.is_empty() {
+                let mut entry = vec![(sym_id, IonValue::Symbol(sec_pack.sec_sym_id))];
+                entry.extend(dep_fields);
+                entity_dependencies.push(IonValue::Struct(entry));
             }
         }
 
@@ -360,6 +372,7 @@ mod tests {
             sec_eid: 1000,
             story_sym_id: symbols.intern("story_1"),
             block_info: vec![(1001, 1)],
+            outbound_anchors: Vec::new(),
         };
 
         packager.build_container_entity_map(&[sec_pack], &mut symbols);

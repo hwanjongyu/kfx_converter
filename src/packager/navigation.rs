@@ -5,6 +5,28 @@ use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
 use crate::symbols::symbol_id;
 
+/// Strips trailing `_p<digits>` fragmentation suffix added by `BookIR::fragment_large_sections`.
+pub(crate) fn strip_part_suffix(s: &str) -> &str {
+    if let Some((base, digits)) = s.rsplit_once("_p")
+        && !base.is_empty()
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return base;
+    }
+    s
+}
+
+/// Resolution policy controlling fallback semantics for internal target resolution.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TargetResolveMode<'a> {
+    /// Existing TOC / page-list behavior: fall back to section 0 if target section is missing.
+    NavigationFallbackFirstSection,
+    /// Strict hyperlink resolution: when section part is empty (`#anchor`), resolve against
+    /// `source_raw_id` (and its sibling `_p*` parts) before `global_anchor_targets`; never fall back to Cover.
+    HyperlinkStrict { source_raw_id: &'a str },
+}
+
 impl<'a> KfxPackager<'a> {
     fn resolve_nav_target(
         &self,
@@ -12,14 +34,32 @@ impl<'a> KfxPackager<'a> {
         raw_section: &str,
         raw_anchor: Option<&str>,
     ) -> Option<(u32, usize, usize)> {
+        self.resolve_target_internal(
+            section_data,
+            raw_section,
+            raw_anchor,
+            TargetResolveMode::NavigationFallbackFirstSection,
+        )
+    }
+
+    /// Resolves an internal section/anchor target to `(target_eid, target_pid, char_offset)`
+    /// according to `mode`.
+    pub(crate) fn resolve_target_internal(
+        &self,
+        section_data: &[SectionPackData],
+        raw_target: &str,
+        raw_anchor: Option<&str>,
+        mode: TargetResolveMode<'_>,
+    ) -> Option<(u32, usize, usize)> {
         if section_data.is_empty() {
             return None;
         }
 
-        let (sec_part, embedded_anchor) = match raw_section.split_once('#') {
+        let (sec_part_raw, embedded_anchor) = match raw_target.split_once('#') {
             Some((s, a)) => (s, Some(a)),
-            None => (raw_section, None),
+            None => (raw_target, None),
         };
+        let sec_part = sec_part_raw.trim();
         let eff_anchor = raw_anchor.or(embedded_anchor).and_then(|a| {
             let decoded = crate::epub::archive::decode_percent(a.trim().trim_start_matches('#'));
             let trimmed = decoded.trim().to_string();
@@ -29,6 +69,33 @@ impl<'a> KfxPackager<'a> {
                 Some(trimmed)
             }
         });
+
+        if sec_part.is_empty()
+            && let TargetResolveMode::HyperlinkStrict { source_raw_id } = mode
+        {
+            let anchor = eff_anchor.as_ref()?;
+            let norm_source = Self::normalize_ir_path(source_raw_id);
+            if let Some(&target) = self
+                .anchor_targets
+                .get(&(source_raw_id.to_string(), anchor.clone()))
+                .or_else(|| self.anchor_targets.get(&(norm_source, anchor.clone())))
+            {
+                return Some(target);
+            }
+
+            let base_sec = strip_part_suffix(source_raw_id);
+            for sec in section_data {
+                if strip_part_suffix(&sec.raw_id) == base_sec
+                    && let Some(&target) = self
+                        .anchor_targets
+                        .get(&(sec.raw_id.clone(), anchor.clone()))
+                {
+                    return Some(target);
+                }
+            }
+
+            return self.global_anchor_targets.get(anchor).copied();
+        }
 
         let norm_sec = Self::normalize_ir_path(sec_part);
         let sec_file = std::path::Path::new(&norm_sec)
@@ -44,13 +111,11 @@ impl<'a> KfxPackager<'a> {
                     || (!norm_sec.is_empty() && Self::normalize_ir_path(&s.raw_id) == norm_sec)
             })
             .or_else(|| {
-                let prefix_raw = format!("{}_p", sec_part);
-                let prefix_norm = format!("{}_p", norm_sec);
                 section_data.iter().find(|s| {
-                    s.raw_id.starts_with(&prefix_raw)
-                        || s.name.starts_with(&prefix_raw)
+                    strip_part_suffix(&s.raw_id) == sec_part
+                        || strip_part_suffix(&s.name) == sec_part
                         || (!norm_sec.is_empty()
-                            && Self::normalize_ir_path(&s.raw_id).starts_with(&prefix_norm))
+                            && strip_part_suffix(&Self::normalize_ir_path(&s.raw_id)) == norm_sec)
                 })
             })
             .or_else(|| {
@@ -66,6 +131,10 @@ impl<'a> KfxPackager<'a> {
                     })
                 }
             });
+
+        if matches!(mode, TargetResolveMode::HyperlinkStrict { .. }) && matched_sec.is_none() {
+            return None;
+        }
 
         if let Some(ref anchor) = eff_anchor {
             if let Some(sec) = matched_sec
@@ -89,12 +158,10 @@ impl<'a> KfxPackager<'a> {
                 return Some(target);
             }
 
-            let prefix_raw = format!("{}_p", sec_part);
-            let prefix_norm = format!("{}_p", norm_sec);
             for sec in section_data {
-                if (sec.raw_id.starts_with(&prefix_raw)
+                if (strip_part_suffix(&sec.raw_id) == sec_part
                     || (!norm_sec.is_empty()
-                        && Self::normalize_ir_path(&sec.raw_id).starts_with(&prefix_norm)))
+                        && strip_part_suffix(&Self::normalize_ir_path(&sec.raw_id)) == norm_sec))
                     && let Some(&target) = self
                         .anchor_targets
                         .get(&(sec.raw_id.clone(), anchor.clone()))
@@ -103,12 +170,19 @@ impl<'a> KfxPackager<'a> {
                 }
             }
 
-            if let Some(&target) = self.global_anchor_targets.get(anchor) {
+            if matches!(mode, TargetResolveMode::NavigationFallbackFirstSection)
+                && let Some(&target) = self.global_anchor_targets.get(anchor)
+            {
                 return Some(target);
             }
         }
 
-        let fallback_sec = matched_sec.or_else(|| section_data.first())?;
+        let fallback_sec = match mode {
+            TargetResolveMode::HyperlinkStrict { .. } => matched_sec?,
+            TargetResolveMode::NavigationFallbackFirstSection => {
+                matched_sec.or_else(|| section_data.first())?
+            }
+        };
         let sec_start_pid = self
             .section_pid_starts
             .get(&fallback_sec.sec_sym_id)

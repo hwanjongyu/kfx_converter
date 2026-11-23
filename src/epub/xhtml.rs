@@ -6,9 +6,9 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 use crate::css::CssStylesheet;
-use crate::epub::archive::decode_percent;
+use crate::epub::archive::{decode_percent, resolve_zip_path};
 use crate::epub::ruby::RubyState;
-use crate::ir::{Block, TextSpan};
+use crate::ir::{Block, TextSpan, UriKind, classify_uri, sanitize_href_whitespace};
 
 pub use crate::epub::dropcap::finish_paragraph_dropcaps as finish_paragraph_spans;
 pub use crate::epub::dropcap::{finish_paragraph_dropcaps, is_opening_quote};
@@ -404,12 +404,127 @@ fn merge_blockquote_and_center_tokens(
     }
 }
 
+/// Chapter context passed to XHTML parsing so relative links and same-document fragments
+/// resolve accurately against the complete EPUB spine map.
+#[derive(Debug, Clone)]
+pub struct XhtmlLinkContext<'a> {
+    pub current_section_id: &'a str,
+    pub current_chapter_dir: &'a str,
+    pub href_to_section: &'a HashMap<String, String>,
+    pub href_lc_to_section: Option<&'a HashMap<String, String>>,
+}
+
+/// Normalizes an `<a href>` value against the security URI scheme allowlist and optional chapter context.
+pub(crate) fn normalize_span_href(
+    raw_href: &str,
+    link_ctx: Option<&XhtmlLinkContext<'_>>,
+) -> Option<String> {
+    match classify_uri(raw_href)? {
+        UriKind::Blocked => None,
+        UriKind::External(norm) => Some(norm),
+        UriKind::InternalOrRelative => {
+            let cleaned = sanitize_href_whitespace(raw_href);
+            let (raw_path, raw_frag) = match cleaned.split_once('#') {
+                Some((p, f)) => (p, Some(f)),
+                None => (cleaned.as_str(), None),
+            };
+            let frag_opt = raw_frag.and_then(|f| {
+                let decoded = decode_percent(f).trim().to_string();
+                if decoded.is_empty() {
+                    None
+                } else {
+                    Some(decoded)
+                }
+            });
+            let path_no_query = raw_path.split('?').next().unwrap_or(raw_path).trim();
+
+            if path_no_query.is_empty() {
+                return match link_ctx {
+                    None => frag_opt.map(|f| format!("#{}", f)),
+                    Some(ctx) => match frag_opt {
+                        Some(frag) => Some(format!("{}#{}", ctx.current_section_id, frag)),
+                        None if raw_frag.is_some() => Some(ctx.current_section_id.to_string()),
+                        None => None,
+                    },
+                };
+            }
+
+            let decoded_path = decode_percent(path_no_query);
+            let Some(ctx) = link_ctx else {
+                let norm_path = decoded_path
+                    .replace('\\', "/")
+                    .trim()
+                    .trim_start_matches("./")
+                    .to_string();
+                if norm_path.is_empty() {
+                    return frag_opt.map(|f| format!("#{}", f));
+                }
+                return Some(match frag_opt {
+                    Some(frag) => format!("{}#{}", norm_path, frag),
+                    None => norm_path,
+                });
+            };
+
+            let resolved = resolve_zip_path(ctx.current_chapter_dir, &decoded_path);
+            let clean_decoded = decoded_path.replace('\\', "/");
+            let clean_trimmed = clean_decoded
+                .trim()
+                .trim_start_matches("./")
+                .trim_start_matches('/');
+            let file_name = Path::new(clean_trimmed)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+
+            let target_sec = ctx
+                .href_to_section
+                .get(&resolved)
+                .or_else(|| {
+                    ctx.href_lc_to_section
+                        .and_then(|m| m.get(&resolved.to_lowercase()))
+                })
+                .or_else(|| ctx.href_to_section.get(path_no_query))
+                .or_else(|| ctx.href_to_section.get(&decoded_path))
+                .or_else(|| ctx.href_to_section.get(clean_trimmed))
+                .or_else(|| {
+                    ctx.href_lc_to_section
+                        .and_then(|m| m.get(&clean_trimmed.to_lowercase()))
+                })
+                .or_else(|| {
+                    if file_name.is_empty() {
+                        None
+                    } else {
+                        ctx.href_to_section.get(file_name).or_else(|| {
+                            ctx.href_lc_to_section
+                                .and_then(|m| m.get(&file_name.to_lowercase()))
+                        })
+                    }
+                })?;
+
+            Some(match frag_opt {
+                Some(frag) => format!("{}#{}", target_sec, frag),
+                None => target_sec.clone(),
+            })
+        }
+    }
+}
+
 /// Parses XHTML resolving element typography from the book-level stylesheet
 /// (`book_css`, built from manifest `.css` files) plus the chapter's inline `<style>` blocks.
 pub fn parse_xhtml_with_css(
     xhtml: &str,
     href_to_id: &HashMap<String, String>,
     book_css: &CssStylesheet,
+) -> (Vec<Block>, HashMap<String, String>) {
+    parse_xhtml_with_css_and_context(xhtml, href_to_id, book_css, None)
+}
+
+/// Parses XHTML with book CSS and optional chapter link context for resolving relative hrefs.
+pub fn parse_xhtml_with_css_and_context(
+    xhtml: &str,
+    href_to_id: &HashMap<String, String>,
+    book_css: &CssStylesheet,
+    link_ctx: Option<&XhtmlLinkContext<'_>>,
 ) -> (Vec<Block>, HashMap<String, String>) {
     let inline_css = crate::css::extract_inline_style_blocks(xhtml);
     let chapter_css_owned;
@@ -559,23 +674,25 @@ pub fn parse_xhtml_with_css(
                     ruby: None,
                 });
             } else {
-                let first_pending = pending_anchors.pop_front();
+                while pending_anchors.len() > 1 {
+                    if let Some(pa) = pending_anchors.pop_front() {
+                        spans.push(TextSpan {
+                            text: String::new(),
+                            style: None,
+                            anchor_id: Some(pa),
+                            href: None,
+                            ruby: None,
+                        });
+                    }
+                }
+                let last_pending = pending_anchors.pop_front();
                 spans.push(TextSpan {
                     text: std::mem::take(text),
                     style: attrs.style,
-                    anchor_id: first_pending,
+                    anchor_id: last_pending,
                     href: attrs.href,
                     ruby: None,
                 });
-                while let Some(pa) = pending_anchors.pop_front() {
-                    spans.push(TextSpan {
-                        text: String::new(),
-                        style: None,
-                        anchor_id: Some(pa),
-                        href: None,
-                        ruby: None,
-                    });
-                }
             }
         }
     };
@@ -890,7 +1007,8 @@ pub fn parse_xhtml_with_css(
                                 }
                             }
                         }
-                        if anchor.is_some() || href.is_some() {
+                        if anchor.is_some() {
+                            let norm_href = href.and_then(|h| normalize_span_href(&h, link_ctx));
                             flush_current_span(
                                 &mut current_span_text,
                                 &mut current_spans,
@@ -901,7 +1019,7 @@ pub fn parse_xhtml_with_css(
                                 text: String::new(),
                                 style: None,
                                 anchor_id: anchor,
-                                href,
+                                href: norm_href,
                                 ruby: None,
                             });
                         }
@@ -1449,9 +1567,7 @@ pub fn parse_xhtml_with_css(
                             for attr in e.attributes().flatten() {
                                 if attr.key.as_ref() == b"href" {
                                     let v = crate::epub::unescape_attr_value(&attr);
-                                    if !v.is_empty() {
-                                        href = Some(v);
-                                    }
+                                    href = normalize_span_href(&v, link_ctx);
                                 } else if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name"
                                 {
                                     let v =
@@ -2388,5 +2504,159 @@ mod tests {
         } else {
             panic!("expected paragraph 4");
         }
+    }
+
+    #[test]
+    fn test_link_allowlist_self_closing_pending_anchor_order_and_dropcap_href() {
+        // 1. Allowlisted external URIs vs blocked dangerous schemes + control char stripping
+        assert_eq!(
+            normalize_span_href("  HTTPS://Example.COM/Path?q=a%20b#frag  ", None).as_deref(),
+            Some("https://Example.COM/Path?q=a%20b#frag")
+        );
+        assert_eq!(
+            normalize_span_href("HTTP://example.com/ok", None).as_deref(),
+            Some("http://example.com/ok")
+        );
+        assert_eq!(
+            normalize_span_href("MAILTO:Reader@Example.com?subject=Hi%20All", None).as_deref(),
+            Some("mailto:Reader@Example.com?subject=Hi%20All")
+        );
+        for bad in [
+            "javascript:alert(1)",
+            "java\nscript:alert(1)",
+            "  \tjava\r\nscript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "file:///etc/passwd",
+            "about:blank",
+            "blob:https://example.com/123",
+            "ftp://example.com/file",
+            "//evil.test/steal",
+            "http://",
+            "https://#onlyfrag",
+            "mailto:",
+            "   ",
+        ] {
+            assert_eq!(
+                normalize_span_href(bad, None),
+                None,
+                "Dangerous/empty URI must be rejected: {:?}",
+                bad
+            );
+        }
+
+        // 2. Self-closing <a href="#x"/> emits no span; <a id="x"/> keeps anchor;
+        //    nested <section id="footnotes"><ol><li id="fn1"><p>...</p> puts "fn1" at offset 0;
+        //    has-dropcap preserves href on trailing remainder span.
+        let xhtml = r##"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <p>Before<a href="#empty_only"/> middle <a id="kept_empty" href="#target"/> after</p>
+  <p><a href="javascript:alert(1)"><b>Unsafe text</b></a></p>
+  <p class="has-dropcap"><a id="dc_anc" href="#target">Once upon</a></p>
+  <section id="footnotes">
+    <ol>
+      <li id="fn1"><p>First note text</p></li>
+    </ol>
+  </section>
+</body>
+</html>"##;
+
+        let (blocks, _) = parse_xhtml_with_manifest(xhtml, &HashMap::new());
+        // Paragraph 0: no zero-length span carrying href without anchor
+        if let Block::Paragraph { spans, .. } = &blocks[0] {
+            assert!(
+                !spans
+                    .iter()
+                    .any(|s| s.text.is_empty() && s.anchor_id.is_none()),
+                "Self-closing <a href/> without id must not emit empty span: {:?}",
+                spans
+            );
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| s.anchor_id.as_deref() == Some("kept_empty") && s.text.is_empty())
+            );
+        } else {
+            panic!("Expected paragraph 0");
+        }
+
+        // Paragraph 1: blocked javascript: drops href while keeping inner bold text intact
+        if let Block::Paragraph { spans, .. } = &blocks[1] {
+            assert_eq!(spans[0].text, "Unsafe text");
+            assert_eq!(spans[0].href, None);
+            assert!(spans[0].resolved_styles().format.bold);
+        } else {
+            panic!("Expected paragraph 1");
+        }
+
+        // Paragraph 2: dropcap preserves href on both initial letter and remainder
+        if let Block::Paragraph { spans, .. } = &blocks[2] {
+            assert_eq!(spans.len(), 2);
+            assert_eq!(spans[0].text, "O");
+            assert_eq!(spans[0].anchor_id.as_deref(), Some("dc_anc"));
+            assert_eq!(spans[0].href.as_deref(), Some("#target"));
+            assert_eq!(spans[1].text, "nce upon");
+            assert_eq!(spans[1].anchor_id, None);
+            assert_eq!(spans[1].href.as_deref(), Some("#target"));
+        } else {
+            panic!("Expected paragraph 2");
+        }
+
+        // List block: "footnotes" and "fn1" both emitted at offset 0 BEFORE "First note text"
+        if let Block::List { items, .. } = &blocks[3] {
+            if let Block::Paragraph { spans, .. } = &items[0][0] {
+                let mut offset = 0usize;
+                let mut anc_offsets = Vec::new();
+                for s in spans {
+                    if let Some(ref anc) = s.anchor_id {
+                        anc_offsets.push((anc.as_str(), offset));
+                    }
+                    offset += s.text.chars().count();
+                }
+                assert!(
+                    anc_offsets.contains(&("footnotes", 0)),
+                    "Expected footnotes at offset 0, got {:?}",
+                    anc_offsets
+                );
+                assert!(
+                    anc_offsets.contains(&("fn1", 0)),
+                    "Expected fn1 at offset 0 (not end of span), got {:?}",
+                    anc_offsets
+                );
+            } else {
+                panic!("Expected list item paragraph");
+            }
+        } else {
+            panic!("Expected list block");
+        }
+    }
+
+    #[test]
+    fn test_normalize_span_href_query_stripping_and_standalone_relative() {
+        // Standalone mode (link_ctx == None) preserves decoded relative paths + fragments,
+        // strips internal ?query suffixes, and returns None for bare "#".
+        assert_eq!(
+            normalize_span_href("../Text/ch%202.xhtml?ver=1#sec%201", None).as_deref(),
+            Some("../Text/ch 2.xhtml#sec 1")
+        );
+        assert_eq!(normalize_span_href("#", None), None);
+        assert_eq!(
+            normalize_span_href("#sec%201", None).as_deref(),
+            Some("#sec 1")
+        );
+
+        // Chapter context resolves relative path after stripping ?query and decoding %20
+        let mut href_to_section = HashMap::new();
+        href_to_section.insert("OEBPS/Text/ch 2.xhtml".to_string(), "section_2".to_string());
+        let ctx = XhtmlLinkContext {
+            current_section_id: "section_1",
+            current_chapter_dir: "OEBPS/Part1",
+            href_to_section: &href_to_section,
+            href_lc_to_section: None,
+        };
+        assert_eq!(
+            normalize_span_href("../Text/ch%202.xhtml?cache=bust#sec%201", Some(&ctx)).as_deref(),
+            Some("section_2#sec 1")
+        );
     }
 }

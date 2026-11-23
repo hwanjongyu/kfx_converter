@@ -2241,3 +2241,1332 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
         "$550 location_map must have hit at least one image block EID at 350-PID intervals"
     );
 }
+
+#[test]
+fn test_packager_links_coalescing_dedup_optional_deps_and_broken_graceful() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Links & Anchors Book".to_string();
+
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p_s1".to_string(),
+            spans: vec![
+                TextSpan {
+                    text: "Jump ".to_string(),
+                    style: None,
+                    anchor_id: Some("start1".to_string()),
+                    href: None,
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "click ".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("sec2#target_mid".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "here".to_string(),
+                    style: Some("bold".to_string()),
+                    anchor_id: None,
+                    href: Some("sec2#target_mid".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: " and ".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "ext1".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("https://example.com/a?x=1".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: " broken ".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("missing.xhtml#foo".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "missing_frag ".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("#nonexistent_anchor".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "xss".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("javascript:alert(1)".to_string()),
+                    ruby: None,
+                },
+            ],
+            style: None,
+        }],
+    });
+
+    book.sections.push(Section {
+        id: "sec2".to_string(),
+        title: "Chapter 2".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p_s2".to_string(),
+            spans: vec![
+                TextSpan {
+                    text: "Prefix ".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "AnchorHere".to_string(),
+                    style: None,
+                    anchor_id: Some("target_mid".to_string()),
+                    href: Some("sec1#start1".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: " dup_ext".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: Some("HTTPS://example.com/a?x=1".to_string()),
+                    ruby: None,
+                },
+            ],
+            style: None,
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("packaging with links must succeed");
+
+    // Verify KFX container opens cleanly
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), buffer.into_inner()).unwrap();
+    let container = crate::container::KfxContainer::open(tmp.path()).expect("KfxContainer::open");
+    assert!(!container.chunks.is_empty());
+
+    // Verify style_link (890) is emitted and contains $23 underline: true without $19 text_color
+    let link_style_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STYLE && e.entity_id == 890)
+        .expect("style_link (890) must be emitted");
+    let style_vals = crate::ion::IonReader::new(&link_style_ent.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(sf) = &style_vals[0] else {
+        panic!("Expected style struct");
+    };
+    assert!(
+        sf.iter()
+            .any(|(k, v)| *k == 23 && *v == IonValue::Bool(true))
+    );
+    assert!(
+        !sf.iter().any(|(k, _)| *k == 19),
+        "Must omit text_color ($19)"
+    );
+
+    // Verify exact $266 anchor entities: 3 deduplicated anchors (sec2#target_mid, https://example.com/a?x=1, sec1#start1)
+    let anchors: Vec<_> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_ANCHOR)
+        .collect();
+    assert_eq!(
+        anchors.len(),
+        3,
+        "Shared external URI must deduplicate into 3 total anchors"
+    );
+
+    // Verify contiguous link coalescing across "click " + "here" -> single link_to event of length 10 at offset 5
+    let story1 = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .expect("storyline 1");
+    let story1_vals = crate::ion::IonReader::new(&story1.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(root) = &story1_vals[0] else {
+        panic!("storyline struct");
+    };
+    let (_, IonValue::List(elems)) = root.iter().find(|(k, _)| *k == 146).unwrap() else {
+        panic!("content_list");
+    };
+    let IonValue::Struct(elem0) = &elems[0] else {
+        panic!("elem0");
+    };
+    let (_, IonValue::List(events)) = elem0.iter().find(|(k, _)| *k == 142).unwrap() else {
+        panic!("style_events");
+    };
+    let link_events: Vec<_> = events
+        .iter()
+        .filter_map(|ev| {
+            if let IonValue::Struct(ef) = ev
+                && ef.iter().any(|(k, _)| *k == 179)
+            {
+                let off = ef.iter().find(|(k, _)| *k == 143).map(|(_, v)| v.clone());
+                let len = ef.iter().find(|(k, _)| *k == 144).map(|(_, v)| v.clone());
+                Some((off, len))
+            } else {
+                None
+            }
+        })
+        .collect();
+    // "Jump " (len 5), "click here" (off 5, len 10 coalesced!), " and " (len 5), "ext1" (off 20, len 4)
+    assert_eq!(
+        link_events,
+        vec![
+            (Some(IonValue::Int(5)), Some(IonValue::Int(10))),
+            (Some(IonValue::Int(20)), Some(IonValue::Int(4))),
+        ],
+        "Broken/blocked links must drop and contiguous identical links must coalesce"
+    );
+
+    // Verify $419 entity_dependencies contains $255 optional_dependencies for anchors
+    let cem = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_CONTAINER_ENTITY_MAP)
+        .unwrap();
+    let cem_vals = crate::ion::IonReader::new(&cem.data).decode_all().unwrap();
+    let mut saw_opt_dep = false;
+    if let IonValue::Annotated(_, inner) = &cem_vals[0]
+        && let IonValue::Struct(cf) = inner.as_ref()
+        && let Some((_, IonValue::List(deps))) = cf.iter().find(|(k, _)| *k == 253)
+    {
+        for dep in deps {
+            if let IonValue::Struct(df) = dep
+                && let Some((_, IonValue::List(syms))) = df.iter().find(|(k, _)| *k == 255)
+            {
+                assert!(!syms.is_empty());
+                saw_opt_dep = true;
+            }
+        }
+    }
+    assert!(
+        saw_opt_dep,
+        "$419 must emit $255 optional_dependencies for outbound anchors"
+    );
+
+    // Zero-link book must omit style_link (890), $266 anchors, and $255 optional_dependencies
+    let mut zero_book = BookIR::default();
+    zero_book.metadata.title = "Zero Links".to_string();
+    zero_book.sections.push(Section {
+        id: "z1".to_string(),
+        title: "Ch 1".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "zp1".to_string(),
+            spans: vec![TextSpan {
+                text: "Plain text only".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        }],
+    });
+    let mut zero_pkg = KfxPackager::new(&zero_book, "EBOK");
+    let mut zero_buf = Cursor::new(Vec::new());
+    zero_pkg.package(&mut zero_buf).unwrap();
+    assert!(!zero_pkg.entities.iter().any(|e| e.chunk_type == SYM_ANCHOR));
+    assert!(
+        !zero_pkg
+            .entities
+            .iter()
+            .any(|e| e.chunk_type == SYM_STYLE && e.entity_id == 890)
+    );
+}
+
+#[test]
+fn test_packager_list_links_nonzero_offsets_and_word_wise_pid_parity() {
+    let mut book = BookIR::default();
+    book.metadata.title = "List Links".to_string();
+
+    let list_block = Block::List {
+        id: "list_root".to_string(),
+        ordered: true,
+        items: vec![
+            vec![Block::Paragraph {
+                id: "li1_p".to_string(),
+                spans: vec![TextSpan {
+                    text: "First item".to_string(),
+                    style: None,
+                    anchor_id: Some("item_1".to_string()),
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }],
+            vec![
+                Block::Paragraph {
+                    id: "li2_p".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "Go ".to_string(),
+                            style: None,
+                            anchor_id: Some("item_2".to_string()),
+                            href: None,
+                            ruby: None,
+                        },
+                        TextSpan {
+                            text: "nested".to_string(),
+                            style: Some("italic".to_string()),
+                            anchor_id: None,
+                            href: Some("#item_3".to_string()),
+                            ruby: None,
+                        },
+                    ],
+                    style: None,
+                },
+                Block::List {
+                    id: "nested_ul".to_string(),
+                    ordered: false,
+                    items: vec![vec![Block::Paragraph {
+                        id: "li3_p".to_string(),
+                        spans: vec![TextSpan {
+                            text: "Deep target".to_string(),
+                            style: None,
+                            anchor_id: Some("item_3".to_string()),
+                            href: Some("#item_2".to_string()),
+                            ruby: None,
+                        }],
+                        style: None,
+                    }]],
+                },
+            ],
+        ],
+    };
+
+    let expected_plain = list_block.plain_text();
+    assert_eq!(expected_plain, "First item\nGo nested\nDeep target");
+
+    book.sections.push(Section {
+        id: "sec_list".to_string(),
+        title: "Lists".to_string(),
+        blocks: vec![list_block],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("packaging list links must succeed");
+
+    // Exact non-zero anchor offsets inside Block::List:
+    // "First item" -> 0..10, '\n' -> 10, "Go nested" -> 11..20, '\n' -> 20, "Deep target" -> 21..32
+    assert_eq!(
+        packager
+            .anchor_targets
+            .get(&("sec_list".to_string(), "item_1".to_string()))
+            .map(|t| t.2),
+        Some(0)
+    );
+    assert_eq!(
+        packager
+            .anchor_targets
+            .get(&("sec_list".to_string(), "item_2".to_string()))
+            .map(|t| t.2),
+        Some(11)
+    );
+    assert_eq!(
+        packager
+            .anchor_targets
+            .get(&("sec_list".to_string(), "item_3".to_string()))
+            .map(|t| t.2),
+        Some(21)
+    );
+
+    // Content entity text matches Block::plain_text() 1:1 and Word Wise PID parity
+    let content_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_CONTENT)
+        .unwrap();
+    let content_vals = crate::ion::IonReader::new(&content_ent.data)
+        .decode_all()
+        .unwrap();
+    if let IonValue::Struct(cf) = &content_vals[0]
+        && let Some((_, IonValue::List(segs))) = cf.iter().find(|(k, _)| *k == 146)
+    {
+        assert_eq!(segs[0], IonValue::String(expected_plain.clone()));
+    } else {
+        panic!("Missing content_list in $145");
+    }
+
+    // Verify link offsets in storyline $142 style_events match "nested" (14, len 6) and "Deep target" (21, len 11)
+    let story = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .unwrap();
+    let story_vals = crate::ion::IonReader::new(&story.data)
+        .decode_all()
+        .unwrap();
+    let mut link_ranges = Vec::new();
+    if let IonValue::Struct(rf) = &story_vals[0]
+        && let Some((_, IonValue::List(elems))) = rf.iter().find(|(k, _)| *k == 146)
+        && let IonValue::Struct(ef) = &elems[0]
+        && let Some((_, IonValue::List(evs))) = ef.iter().find(|(k, _)| *k == 142)
+    {
+        for ev in evs {
+            if let IonValue::Struct(f) = ev
+                && f.iter().any(|(k, _)| *k == 179)
+            {
+                let off = f.iter().find(|(k, _)| *k == 143).map(|(_, v)| v.clone());
+                let len = f.iter().find(|(k, _)| *k == 144).map(|(_, v)| v.clone());
+                link_ranges.push((off, len));
+            }
+        }
+    }
+    assert_eq!(
+        link_ranges,
+        vec![
+            (Some(IonValue::Int(14)), Some(IonValue::Int(6))),
+            (Some(IonValue::Int(21)), Some(IonValue::Int(11))),
+        ]
+    );
+}
+
+#[test]
+fn test_packager_emits_epub_footnotes_yj_note_and_orphan_fallback_without_pid_shift() {
+    // 1. Orphan footnote fallback (like test_packager_emits_yj_note_popup_footnotes)
+    //    must synthesize appended "endnotes" AFTER real sections and emit $617 yj.note + $266 anchor.
+    let mut orphan_book = BookIR::default();
+    orphan_book.metadata.title = "Orphan Footnote".to_string();
+    orphan_book
+        .footnotes
+        .insert("fn1".to_string(), "Quantum popup text.".to_string());
+    orphan_book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Ch1".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p1".to_string(),
+            spans: vec![
+                TextSpan {
+                    text: "Claim".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "[1]".to_string(),
+                    style: Some("noteref".to_string()),
+                    anchor_id: Some("fnref1".to_string()),
+                    href: Some("#fn1".to_string()),
+                    ruby: None,
+                },
+            ],
+            style: None,
+        }],
+    });
+    let mut packager = KfxPackager::new(&orphan_book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("orphan footnote packaging");
+    assert_eq!(packager.sections.len(), 2);
+    assert_eq!(packager.sections[0].id, "sec1");
+    assert_eq!(packager.sections[1].id, "endnotes");
+
+    // Check $597 auxiliary_data on sec1 has $617 yj.note
+    let sec1_ad = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_AUXILIARY_DATA)
+        .unwrap();
+    let ad_vals = crate::ion::IonReader::new(&sec1_ad.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(adf) = &ad_vals[0] else {
+        panic!("expected ad struct");
+    };
+    let (_, IonValue::List(notes)) = adf
+        .iter()
+        .find(|(k, _)| *k == SYM_YJ_NOTE)
+        .expect("missing $617 yj.note")
+    else {
+        panic!("expected list for $617");
+    };
+    assert_eq!(notes.len(), 1);
+    let IonValue::Struct(nf) = &notes[0] else {
+        panic!("note struct");
+    };
+    assert_eq!(
+        nf.iter().find(|(k, _)| *k == 492).map(|(_, v)| v),
+        Some(&IonValue::String("fn1".to_string()))
+    );
+    assert_eq!(
+        nf.iter().find(|(k, _)| *k == 159).map(|(_, v)| v),
+        Some(&IonValue::Symbol(SYM_FOOTNOTE))
+    );
+    assert_eq!(
+        nf.iter().find(|(k, _)| *k == SYM_POPUP).map(|(_, v)| v),
+        Some(&IonValue::Bool(true))
+    );
+    assert_eq!(
+        nf.iter()
+            .find(|(k, _)| *k == SYM_POPUP_TEXT)
+            .map(|(_, v)| v),
+        Some(&IonValue::String("Quantum popup text.".to_string()))
+    );
+
+    // 2. Real EPUB with <aside epub:type="footnote" id="fn1"> and <ol class="endnotes"><li id="fn2"> + backlink
+    //    must NOT synthesize any extra "endnotes" section, and must emit $617 ONLY on citing section.
+    let mut zip_buf = Cursor::new(Vec::new());
+    {
+        use std::io::Write;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+        let mut zip = ZipWriter::new(&mut zip_buf);
+        let opts = SimpleFileOptions::default();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+        zip.start_file("content.opf", opts).unwrap();
+        zip.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Notes EPUB</dc:title></metadata><manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#).unwrap();
+        zip.start_file("ch1.xhtml", opts).unwrap();
+        zip.write_all(r##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+  <p>Point A<a id="fnref1" href="#fn1" epub:type="noteref">1</a> and Point B<a id="fnref2" href="#fn2" epub:type="noteref">2</a>.</p>
+  <aside epub:type="footnote" id="fn1"><p>Aside note one. <a href="#fnref1" role="doc-backlink">↩</a></p></aside>
+  <section epub:type="footnotes" id="footnotes">
+    <ol class="endnotes"><li id="fn2"><p>List note two. <a href="#fnref2" class="footnote-back">^</a></p></li></ol>
+  </section>
+</body>
+</html>"##.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), zip_buf.into_inner()).unwrap();
+    let mut epub_ir = crate::epub::EpubReader::read_from_file(tmp.path()).unwrap();
+    epub_ir.normalize();
+
+    let mut epub_pkg = KfxPackager::new(&epub_ir, "EBOK");
+    let mut epub_out = Cursor::new(Vec::new());
+    epub_pkg
+        .package(&mut epub_out)
+        .expect("EPUB footnote packaging");
+    assert_eq!(
+        epub_pkg.sections.len(),
+        1,
+        "Must NOT create synthetic endnotes for real EPUB"
+    );
+
+    let epub_ad = epub_pkg
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_AUXILIARY_DATA)
+        .unwrap();
+    let epub_ad_vals = crate::ion::IonReader::new(&epub_ad.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(ead) = &epub_ad_vals[0] else {
+        panic!("ad struct");
+    };
+    let (_, IonValue::List(epub_notes)) = ead.iter().find(|(k, _)| *k == SYM_YJ_NOTE).unwrap()
+    else {
+        panic!("expected $617 list");
+    };
+    assert_eq!(
+        epub_notes.len(),
+        2,
+        "Expected 2 yj.note popups (noteref 1 & 2, excluding backlinks)"
+    );
+}
+
+#[test]
+fn test_packager_fragmented_links_cover_nonfallback_internal_dedup_and_payloads() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Fragmented Links & Cover Safety".to_string();
+    book.metadata.cover_image_id = Some("cover_img".to_string());
+    book.resources.insert(
+        "cover_img".to_string(),
+        crate::ir::ResourceAsset {
+            id: "cover_img".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            data: crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+        },
+    );
+
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![
+            Block::Paragraph {
+                id: "s1_p1".to_string(),
+                spans: vec![
+                    TextSpan {
+                        text: "Go ".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "".to_string(),
+                        style: None,
+                        anchor_id: Some("kept_zero".to_string()),
+                        href: Some("#p2_target".to_string()),
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "click ".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: Some("#p2_target".to_string()),
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "here".to_string(),
+                        style: Some("bold".to_string()),
+                        anchor_id: None,
+                        href: Some("#p2_target".to_string()),
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: " mail".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: Some("mailto:Reader@Example.com".to_string()),
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: " http".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: Some("HTTP://example.org/p?x=1%202".to_string()),
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: " bad_frag".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: Some("#nonexistent_anchor".to_string()),
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: " bad_chap".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: Some("missing.xhtml#foo".to_string()),
+                        ruby: None,
+                    },
+                ],
+                style: None,
+            },
+            Block::Paragraph {
+                id: "s1_p2".to_string(),
+                spans: vec![
+                    TextSpan {
+                        text: "Prefix ".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "TargetInP2".to_string(),
+                        style: None,
+                        anchor_id: Some("p2_target".to_string()),
+                        href: None,
+                        ruby: None,
+                    },
+                ],
+                style: Some("page_break_before".to_string()),
+            },
+        ],
+    });
+
+    book.sections.push(Section {
+        id: "sec2".to_string(),
+        title: "Chapter 2".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "s2_p1".to_string(),
+            spans: vec![TextSpan {
+                text: "dup_p2".to_string(),
+                style: None,
+                anchor_id: None,
+                href: Some("sec1#p2_target".to_string()),
+                ruby: None,
+            }],
+            style: None,
+        }],
+    });
+
+    book.normalize();
+    assert_eq!(book.sections.len(), 4);
+    assert_eq!(book.sections[0].id, "cover");
+    assert_eq!(book.sections[1].id, "sec1_p1");
+    assert_eq!(book.sections[2].id, "sec1_p2");
+    assert_eq!(book.sections[3].id, "sec2");
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("packaging fragmented links with cover must succeed");
+
+    let raw_kfx = buffer.into_inner();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), &raw_kfx).unwrap();
+    let mut container =
+        crate::container::KfxContainer::open(tmp.path()).expect("KfxContainer::open");
+    assert!(!container.chunks.is_empty());
+
+    // Reconstruct LocalSymbols from ContainerInfo ($415/$416) and validate on-disk entities
+    let ci_start = container.header.info_offset as usize;
+    let ci_end = ci_start + container.header.info_length as usize;
+    let ci_vals = crate::ion::IonReader::new(&raw_kfx[ci_start..ci_end])
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(ci_fields) = &ci_vals[0] else {
+        panic!("ContainerInfo must be Struct");
+    };
+    let doc_sym_off = match ci_fields.iter().find(|(k, _)| *k == 415).unwrap().1 {
+        IonValue::Int(v) => v as usize,
+        _ => panic!("bcDocSymbolOffset"),
+    };
+    let doc_sym_len = match ci_fields.iter().find(|(k, _)| *k == 416).unwrap().1 {
+        IonValue::Int(v) => v as usize,
+        _ => panic!("bcDocSymbolLength"),
+    };
+    let sym_vals = crate::ion::IonReader::new(&raw_kfx[doc_sym_off..doc_sym_off + doc_sym_len])
+        .decode_all()
+        .unwrap();
+    let mut disk_symbols = crate::packager::LocalSymbols::new();
+    let sym_inner = match &sym_vals[0] {
+        IonValue::Annotated(_, inner) => inner.as_ref(),
+        other => other,
+    };
+    if let IonValue::Struct(sf) = sym_inner
+        && let Some((_, IonValue::List(names))) = sf.iter().find(|(k, _)| *k == 7)
+    {
+        for n in names {
+            if let IonValue::String(s) = n {
+                disk_symbols.intern(s);
+            }
+        }
+    }
+    let disk_entities: Vec<KfxEntity> = container
+        .chunks
+        .clone()
+        .into_iter()
+        .map(|c| {
+            let data = container.read_chunk(&c).unwrap();
+            KfxEntity {
+                entity_id: c.entity_id,
+                chunk_type: c.chunk_type,
+                data,
+            }
+        })
+        .collect();
+    crate::validator::KfxPreflightValidator::new(&disk_entities, Some(&disk_symbols))
+        .validate_container()
+        .expect("Packaged on-disk container must pass validate_container()");
+
+    // Cover section & its block EID must NEVER be targeted by broken links
+    let (cover_block_eid, _, _) = *packager
+        .anchor_targets
+        .get(&("cover".to_string(), "cover_img_block".to_string()))
+        .expect("cover block target");
+    let (p2_target_eid, _, p2_target_off) = *packager
+        .anchor_targets
+        .get(&("sec1_p2".to_string(), "p2_target".to_string()))
+        .expect("sec1_p2#p2_target");
+    assert_eq!(p2_target_off, 7);
+
+    // Exactly 3 deduplicated $266 anchors: (p2_target_eid, 7), mailto:, http://
+    let anchor_ents: Vec<_> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_ANCHOR)
+        .collect();
+    assert_eq!(
+        anchor_ents.len(),
+        3,
+        "Internal duplicate (eid, offset) across sec1_p1 and sec2 must share one $266 entity"
+    );
+
+    let mut internal_anchor_sym = None;
+    let mut uris = Vec::new();
+    for ent in anchor_ents {
+        let vals = crate::ion::IonReader::new(&ent.data).decode_all().unwrap();
+        let IonValue::Struct(fields) = &vals[0] else {
+            panic!("$266 must be Struct");
+        };
+        assert_eq!(
+            fields.iter().find(|(k, _)| *k == 180).map(|(_, v)| v),
+            Some(&IonValue::Symbol(ent.entity_id)),
+            "$266 $180 anchor_name must match entity_id"
+        );
+        if let Some((_, IonValue::Struct(pos))) = fields.iter().find(|(k, _)| *k == 183) {
+            let target_id = pos.iter().find(|(k, _)| *k == 155).map(|(_, v)| v);
+            let target_off = pos.iter().find(|(k, _)| *k == 143).map(|(_, v)| v);
+            assert_eq!(target_id, Some(&IonValue::Int(p2_target_eid as i64)));
+            assert_ne!(target_id, Some(&IonValue::Int(cover_block_eid as i64)));
+            assert_eq!(target_off, Some(&IonValue::Int(7)));
+            internal_anchor_sym = Some(ent.entity_id);
+        } else if let Some((_, IonValue::String(u))) = fields.iter().find(|(k, _)| *k == 186) {
+            uris.push(u.clone());
+        } else {
+            panic!("$266 must contain $183 or $186");
+        }
+    }
+    let p2_sym = internal_anchor_sym.expect("internal $266 anchor");
+    uris.sort();
+    assert_eq!(
+        uris,
+        vec![
+            "http://example.org/p?x=1%202".to_string(),
+            "mailto:Reader@Example.com".to_string(),
+        ]
+    );
+
+    // Check sec1_p1 storyline (index 1, after cover at 0)
+    let storylines: Vec<_> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_STORYLINE)
+        .collect();
+    let s1_vals = crate::ion::IonReader::new(&storylines[1].data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(s1_root) = &s1_vals[0] else {
+        panic!("storyline struct");
+    };
+    let (_, IonValue::List(elems)) = s1_root.iter().find(|(k, _)| *k == 146).unwrap() else {
+        panic!("content_list");
+    };
+    let IonValue::Struct(elem0) = &elems[0] else {
+        panic!("elem0");
+    };
+    let (_, IonValue::List(events)) = elem0.iter().find(|(k, _)| *k == 142).unwrap() else {
+        panic!("style_events");
+    };
+
+    // Assert bold (861) preserved on "here" (offset 9, len 4) and coalesced link (offset 3, len 10) uses 890 + p2_sym
+    assert!(events.iter().any(|ev| {
+        matches!(
+            ev,
+            IonValue::Struct(f)
+                if f.iter().any(|(k, v)| *k == 143 && *v == IonValue::Int(9))
+                    && f.iter().any(|(k, v)| *k == 144 && *v == IonValue::Int(4))
+                    && f.iter().any(|(k, v)| *k == 157 && *v == IonValue::Symbol(861))
+        )
+    }));
+    assert!(events.iter().any(|ev| {
+        matches!(
+            ev,
+            IonValue::Struct(f)
+                if f.iter().any(|(k, v)| *k == 143 && *v == IonValue::Int(3))
+                    && f.iter().any(|(k, v)| *k == 144 && *v == IonValue::Int(10))
+                    && f.iter().any(|(k, v)| *k == 157 && *v == IonValue::Symbol(890))
+                    && f.iter().any(|(k, v)| *k == 179 && *v == IonValue::Symbol(p2_sym))
+        )
+    }));
+    assert!(
+        !events.iter().any(|ev| {
+            matches!(
+                ev,
+                IonValue::Struct(f)
+                    if f.iter().any(|(k, _)| *k == 179)
+                        && f.iter().any(|(k, v)| *k == 144 && *v == IonValue::Int(0))
+            )
+        }),
+        "Zero-length anchor/href span must not emit zero-length link event"
+    );
+
+    // Zero-link book must also omit $255 optional_dependencies from $419
+    let mut zero_book = BookIR::default();
+    zero_book.metadata.title = "Zero Links Clean CEM".to_string();
+    zero_book.sections.push(Section {
+        id: "z1".to_string(),
+        title: "Z1".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "zp1".to_string(),
+            spans: vec![TextSpan {
+                text: "No links.".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        }],
+    });
+    let mut zero_pkg = KfxPackager::new(&zero_book, "EBOK");
+    let mut zero_buf = Cursor::new(Vec::new());
+    zero_pkg.package(&mut zero_buf).unwrap();
+    let zero_cem = zero_pkg
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_CONTAINER_ENTITY_MAP)
+        .unwrap();
+    let zero_cem_vals = crate::ion::IonReader::new(&zero_cem.data)
+        .decode_all()
+        .unwrap();
+    if let IonValue::Annotated(_, inner) = &zero_cem_vals[0]
+        && let IonValue::Struct(cf) = inner.as_ref()
+        && let Some((_, IonValue::List(deps))) = cf.iter().find(|(k, _)| *k == 253)
+    {
+        for dep in deps {
+            if let IonValue::Struct(df) = dep {
+                assert!(!df.iter().any(|(k, _)| *k == 255));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_packager_list_multiblock_word_wise_pid_parity_and_anchor_payloads() {
+    let mut book = BookIR::default();
+    book.metadata.title = "List Multi-Block WordWise Parity".to_string();
+
+    let list_block = Block::List {
+        id: "list_root".to_string(),
+        ordered: false,
+        items: vec![
+            // Multi-block <li> with 2 paragraphs
+            vec![
+                Block::Paragraph {
+                    id: "li1_p1".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "Intro ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        },
+                        TextSpan {
+                            text: "ameliorate".to_string(),
+                            style: None,
+                            anchor_id: Some("fn_a".to_string()),
+                            href: None,
+                            ruby: None,
+                        },
+                    ],
+                    style: None,
+                },
+                Block::Paragraph {
+                    id: "li1_p2".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "Second ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        },
+                        TextSpan {
+                            text: "jump".to_string(),
+                            style: Some("italic".to_string()),
+                            anchor_id: None,
+                            href: Some("#fn_nested".to_string()),
+                            ruby: None,
+                        },
+                    ],
+                    style: None,
+                },
+            ],
+            // Nested ordered list
+            vec![Block::List {
+                id: "nested_ol".to_string(),
+                ordered: true,
+                items: vec![vec![Block::Paragraph {
+                    id: "li2_p1".to_string(),
+                    spans: vec![
+                        TextSpan {
+                            text: "Deep ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        },
+                        TextSpan {
+                            text: "jaundiced".to_string(),
+                            style: None,
+                            anchor_id: Some("fn_nested".to_string()),
+                            href: Some("#fn_a".to_string()),
+                            ruby: None,
+                        },
+                    ],
+                    style: None,
+                }]],
+            }],
+        ],
+    };
+
+    let expected_list_text = list_block.plain_text();
+    assert_eq!(
+        expected_list_text,
+        "Intro ameliorate\nSecond jump\nDeep jaundiced"
+    );
+
+    book.sections.push(Section {
+        id: "sec_list".to_string(),
+        title: "Lists".to_string(),
+        blocks: vec![
+            list_block,
+            Block::Paragraph {
+                id: "post_list".to_string(),
+                spans: vec![TextSpan {
+                    text: "After abstruse end.".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            },
+        ],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("packaging multi-block list links must succeed");
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), buffer.into_inner()).unwrap();
+    let container = crate::container::KfxContainer::open(tmp.path()).expect("KfxContainer::open");
+    assert!(!container.chunks.is_empty());
+    crate::validator::KfxPreflightValidator::new(&packager.entities, None)
+        .validate_container()
+        .expect("List link container must pass validate_container()");
+
+    // Verify exact $266 anchor target positions inside Block::List
+    // "Intro " -> offset 6; "Intro ameliorate\nSecond jump\nDeep " -> offset 34
+    let (list_eid_a, list_pid_a, off_a) = *packager
+        .anchor_targets
+        .get(&("sec_list".to_string(), "fn_a".to_string()))
+        .expect("fn_a target");
+    let (list_eid_n, list_pid_n, off_n) = *packager
+        .anchor_targets
+        .get(&("sec_list".to_string(), "fn_nested".to_string()))
+        .expect("fn_nested target");
+    assert_eq!(list_eid_a, list_eid_n);
+    assert_eq!(off_a, 6);
+    assert_eq!(off_n, 34);
+    assert_eq!(list_pid_a, 1 + 6);
+    assert_eq!(list_pid_n, 1 + 34);
+
+    let anchor_positions: Vec<(i64, i64)> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_ANCHOR)
+        .map(|ent| {
+            let vals = crate::ion::IonReader::new(&ent.data).decode_all().unwrap();
+            let IonValue::Struct(f) = &vals[0] else {
+                panic!("anchor struct");
+            };
+            let (_, IonValue::Struct(pos)) = f.iter().find(|(k, _)| *k == 183).unwrap() else {
+                panic!("anchor position");
+            };
+            let id = match pos.iter().find(|(k, _)| *k == 155).unwrap().1 {
+                IonValue::Int(v) => v,
+                _ => panic!("id"),
+            };
+            let off = match pos.iter().find(|(k, _)| *k == 143).unwrap().1 {
+                IonValue::Int(v) => v,
+                _ => panic!("off"),
+            };
+            (id, off)
+        })
+        .collect();
+    assert!(anchor_positions.contains(&(list_eid_a as i64, 6)));
+    assert!(anchor_positions.contains(&(list_eid_n as i64, 34)));
+
+    // Verify italic + style_link both emitted inside Block::List $142 style_events
+    let story = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .unwrap();
+    let story_vals = crate::ion::IonReader::new(&story.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(rf) = &story_vals[0] else {
+        panic!("storyline");
+    };
+    let (_, IonValue::List(elems)) = rf.iter().find(|(k, _)| *k == 146).unwrap() else {
+        panic!("content_list");
+    };
+    let IonValue::Struct(list_elem) = &elems[0] else {
+        panic!("list element");
+    };
+    let (_, IonValue::List(evs)) = list_elem.iter().find(|(k, _)| *k == 142).unwrap() else {
+        panic!("style_events");
+    };
+    // "jump" starts at "Intro ameliorate\nSecond " = 16 + 1 + 7 = 24, len = 4 (style_italic = 862, style_link = 890)
+    assert!(evs.iter().any(|ev| {
+        matches!(
+            ev,
+            IonValue::Struct(f)
+                if f.iter().any(|(k, v)| *k == 143 && *v == IonValue::Int(24))
+                    && f.iter().any(|(k, v)| *k == 144 && *v == IonValue::Int(4))
+                    && f.iter().any(|(k, v)| *k == 157 && *v == IonValue::Symbol(862))
+        )
+    }));
+    assert!(evs.iter().any(|ev| {
+        matches!(
+            ev,
+            IonValue::Struct(f)
+                if f.iter().any(|(k, v)| *k == 143 && *v == IonValue::Int(24))
+                    && f.iter().any(|(k, v)| *k == 144 && *v == IonValue::Int(4))
+                    && f.iter().any(|(k, v)| *k == 157 && *v == IonValue::Symbol(890))
+                    && f.iter().any(|(k, _)| *k == 179)
+        )
+    }));
+
+    // WordWiseBuilder PID parity check across Block::List and post-list paragraph
+    let mut ww =
+        crate::enhancements::WordWiseBuilder::new("TESTASIN12", "CR!TESTACR", "en", "en", "rev1")
+            .with_pacing(crate::enhancements::WordWisePacingConfig {
+                max_difficulty_level: 1,
+                min_distance: 0,
+                max_glosses_per_window: 100,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 1000,
+                window_size: 800,
+            });
+    let gloss_count = ww.generate_from_book(&book);
+    assert_eq!(gloss_count, 3);
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    ww.populate_connection(&mut conn).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT start FROM glosses ORDER BY start ASC")
+        .unwrap();
+    let starts: Vec<usize> = stmt
+        .query_map([], |row| row.get::<_, i64>(0).map(|v| v as usize))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // Section root = PID 0 -> List starts at PID 1:
+    // "ameliorate" at 1 + 6 = 7
+    // "jaundiced" at 1 + 34 = 35
+    // Post-list paragraph starts at 1 + 43 (expected_list_text.chars().count()) = 44 -> "abstruse" at 44 + 6 = 50
+    let post_list_start = 1 + expected_list_text.chars().count();
+    assert_eq!(starts, vec![list_pid_a, list_pid_n, post_list_start + 6]);
+}
+
+#[test]
+fn test_packager_footnote_targets_backlinks_and_unshifted_real_pids() {
+    // 1. Orphan footnote fallback: verify $266 targets synthesized "endnotes" block EID and
+    //    real section WordWise PIDs remain unshifted by appended "endnotes".
+    let mut orphan_book = BookIR::default();
+    orphan_book.metadata.title = "Orphan Footnote Targets".to_string();
+    orphan_book
+        .footnotes
+        .insert("fn1".to_string(), "Quantum popup text.".to_string());
+    orphan_book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Ch1".to_string(),
+        blocks: vec![
+            Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![
+                    TextSpan {
+                        text: "An abstruse ".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    },
+                    TextSpan {
+                        text: "[1]".to_string(),
+                        style: Some("noteref".to_string()),
+                        anchor_id: Some("fnref1".to_string()),
+                        href: Some("#fn1".to_string()),
+                        ruby: None,
+                    },
+                ],
+                style: None,
+            },
+            Block::Paragraph {
+                id: "p2".to_string(),
+                spans: vec![TextSpan {
+                    text: "A jaundiced claim.".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            },
+        ],
+    });
+    let mut packager = KfxPackager::new(&orphan_book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("orphan footnote packaging");
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), buf.into_inner()).unwrap();
+    let container = crate::container::KfxContainer::open(tmp.path()).expect("KfxContainer::open");
+    assert!(!container.chunks.is_empty());
+    crate::validator::KfxPreflightValidator::new(&packager.entities, None)
+        .validate_container()
+        .expect("Orphan footnote container must pass validate_container()");
+
+    let (endnote_eid, _, endnote_off) = *packager
+        .anchor_targets
+        .get(&("endnotes".to_string(), "fn1".to_string()))
+        .expect("synthesized endnotes#fn1 target");
+    assert_eq!(endnote_off, 0);
+
+    let anchor_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_ANCHOR)
+        .expect("$266 anchor for orphan footnote");
+    let anchor_vals = crate::ion::IonReader::new(&anchor_ent.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(af) = &anchor_vals[0] else {
+        panic!("anchor struct");
+    };
+    let (_, IonValue::Struct(pos)) = af.iter().find(|(k, _)| *k == 183).unwrap() else {
+        panic!("position");
+    };
+    assert_eq!(
+        pos.iter().find(|(k, _)| *k == 155).map(|(_, v)| v),
+        Some(&IonValue::Int(endnote_eid as i64))
+    );
+
+    // Real section PIDs must match WordWiseBuilder (not shifted by trailing "endnotes")
+    let mut ww =
+        crate::enhancements::WordWiseBuilder::new("TESTASIN12", "CR!TESTACR", "en", "en", "rev1")
+            .with_pacing(crate::enhancements::WordWisePacingConfig {
+                max_difficulty_level: 1,
+                min_distance: 0,
+                max_glosses_per_window: 100,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 1000,
+                window_size: 800,
+            });
+    ww.generate_from_book(&orphan_book);
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    ww.populate_connection(&mut conn).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT start FROM glosses ORDER BY start ASC")
+        .unwrap();
+    let starts: Vec<usize> = stmt
+        .query_map([], |row| row.get::<_, i64>(0).map(|v| v as usize))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // sec1 PID start = 0; p1 starts at PID 1 ("An abstruse [1]" len = 15); p2 starts at PID 16 ("A jaundiced claim.")
+    assert_eq!(starts, vec![1 + 3, 16 + 2]);
+
+    // 2. Real EPUB with <aside> + <ol class="endnotes"> + backlinks verifies both forward $266
+    //    and backlink $266 targets and exact $617 keys/popup_texts (excluding backlinks).
+    let mut zip_buf = Cursor::new(Vec::new());
+    {
+        use std::io::Write;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+        let mut zip = ZipWriter::new(&mut zip_buf);
+        let opts = SimpleFileOptions::default();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+        zip.start_file("content.opf", opts).unwrap();
+        zip.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Notes EPUB</dc:title></metadata><manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#).unwrap();
+        zip.start_file("ch1.xhtml", opts).unwrap();
+        zip.write_all(r##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+  <p>Point A<a id="fnref1" href="#fn1" epub:type="noteref">1</a> and Point B<a id="fnref2" href="#fn2" epub:type="noteref">2</a>.</p>
+  <aside epub:type="footnote" id="fn1"><p>Aside note one. <a href="#fnref1" role="doc-backlink">↩</a></p></aside>
+  <section epub:type="footnotes" id="footnotes">
+    <ol class="endnotes"><li id="fn2"><p>List note two. <a href="#fnref2" class="footnote-back">^</a></p></li></ol>
+  </section>
+</body>
+</html>"##.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    let tmp_epub = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp_epub.path(), zip_buf.into_inner()).unwrap();
+    let mut epub_ir = crate::epub::EpubReader::read_from_file(tmp_epub.path()).unwrap();
+    epub_ir.normalize();
+
+    let mut epub_pkg = KfxPackager::new(&epub_ir, "EBOK");
+    let mut epub_out = Cursor::new(Vec::new());
+    epub_pkg.package(&mut epub_out).unwrap();
+    crate::validator::KfxPreflightValidator::new(&epub_pkg.entities, None)
+        .validate_container()
+        .expect("Real EPUB footnote container must pass validate_container()");
+
+    // Expect 4 $266 anchors: fn1, fn2, fnref1 (backlink), fnref2 (backlink)
+    let epub_anchors: Vec<_> = epub_pkg
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_ANCHOR)
+        .collect();
+    assert_eq!(epub_anchors.len(), 4);
+
+    let (_, _, fnref1_off) = *epub_pkg
+        .anchor_targets
+        .get(&("section_1".to_string(), "fnref1".to_string()))
+        .unwrap();
+    let (_, _, fnref2_off) = *epub_pkg
+        .anchor_targets
+        .get(&("section_1".to_string(), "fnref2".to_string()))
+        .unwrap();
+    assert_eq!(fnref1_off, 7);
+    assert_eq!(fnref2_off, 20);
+
+    let epub_ad = epub_pkg
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_AUXILIARY_DATA)
+        .unwrap();
+    let epub_ad_vals = crate::ion::IonReader::new(&epub_ad.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(ead) = &epub_ad_vals[0] else {
+        panic!("ad struct");
+    };
+    let (_, IonValue::List(epub_notes)) = ead.iter().find(|(k, _)| *k == SYM_YJ_NOTE).unwrap()
+    else {
+        panic!("expected $617 list");
+    };
+    let mut note_pairs: Vec<(String, String)> = epub_notes
+        .iter()
+        .map(|n| {
+            let IonValue::Struct(nf) = n else {
+                panic!("note struct");
+            };
+            let k = match &nf.iter().find(|(k, _)| *k == 492).unwrap().1 {
+                IonValue::String(s) => s.clone(),
+                _ => panic!("key"),
+            };
+            let txt = match &nf.iter().find(|(k, _)| *k == SYM_POPUP_TEXT).unwrap().1 {
+                IonValue::String(s) => s.clone(),
+                _ => panic!("popup_text"),
+            };
+            (k, txt)
+        })
+        .collect();
+    note_pairs.sort();
+    assert_eq!(
+        note_pairs,
+        vec![
+            ("fn1".to_string(), "Aside note one.".to_string()),
+            ("fn2".to_string(), "List note two.".to_string()),
+        ]
+    );
+}

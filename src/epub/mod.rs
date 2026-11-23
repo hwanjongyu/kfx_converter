@@ -538,10 +538,11 @@ impl EpubReader {
             }
         }
 
-        // 5. Read spine chapters into Sections and build href -> section_id lookup map
-        let mut sections = Vec::with_capacity(spine.len());
+        // 5a. Build complete spine section & href maps BEFORE parsing XHTML so forward and relative
+        // chapter links resolve deterministically without colliding filenames overwriting full paths.
+        let mut spine_entries = Vec::with_capacity(spine.len());
         let mut href_to_section = HashMap::new();
-        let mut all_footnotes = HashMap::new();
+        let mut href_lc_to_section = HashMap::new();
 
         for (idx, item_id) in spine.iter().enumerate() {
             if let Some(item) = manifest.get(item_id) {
@@ -552,67 +553,110 @@ impl EpubReader {
                 let decoded_clean_href = Self::decode_percent(&clean_href);
                 let decoded_full_path = Self::decode_percent(&full_path);
 
-                href_to_section.insert(item.href.clone(), sec_id.clone());
-                href_to_section.insert(clean_href, sec_id.clone());
-                href_to_section.insert(decoded_href, sec_id.clone());
-                href_to_section.insert(decoded_clean_href, sec_id.clone());
-                href_to_section.insert(full_path.clone(), sec_id.clone());
-                href_to_section.insert(decoded_full_path, sec_id.clone());
+                for key in [
+                    item.href.clone(),
+                    clean_href,
+                    decoded_href,
+                    decoded_clean_href,
+                    full_path.clone(),
+                    decoded_full_path,
+                ] {
+                    if !key.is_empty() {
+                        href_lc_to_section.insert(key.to_lowercase(), sec_id.clone());
+                        href_to_section.insert(key, sec_id.clone());
+                    }
+                }
+
                 let file_name = Path::new(&item.href)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                if !file_name.is_empty() {
-                    let decoded_file_name = Self::decode_percent(&file_name);
-                    href_to_section.insert(file_name.clone(), sec_id.clone());
-                    href_to_section.insert(decoded_file_name, sec_id.clone());
-                }
 
-                if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
-                    let xhtml = match archive::read_entry_string(
-                        &mut entry,
-                        MAX_CHAPTER_XHTML_BYTES,
-                        &mut budget,
-                    ) {
-                        Ok(s) => s,
-                        Err(e @ EpubError::Security(_)) => return Err(e),
-                        Err(_) => continue,
-                    };
-                    let (blocks, sec_footnotes) =
-                        Self::parse_xhtml_with_css(&xhtml, &href_to_id, &book_css);
-                    for (fn_id, fn_text) in sec_footnotes {
-                        all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
-                        if !file_name.is_empty() {
-                            all_footnotes
-                                .insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
-                        }
-                        all_footnotes.insert(format!("{}#{}", sec_id, fn_id), fn_text.clone());
-                        all_footnotes.entry(fn_id).or_insert(fn_text);
+                spine_entries.push((idx, sec_id, full_path, item, file_name));
+            }
+        }
+
+        // Insert bare filenames only as fallbacks so colliding filenames never overwrite exact paths.
+        for (_, sec_id, _, _, file_name) in &spine_entries {
+            if !file_name.is_empty() {
+                let decoded_file_name = Self::decode_percent(file_name);
+                href_to_section
+                    .entry(file_name.clone())
+                    .or_insert_with(|| sec_id.clone());
+                href_to_section
+                    .entry(decoded_file_name.clone())
+                    .or_insert_with(|| sec_id.clone());
+                href_lc_to_section
+                    .entry(file_name.to_lowercase())
+                    .or_insert_with(|| sec_id.clone());
+                href_lc_to_section
+                    .entry(decoded_file_name.to_lowercase())
+                    .or_insert_with(|| sec_id.clone());
+            }
+        }
+
+        // 5b. Parse spine chapters with complete XhtmlLinkContext
+        let mut sections = Vec::with_capacity(spine_entries.len());
+        let mut all_footnotes = HashMap::new();
+
+        for (idx, sec_id, full_path, item, file_name) in spine_entries {
+            if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
+                let xhtml = match archive::read_entry_string(
+                    &mut entry,
+                    MAX_CHAPTER_XHTML_BYTES,
+                    &mut budget,
+                ) {
+                    Ok(s) => s,
+                    Err(e @ EpubError::Security(_)) => return Err(e),
+                    Err(_) => continue,
+                };
+                let chapter_dir = Path::new(&full_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let link_ctx = xhtml::XhtmlLinkContext {
+                    current_section_id: &sec_id,
+                    current_chapter_dir: &chapter_dir,
+                    href_to_section: &href_to_section,
+                    href_lc_to_section: Some(&href_lc_to_section),
+                };
+                let (blocks, sec_footnotes) = Self::parse_xhtml_with_css_and_context(
+                    &xhtml,
+                    &href_to_id,
+                    &book_css,
+                    Some(&link_ctx),
+                );
+                for (fn_id, fn_text) in sec_footnotes {
+                    all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
+                    if !file_name.is_empty() {
+                        all_footnotes.insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
                     }
-                    let detected_title = blocks
-                        .iter()
-                        .find_map(|b| {
-                            if let Block::Heading { spans, .. } = b {
-                                let t = spans
-                                    .iter()
-                                    .map(|s| s.text.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                                    .trim()
-                                    .to_string();
-                                if !t.is_empty() { Some(t) } else { None }
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_else(|| format!("Chapter {}", idx + 1));
-
-                    sections.push(Section {
-                        id: sec_id,
-                        title: detected_title,
-                        blocks,
-                    });
+                    all_footnotes.insert(format!("{}#{}", sec_id, fn_id), fn_text.clone());
+                    all_footnotes.entry(fn_id).or_insert(fn_text);
                 }
+                let detected_title = blocks
+                    .iter()
+                    .find_map(|b| {
+                        if let Block::Heading { spans, .. } = b {
+                            let t = spans
+                                .iter()
+                                .map(|s| s.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .trim()
+                                .to_string();
+                            if !t.is_empty() { Some(t) } else { None }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| format!("Chapter {}", idx + 1));
+
+                sections.push(Section {
+                    id: sec_id,
+                    title: detected_title,
+                    blocks,
+                });
             }
         }
 
@@ -701,6 +745,15 @@ impl EpubReader {
         book_css: &CssStylesheet,
     ) -> (Vec<Block>, HashMap<String, String>) {
         xhtml::parse_xhtml_with_css(xhtml, href_to_id, book_css)
+    }
+
+    pub fn parse_xhtml_with_css_and_context(
+        xhtml: &str,
+        href_to_id: &HashMap<String, String>,
+        book_css: &CssStylesheet,
+        link_ctx: Option<&xhtml::XhtmlLinkContext<'_>>,
+    ) -> (Vec<Block>, HashMap<String, String>) {
+        xhtml::parse_xhtml_with_css_and_context(xhtml, href_to_id, book_css, link_ctx)
     }
 
     pub fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
@@ -2331,5 +2384,126 @@ mod tests {
         assert_eq!(book.toc.len(), 1);
         assert_eq!(book.toc[0].target_section, "section_1");
         assert_eq!(book.toc[0].target_anchor.as_deref(), Some("start"));
+    }
+
+    #[test]
+    fn test_epub_reader_resolves_cross_chapter_encoded_and_colliding_links() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/content.opf", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Cross Chapter Links</dc:title>
+  </metadata>
+  <manifest>
+    <item id="p1" href="Part1/intro.xhtml" media-type="application/xhtml+xml"/>
+    <item id="p2" href="Part2/intro.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="Text/ch%202.xhtml" media-type="application/xhtml+xml"/>
+    <item id="cov" href="Images/cover.jpg" media-type="image/jpeg"/>
+  </manifest>
+  <spine>
+    <itemref idref="p1"/>
+    <itemref idref="p2"/>
+    <itemref idref="ch2"/>
+  </spine>
+</package>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/Part1/intro.xhtml", opts).unwrap();
+            zip.write_all(
+                br##"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p id="top1">Part 1:
+  <a href="../Part2/intro.xhtml#top2">to part2</a>
+  <a href="../Text/ch%202.xhtml#sec%201">to ch2</a>
+  <a href="#top1">same</a>
+  <a href="#">barehash</a>
+  <a href="missing.xhtml#foo">broken</a>
+  <a href="../Images/cover.jpg">non-spine</a>
+  <a href="java&#10;script:alert(1)">xss</a>
+  <a href="https://Example.COM/docs?a=1%202">ext</a>
+</p>
+</body></html>"##,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/Part2/intro.xhtml", opts).unwrap();
+            zip.write_all(
+                br##"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p id="top2">Part 2:
+  <a href="../Part1/intro.xhtml#top1">back part1</a>
+  <a href="intro.xhtml#top2">self intro</a>
+</p>
+</body></html>"##,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/Text/ch 2.xhtml", opts).unwrap();
+            zip.write_all(
+                br##"<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p id="sec 1">Chapter 2 <a href="../Part1/intro.xhtml">part1 root</a></p>
+</body></html>"##,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/Images/cover.jpg", opts).unwrap();
+            zip.write_all(&[0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), buf.into_inner()).unwrap();
+
+        let book = EpubReader::read_from_file(tmp.path()).expect("read_from_file must succeed");
+        assert_eq!(book.sections.len(), 3);
+
+        let find_href = |sec_idx: usize, needle: &str| -> Option<String> {
+            let Block::Paragraph { spans, .. } = &book.sections[sec_idx].blocks[0] else {
+                panic!("Expected paragraph in section {}", sec_idx);
+            };
+            spans
+                .iter()
+                .find(|s| s.text == needle)
+                .unwrap_or_else(|| panic!("Missing span {:?} in {:?}", needle, spans))
+                .href
+                .clone()
+        };
+
+        // section_1 = Part1/intro.xhtml, section_2 = Part2/intro.xhtml, section_3 = Text/ch 2.xhtml
+        assert_eq!(find_href(0, "to part2").as_deref(), Some("section_2#top2"));
+        assert_eq!(find_href(0, "to ch2").as_deref(), Some("section_3#sec 1"));
+        assert_eq!(find_href(0, "same").as_deref(), Some("section_1#top1"));
+        assert_eq!(find_href(0, "barehash").as_deref(), Some("section_1"));
+        assert_eq!(find_href(0, "broken"), None);
+        assert_eq!(find_href(0, "non-spine"), None);
+        assert_eq!(find_href(0, "xss"), None);
+        assert_eq!(
+            find_href(0, "ext").as_deref(),
+            Some("https://Example.COM/docs?a=1%202")
+        );
+
+        // Colliding filenames resolve to their own distinct directories
+        assert_eq!(
+            find_href(1, "back part1").as_deref(),
+            Some("section_1#top1")
+        );
+        assert_eq!(
+            find_href(1, "self intro").as_deref(),
+            Some("section_2#top2")
+        );
+        assert_eq!(find_href(2, "part1 root").as_deref(), Some("section_1"));
     }
 }
