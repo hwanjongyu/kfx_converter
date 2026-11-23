@@ -106,6 +106,8 @@ impl KindleStudio {
             target_path,
             outcome,
         );
+        self.mark_folder_items_dirty();
+        self.mark_files_dirty();
     }
 
     pub(super) fn apply_device_refresh_result(
@@ -144,6 +146,7 @@ impl KindleStudio {
         }
         self.device = device;
         self.files = files;
+        self.mark_files_dirty();
         if clear_status {
             self.status_message = None;
         }
@@ -227,6 +230,7 @@ impl KindleStudio {
                         this.status_message = Some(("Kindle device safely ejected.".into(), false));
                         this.device = DeviceStatus::default();
                         this.files.clear();
+                        this.mark_files_dirty();
                         this.confirm_delete_file = None;
                     }
                     Err(err) => {
@@ -319,6 +323,7 @@ impl KindleStudio {
                 match del_res {
                     Ok(_) => {
                         this.files.retain(|f| f.full_path != target_path);
+                        this.mark_files_dirty();
                         this.status_message =
                             Some((format!("'{}' book and cache deleted.", display_name), false));
                         if !this.eject_in_progress && new_device.connected {
@@ -460,6 +465,7 @@ impl KindleStudio {
                     return;
                 }
                 this.folder_state.items = items;
+                this.mark_folder_items_dirty();
                 this.folder_state.is_scanning = false;
                 this.folder_state.scan_progress = None;
                 this.scan_cancel_token = None;
@@ -474,6 +480,7 @@ impl KindleStudio {
         for item in &mut self.folder_state.items {
             item.is_selected = select;
         }
+        self.mark_folder_items_dirty();
         cx.notify();
     }
 
@@ -481,12 +488,14 @@ impl KindleStudio {
         for item in &mut self.folder_state.items {
             item.is_selected = item.status == LocalEpubStatus::Unconverted;
         }
+        self.mark_folder_items_dirty();
         cx.notify();
     }
 
     pub fn toggle_item_selection(&mut self, item_id: u64, cx: &mut Context<Self>) {
         if let Some(item) = self.folder_state.items.iter_mut().find(|i| i.id == item_id) {
             item.is_selected = !item.is_selected;
+            self.mark_folder_items_dirty();
         }
         cx.notify();
     }
@@ -543,6 +552,7 @@ impl KindleStudio {
                 item.status = LocalEpubStatus::Unconverted;
             }
         }
+        self.mark_folder_items_dirty();
         if let Some(ref mut bp) = self.folder_state.batch_progress {
             bp.is_cancelled = true;
             bp.current_stage = "Cancelled remaining queue.".into();
@@ -627,6 +637,7 @@ impl KindleStudio {
                 item.status = LocalEpubStatus::InQueue;
             }
         }
+        self.mark_folder_items_dirty();
 
         let mut queued_tasks = VecDeque::with_capacity(count);
         for (path, file_size_str) in &selected_items {
@@ -646,7 +657,6 @@ impl KindleStudio {
                     status: TaskStatus::Queued,
                     progress: 0.0,
                     word_wise: run_settings.word_wise,
-                    xray: false,
                 },
             );
         }
@@ -758,6 +768,7 @@ impl KindleStudio {
                                 },
                                 progress: 30,
                             };
+                            this.mark_folder_items_dirty();
                         }
                         cx.notify();
                     });
@@ -851,6 +862,7 @@ impl KindleStudio {
                 },
                 progress: 30,
             };
+            self.mark_folder_items_dirty();
         }
 
         let mut run_settings = self.settings.clone();
@@ -952,7 +964,6 @@ impl KindleStudio {
                     status: TaskStatus::Queued,
                     progress: 0.0,
                     word_wise: run_settings.word_wise,
-                    xray: false,
                 },
             );
             prepared.push(DropJob {
@@ -1102,20 +1113,32 @@ impl KindleStudio {
         .detach();
     }
 
+    pub(super) fn apply_sort_column_transition(
+        sort_field: &mut EpubSortField,
+        sort_direction: &mut SortDirection,
+        clicked_field: EpubSortField,
+    ) {
+        if *sort_field == clicked_field {
+            *sort_direction = sort_direction.toggle();
+        } else {
+            *sort_field = clicked_field;
+            *sort_direction = match clicked_field {
+                EpubSortField::DateModified | EpubSortField::FileSize => SortDirection::Descending,
+                _ => SortDirection::Ascending,
+            };
+        }
+    }
+
     pub(super) fn handle_sort_column_click(
         &mut self,
         field: EpubSortField,
         cx: &mut Context<Self>,
     ) {
-        if self.folder_state.sort_field == field {
-            self.folder_state.sort_direction = self.folder_state.sort_direction.toggle();
-        } else {
-            self.folder_state.sort_field = field;
-            self.folder_state.sort_direction = match field {
-                EpubSortField::DateModified | EpubSortField::FileSize => SortDirection::Descending,
-                _ => SortDirection::Ascending,
-            };
-        }
+        Self::apply_sort_column_transition(
+            &mut self.folder_state.sort_field,
+            &mut self.folder_state.sort_direction,
+            field,
+        );
         cx.notify();
     }
 
@@ -1124,27 +1147,26 @@ impl KindleStudio {
         field: EpubSortField,
         cx: &mut Context<Self>,
     ) {
-        if self.explorer_sort_field == field {
-            self.explorer_sort_direction = self.explorer_sort_direction.toggle();
-        } else {
-            self.explorer_sort_field = field;
-            self.explorer_sort_direction = match field {
-                EpubSortField::DateModified | EpubSortField::FileSize => SortDirection::Descending,
-                _ => SortDirection::Ascending,
-            };
-        }
+        Self::apply_sort_column_transition(
+            &mut self.explorer_sort_field,
+            &mut self.explorer_sort_direction,
+            field,
+        );
         cx.notify();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::ExplorerFilterCounts;
     use super::KindleStudio;
     use crate::state::{
-        ConversionOutcome, ConversionSettings, ConversionTask, DeviceStatus, KindleFile,
-        LocalEpubItem, LocalEpubStatus, TaskStatus, collect_incoming_epub_paths,
+        ConversionOutcome, ConversionResult, ConversionSettings, ConversionTask, DeviceStatus,
+        EpubSortField, KindleFile, LocalEpubItem, LocalEpubStatus, SortDirection, TaskStatus,
+        collect_incoming_epub_paths,
     };
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
     fn dummy_item(id: u64, path: PathBuf, selected: bool) -> LocalEpubItem {
@@ -1271,7 +1293,6 @@ mod tests {
             status: TaskStatus::Converting,
             progress: 0.5,
             word_wise: true,
-            xray: false,
         });
         assert!(studio.try_begin_eject().is_err());
 
@@ -1480,5 +1501,231 @@ mod tests {
         assert!(current_applied);
         assert!(studio.device.connected);
         assert_eq!(studio.device.model, "Kindle Paperwhite");
+    }
+
+    #[test]
+    fn test_sort_column_transitions() {
+        let mut field = EpubSortField::Title;
+        let mut dir = SortDirection::Ascending;
+
+        // Clicking active Title toggles Ascending -> Descending -> Ascending
+        KindleStudio::apply_sort_column_transition(&mut field, &mut dir, EpubSortField::Title);
+        assert_eq!(field, EpubSortField::Title);
+        assert_eq!(dir, SortDirection::Descending);
+
+        KindleStudio::apply_sort_column_transition(&mut field, &mut dir, EpubSortField::Title);
+        assert_eq!(field, EpubSortField::Title);
+        assert_eq!(dir, SortDirection::Ascending);
+
+        // Clicking FileSize / DateModified starts Descending
+        KindleStudio::apply_sort_column_transition(&mut field, &mut dir, EpubSortField::FileSize);
+        assert_eq!(field, EpubSortField::FileSize);
+        assert_eq!(dir, SortDirection::Descending);
+
+        KindleStudio::apply_sort_column_transition(&mut field, &mut dir, EpubSortField::FileSize);
+        assert_eq!(dir, SortDirection::Ascending);
+
+        KindleStudio::apply_sort_column_transition(
+            &mut field,
+            &mut dir,
+            EpubSortField::DateModified,
+        );
+        assert_eq!(field, EpubSortField::DateModified);
+        assert_eq!(dir, SortDirection::Descending);
+
+        // Clicking Author / Status starts Ascending
+        KindleStudio::apply_sort_column_transition(&mut field, &mut dir, EpubSortField::Author);
+        assert_eq!(field, EpubSortField::Author);
+        assert_eq!(dir, SortDirection::Ascending);
+
+        KindleStudio::apply_sort_column_transition(&mut field, &mut dir, EpubSortField::Status);
+        assert_eq!(field, EpubSortField::Status);
+        assert_eq!(dir, SortDirection::Ascending);
+    }
+
+    #[test]
+    fn test_folder_view_cache_hit_and_invalidation() {
+        let mut studio = KindleStudio::new_for_test();
+        let path_a = PathBuf::from("/books/Zebra.epub");
+        let path_b = PathBuf::from("/books/Alpha.epub");
+        let mut item_a = dummy_item(1, path_a.clone(), true);
+        item_a.title = "Zebra Tales".into();
+        item_a.author = "Zane".into();
+        item_a.file_size_bytes = 5_000;
+        let mut item_b = dummy_item(2, path_b.clone(), false);
+        item_b.title = "Alpha Café".into();
+        item_b.author = "Alice".into();
+        item_b.file_size_bytes = 1_000;
+
+        studio.folder_state.items = vec![item_a, item_b];
+        studio.mark_folder_items_dirty();
+        assert_eq!(studio.folder_data_epoch, 1);
+
+        // 1. Initial lookup computes [1, 0] (Alpha before Zebra), second lookup hits cache (same Arc pointer)
+        let first = studio.cached_folder_indices();
+        assert_eq!(&*first, &[1, 0]);
+        let second = studio.cached_folder_indices();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "Unchanged folder view must return cached Arc pointer"
+        );
+
+        // 2. Sort column change invalidates cache
+        KindleStudio::apply_sort_column_transition(
+            &mut studio.folder_state.sort_field,
+            &mut studio.folder_state.sort_direction,
+            EpubSortField::FileSize,
+        );
+        let sorted_size = studio.cached_folder_indices();
+        assert!(!Arc::ptr_eq(&first, &sorted_size));
+        assert_eq!(&*sorted_size, &[0, 1]);
+
+        // 3. Search query change (Unicode case-insensitive) invalidates cache
+        studio.folder_state.search_query = "CAFÉ".into();
+        let searched = studio.cached_folder_indices();
+        assert!(!Arc::ptr_eq(&sorted_size, &searched));
+        assert_eq!(&*searched, &[1]);
+
+        // 4. Filter + item status mutation via apply_conversion_outcome bumps epoch and invalidates cache
+        studio.folder_state.search_query.clear();
+        studio.folder_state.filter_status = Some("converted".into());
+        let before_convert = studio.cached_folder_indices();
+        assert!(before_convert.is_empty());
+
+        let epoch_before = studio.folder_data_epoch;
+        studio.apply_conversion_outcome(
+            99,
+            &path_a,
+            None,
+            ConversionOutcome::Finished(ConversionResult {
+                output_path: PathBuf::from("/books/Zebra.kfx"),
+                synced_to_device: false,
+                sync_error: None,
+                word_wise_glosses: None,
+                word_wise_error: None,
+            }),
+        );
+        assert!(studio.folder_data_epoch > epoch_before);
+        let after_convert = studio.cached_folder_indices();
+        assert!(!Arc::ptr_eq(&before_convert, &after_convert));
+        assert_eq!(&*after_convert, &[0]);
+
+        // 5. Batch prepare & cancel also bump epoch on item status transitions
+        studio.folder_state.filter_status = Some("in_queue".into());
+        studio.folder_state.items[1].is_selected = true;
+        studio.mark_folder_items_dirty();
+        let prep = studio.try_prepare_batch_run(false).expect("prepare batch");
+        assert_eq!(&*studio.cached_folder_indices(), &[1]);
+        assert!(prep.run_generation > 0);
+        studio.batch_active_workers = 0;
+        studio.cancel_batch_state();
+        assert!(studio.cached_folder_indices().is_empty());
+    }
+
+    #[test]
+    fn test_explorer_view_cache_hit_invalidation_and_counts() {
+        let mut studio = KindleStudio::new_for_test();
+        let make_file =
+            |name: &str, title: &str, author: &str, format: &str, ww: bool, sz: u64| KindleFile {
+                name: name.into(),
+                title: title.into(),
+                author: author.into(),
+                format: format.into(),
+                size_formatted: format!("{sz} B"),
+                size_bytes: sz,
+                modified: "Just now".into(),
+                modified_timestamp: sz,
+                full_path: PathBuf::from(format!("/kindle/documents/{name}")),
+                has_word_wise: ww,
+                has_sdr: true,
+            };
+
+        studio.device = DeviceStatus {
+            connected: true,
+            model: "Kindle".into(),
+            path: Some(PathBuf::from("/kindle/documents")),
+            root_path: Some(PathBuf::from("/kindle")),
+            used_gb: 1.0,
+            total_gb: 8.0,
+        };
+        studio.device_refresh_generation = 5;
+
+        let files = vec![
+            make_file("Zeta.kfx", "Zeta Story", "Unknown", "KFX", true, 500),
+            make_file("Alpha.azw3", "Alpha Café", "Alice", "AZW3", false, 900),
+            make_file("Beta.mobi", "Beta Book", "Bob", "MOBI", true, 200),
+        ];
+        assert!(studio.apply_device_refresh_result(5, studio.device.clone(), files, false));
+        assert_eq!(studio.files_data_epoch, 1);
+
+        // 1. Counts computed in single pass & cached Arc pointer reused on hit
+        let (counts1, idx1) = studio.cached_explorer_view();
+        assert_eq!(
+            counts1,
+            ExplorerFilterCounts {
+                all: 3,
+                kfx: 1,
+                word_wise: 2,
+                azw3: 1,
+                mobi: 1,
+            }
+        );
+        // Title Ascending: Alpha (1), Beta (2), Zeta (0)
+        assert_eq!(&*idx1, &[1, 2, 0]);
+
+        let (counts2, idx2) = studio.cached_explorer_view();
+        assert_eq!(counts1, counts2);
+        assert!(Arc::ptr_eq(&idx1, &idx2));
+
+        // 2. Filter chip change invalidates cache while preserving accurate counts
+        studio.filter_format = Some("WORDWISE".into());
+        let (counts3, idx3) = studio.cached_explorer_view();
+        assert_eq!(counts3, counts1);
+        assert!(!Arc::ptr_eq(&idx1, &idx3));
+        assert_eq!(&*idx3, &[2, 0]);
+
+        // 3. Search query (Unicode case-insensitive) invalidates cache
+        studio.filter_format = None;
+        studio.search_query = "CAFÉ".into();
+        let (_, idx4) = studio.cached_explorer_view();
+        assert_eq!(&*idx4, &[1]);
+
+        // 4. Sort column transition invalidates cache (Author ascending puts Unknown last)
+        studio.search_query.clear();
+        KindleStudio::apply_sort_column_transition(
+            &mut studio.explorer_sort_field,
+            &mut studio.explorer_sort_direction,
+            EpubSortField::Author,
+        );
+        let (_, idx5) = studio.cached_explorer_view();
+        assert_eq!(&*idx5, &[1, 2, 0]); // Alice, Bob, Unknown
+
+        // 5. Synced conversion outcome updates self.files and bumps files_data_epoch
+        let prev_epoch = studio.files_data_epoch;
+        studio.apply_conversion_outcome(
+            10,
+            Path::new("/books/Gamma.epub"),
+            None,
+            ConversionOutcome::Finished(ConversionResult {
+                output_path: PathBuf::from("/books/Gamma.kfx"),
+                synced_to_device: true,
+                sync_error: None,
+                word_wise_glosses: Some(42),
+                word_wise_error: None,
+            }),
+        );
+        assert!(studio.files_data_epoch > prev_epoch);
+        let (counts6, idx6) = studio.cached_explorer_view();
+        assert!(!Arc::ptr_eq(&idx5, &idx6));
+        assert_eq!(
+            counts6,
+            ExplorerFilterCounts {
+                all: 4,
+                kfx: 2,
+                word_wise: 3,
+                azw3: 1,
+                mobi: 1,
+            }
+        );
     }
 }

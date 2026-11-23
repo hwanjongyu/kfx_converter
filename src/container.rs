@@ -8,7 +8,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::ion::{IonValue, IonWriter};
-use crate::symbols::symbol_id;
+use crate::symbols::KfxSymbol;
 
 pub const KFX_MAGIC: &[u8; 4] = b"CONT";
 pub const KFX_ENTITY_MAGIC: &[u8; 4] = b"ENTY";
@@ -482,12 +482,12 @@ impl KfxContainer {
             })?;
 
         // Build ContainerInfo Ion structure
-        let sym_bc_cont_id = symbol_id("bcContId").unwrap_or(409);
-        let sym_bc_compr_type = symbol_id("bcComprType").unwrap_or(410);
-        let sym_bc_drm_scheme = symbol_id("bcDRMScheme").unwrap_or(411);
-        let sym_bc_chunk_size = symbol_id("bcChunkSize").unwrap_or(412);
-        let sym_bc_index_tab_offset = symbol_id("bcIndexTabOffset").unwrap_or(413);
-        let sym_bc_index_tab_length = symbol_id("bcIndexTabLength").unwrap_or(414);
+        let sym_bc_cont_id = KfxSymbol::Bccontid as u32;
+        let sym_bc_compr_type = KfxSymbol::Bccomprtype as u32;
+        let sym_bc_drm_scheme = KfxSymbol::Bcdrmscheme as u32;
+        let sym_bc_chunk_size = KfxSymbol::Bcchunksize as u32;
+        let sym_bc_index_tab_offset = KfxSymbol::Bcindextaboffset as u32;
+        let sym_bc_index_tab_length = KfxSymbol::Bcindextablength as u32;
 
         let mut ci_fields_vec = vec![
             (sym_bc_cont_id, IonValue::String(container_id.to_string())),
@@ -505,15 +505,15 @@ impl KfxContainer {
         ];
 
         if doc_sym_length > 0 {
-            let sym_doc_sym_offset = symbol_id("bcDocSymbolOffset").unwrap_or(415);
-            let sym_doc_sym_length = symbol_id("bcDocSymbolLength").unwrap_or(416);
+            let sym_doc_sym_offset = KfxSymbol::Bcdocsymboloffset as u32;
+            let sym_doc_sym_length = KfxSymbol::Bcdocsymbollength as u32;
             ci_fields_vec.push((sym_doc_sym_offset, IonValue::Int(doc_sym_offset as i64)));
             ci_fields_vec.push((sym_doc_sym_length, IonValue::Int(doc_sym_length as i64)));
         }
 
         if format_caps_length > 0 {
-            let sym_fcap_offset = symbol_id("bcFCapabilitiesOffset").unwrap_or(594);
-            let sym_fcap_length = symbol_id("bcFCapabilitiesLength").unwrap_or(595);
+            let sym_fcap_offset = KfxSymbol::Bcfcapabilitiesoffset as u32;
+            let sym_fcap_length = KfxSymbol::Bcfcapabilitieslength as u32;
             ci_fields_vec.push((sym_fcap_offset, IonValue::Int(format_caps_offset as i64)));
             ci_fields_vec.push((sym_fcap_length, IonValue::Int(format_caps_length as i64)));
         }
@@ -755,12 +755,12 @@ mod tests {
         data.write_u32::<LittleEndian>(ci_bytes.len() as u32)
             .unwrap(); // ci_length
 
-        // bcIndexTab (24 bytes for 1 chunk)
+        // bcIndexTab (24 bytes for 1 chunk: id u32, type u32, relative offset u64, length u64)
         let mut chunk_entry = vec![0u8; 24];
-        chunk_entry[0..4].copy_from_slice(&852u32.to_le_bytes()); // id
-        chunk_entry[4..6].copy_from_slice(&145u16.to_le_bytes()); // type
-        chunk_entry[8..12].copy_from_slice(&header_len.to_le_bytes()); // offset
-        chunk_entry[12..16].copy_from_slice(&10u32.to_le_bytes()); // length
+        chunk_entry[0..4].copy_from_slice(&852u32.to_le_bytes()); // entity_id
+        chunk_entry[4..8].copy_from_slice(&145u32.to_le_bytes()); // chunk_type
+        chunk_entry[8..16].copy_from_slice(&0u64.to_le_bytes()); // relative offset from header_len
+        chunk_entry[16..24].copy_from_slice(&10u64.to_le_bytes()); // payload length
         data.extend_from_slice(&chunk_entry);
 
         // ContainerInfo
@@ -772,12 +772,16 @@ mod tests {
         let mut tmp_file = tempfile::NamedTempFile::new().unwrap();
         tmp_file.write_all(&data).unwrap();
 
-        let opened = KfxContainer::open(tmp_file.path()).unwrap();
+        let mut opened = KfxContainer::open(tmp_file.path()).unwrap();
         assert_eq!(
             opened.chunks.len(),
             1,
             "Must parse 1 chunk from field 414 despite preceding [0x03, 0x9e]"
         );
+        let chunk = opened.chunks[0].clone();
+        assert_eq!(chunk.entity_id, 852);
+        assert_eq!(chunk.chunk_type, 145);
+        assert_eq!(opened.read_chunk(&chunk).unwrap(), b"0123456789");
     }
 
     #[test]

@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
-/// Creates a minimal valid EPUB file in the given directory or a new temp dir.
-pub fn create_minimal_epub(
+/// Creates a minimal valid EPUB file in the given directory with custom chapter1 XHTML.
+pub fn create_epub_with_xhtml(
     dir: &Path,
     filename: &str,
     title: &str,
     language: &str,
     include_cover: bool,
+    chapter_xhtml: &str,
 ) -> PathBuf {
     let epub_path = dir.join(filename);
     let mut buf = Cursor::new(Vec::new());
@@ -91,18 +92,9 @@ pub fn create_minimal_epub(
         );
         std::io::Write::write_all(&mut zip, ncx_content.as_bytes()).unwrap();
 
-        // 5. chapter1.xhtml with some vocabulary to trigger Word Wise
+        // 5. chapter1.xhtml
         zip.start_file("chapter1.xhtml", opts).unwrap();
-        let xhtml_content = r#"<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>Chapter 1</title></head>
-<body>
-  <h1>Chapter 1: The Beginning</h1>
-  <p>It was an abstruse and chimerical morning when the serendipity of the ephemeral dawn appeared.</p>
-  <p>The luminous journey continued through the idiosyncratic landscape with meticulous observation.</p>
-</body>
-</html>"#;
-        std::io::Write::write_all(&mut zip, xhtml_content.as_bytes()).unwrap();
+        std::io::Write::write_all(&mut zip, chapter_xhtml.as_bytes()).unwrap();
 
         // 6. Optional cover image
         if include_cover {
@@ -117,6 +109,26 @@ pub fn create_minimal_epub(
 
     std::fs::write(&epub_path, buf.into_inner()).unwrap();
     epub_path
+}
+
+/// Creates a minimal valid EPUB file in the given directory with English vocabulary content.
+pub fn create_minimal_epub(
+    dir: &Path,
+    filename: &str,
+    title: &str,
+    language: &str,
+    include_cover: bool,
+) -> PathBuf {
+    let xhtml_content = r#"<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 1</title></head>
+<body>
+  <h1>Chapter 1: The Beginning</h1>
+  <p>It was an abstruse and chimerical morning when the serendipity of the ephemeral dawn appeared.</p>
+  <p>The luminous journey continued through the idiosyncratic landscape with meticulous observation.</p>
+</body>
+</html>"#;
+    create_epub_with_xhtml(dir, filename, title, language, include_cover, xhtml_content)
 }
 
 /// Generates a valid minimal 2x2 baseline JPEG image in memory.

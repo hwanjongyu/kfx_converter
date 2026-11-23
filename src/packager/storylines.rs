@@ -90,34 +90,34 @@ struct StorylineSymIds {
 }
 
 impl StorylineSymIds {
-    fn resolve() -> Self {
+    const fn resolve() -> Self {
         Self {
-            name: symbol_id("name").unwrap_or(4),
+            name: KfxSymbol::Name as u32,
             content: SYM_CONTENT,
-            content_list: symbol_id("content_list").unwrap_or(146),
-            story_name: symbol_id("story_name").unwrap_or(176),
-            id: symbol_id("id").unwrap_or(155),
-            type_key: symbol_id("type").unwrap_or(159),
-            type_text: symbol_id("text").unwrap_or(269),
-            type_image: symbol_id("image").unwrap_or(271),
-            resource_name: symbol_id("resource_name").unwrap_or(175),
-            alt_text: symbol_id("alt_text").unwrap_or(584),
-            style: symbol_id("style").unwrap_or(157),
-            style_events: symbol_id("style_events").unwrap_or(142),
-            offset: symbol_id("offset").unwrap_or(143),
-            length: symbol_id("length").unwrap_or(144),
-            index: symbol_id("index").unwrap_or(403),
-            section_name: symbol_id("section_name").unwrap_or(174),
-            page_templates: symbol_id("page_templates").unwrap_or(141),
-            kfx_id: symbol_id("kfx_id").unwrap_or(598),
-            metadata: symbol_id("metadata").unwrap_or(258),
-            key: symbol_id("key").unwrap_or(492),
-            val: symbol_id("value").unwrap_or(307),
+            content_list: KfxSymbol::ContentList as u32,
+            story_name: KfxSymbol::StoryName as u32,
+            id: KfxSymbol::Id as u32,
+            type_key: KfxSymbol::Type as u32,
+            type_text: KfxSymbol::Text as u32,
+            type_image: KfxSymbol::Image as u32,
+            resource_name: KfxSymbol::ResourceName as u32,
+            alt_text: KfxSymbol::AltText as u32,
+            style: KfxSymbol::Style as u32,
+            style_events: KfxSymbol::StyleEvents as u32,
+            offset: KfxSymbol::Offset as u32,
+            length: KfxSymbol::Length as u32,
+            index: KfxSymbol::Index as u32,
+            section_name: KfxSymbol::SectionName as u32,
+            page_templates: KfxSymbol::PageTemplates as u32,
+            kfx_id: KfxSymbol::KfxId as u32,
+            metadata: KfxSymbol::Metadata as u32,
+            key: KfxSymbol::Key as u32,
+            val: KfxSymbol::Value as u32,
             ruby_content: SYM_RUBY_CONTENT,
-            link_to: symbol_id("link_to").unwrap_or(179),
-            anchor_name: symbol_id("anchor_name").unwrap_or(180),
-            position: symbol_id("position").unwrap_or(183),
-            uri: symbol_id("uri").unwrap_or(186),
+            link_to: KfxSymbol::LinkTo as u32,
+            anchor_name: KfxSymbol::AnchorName as u32,
+            position: KfxSymbol::Position as u32,
+            uri: KfxSymbol::Uri as u32,
         }
     }
 }
@@ -917,19 +917,16 @@ impl<'a> KfxPackager<'a> {
             IonValue::Struct(vec![
                 (syms.id, IonValue::Int(section_eid as i64)),
                 (syms.story_name, IonValue::Symbol(story_sym_id)),
+                (syms.type_key, IonValue::Symbol(KfxSymbol::Container as u32)),
+                (KfxSymbol::FixedWidth as u32, IonValue::Int(1400)),
+                (KfxSymbol::FixedHeight as u32, IonValue::Int(2100)),
                 (
-                    syms.type_key,
-                    IonValue::Symbol(symbol_id("container").unwrap_or(270)),
-                ),
-                (symbol_id("fixed_width").unwrap_or(66), IonValue::Int(1400)),
-                (symbol_id("fixed_height").unwrap_or(67), IonValue::Int(2100)),
-                (
-                    symbol_id("layout").unwrap_or(156),
-                    IonValue::Symbol(symbol_id("scale_fit").unwrap_or(326)),
+                    KfxSymbol::Layout as u32,
+                    IonValue::Symbol(KfxSymbol::ScaleFit as u32),
                 ),
                 (
-                    symbol_id("float").unwrap_or(140),
-                    IonValue::Symbol(symbol_id("center").unwrap_or(320)),
+                    KfxSymbol::Float as u32,
+                    IonValue::Symbol(KfxSymbol::Center as u32),
                 ),
             ])
         } else {
@@ -1395,10 +1392,10 @@ mod tests {
         let vals = crate::ion::IonReader::new(&story_ent.data)
             .decode_all()
             .expect("decode storyline");
-        let sym_offset = symbol_id("offset").unwrap_or(143);
-        let sym_style = symbol_id("style").unwrap_or(157);
-        let sym_style_events = symbol_id("style_events").unwrap_or(142);
-        let sym_content_list = symbol_id("content_list").unwrap_or(146);
+        let sym_offset = KfxSymbol::Offset as u32;
+        let sym_style = KfxSymbol::Style as u32;
+        let sym_style_events = KfxSymbol::StyleEvents as u32;
+        let sym_content_list = KfxSymbol::ContentList as u32;
 
         let mut saw_span0_italic = false;
         let mut saw_span1_event = false;

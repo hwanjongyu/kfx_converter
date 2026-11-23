@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::KindleStudio;
 use crate::state::{
     BatchProgressState, EpubSortField, LocalEpubItem, LocalEpubStatus, ScanPhase, ScanProgressState,
@@ -22,7 +24,7 @@ impl KindleStudio {
             .count();
         let total_count = self.folder_state.items.len();
 
-        let filtered_indices = self.folder_state.sorted_and_filtered_indices();
+        let filtered_indices = self.cached_folder_indices();
 
         div()
             .flex()
@@ -347,7 +349,7 @@ impl KindleStudio {
                                                 .into_any_element()
                                         } else {
                                             let view = cx.entity().downgrade();
-                                            let indices = filtered_indices.clone();
+                                            let indices = Arc::clone(&filtered_indices);
                                             let actions_disabled = self.is_batch_active() || self.eject_in_progress;
                                             uniform_list(
                                                 "folder_epub_uniform_list",
@@ -446,9 +448,6 @@ impl KindleStudio {
 
     /// Renders sortable column headers for the EPUB library table view (Option B).
     pub(super) fn render_table_column_headers(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let sort_field = self.folder_state.sort_field;
-        let sort_dir = self.folder_state.sort_direction;
-
         div()
             .flex()
             .items_center()
@@ -476,8 +475,6 @@ impl KindleStudio {
             .child(self.render_sort_column_cell(
                 "Title",
                 EpubSortField::Title,
-                sort_field,
-                sort_dir,
                 div().flex_1().min_w_0(),
                 cx,
             ))
@@ -485,8 +482,6 @@ impl KindleStudio {
             .child(self.render_sort_column_cell(
                 "Author",
                 EpubSortField::Author,
-                sort_field,
-                sort_dir,
                 div().w(px(140.0)).flex_shrink_0().min_w_0(),
                 cx,
             ))
@@ -494,8 +489,6 @@ impl KindleStudio {
             .child(self.render_sort_column_cell(
                 "Size",
                 EpubSortField::FileSize,
-                sort_field,
-                sort_dir,
                 div().w(px(70.0)).flex_shrink_0(),
                 cx,
             ))
@@ -503,8 +496,6 @@ impl KindleStudio {
             .child(self.render_sort_column_cell(
                 "Date",
                 EpubSortField::DateModified,
-                sort_field,
-                sort_dir,
                 div().w(px(85.0)).flex_shrink_0(),
                 cx,
             ))
@@ -512,8 +503,6 @@ impl KindleStudio {
             .child(self.render_sort_column_cell(
                 "Status",
                 EpubSortField::Status,
-                sort_field,
-                sort_dir,
                 div().w(px(160.0)).flex_shrink_0(),
                 cx,
             ))

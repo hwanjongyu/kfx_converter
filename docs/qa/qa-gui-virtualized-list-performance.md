@@ -1,6 +1,6 @@
 # QA Report: High-Performance Virtualized List Rendering for Kindle Scribe Studio
 
-Spec: [spec-gui-virtualized-list-performance.md](spec-gui-virtualized-list-performance.md)
+Spec: [spec-gui-virtualized-list-performance.md](../specs/spec-gui-virtualized-list-performance.md)
 Date: 2026-10-24 · Attempt 1/3 · Result: **PASS**
 
 ---

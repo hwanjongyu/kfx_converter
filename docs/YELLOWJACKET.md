@@ -48,8 +48,8 @@ flowchart TD
 Kindle OS runs an internal monitoring daemon called **`pmond`**. If any reader process (`KPPMainApp` or its layout sub-engine) consumes more than **240MB of resident memory (RSS)**, `pmond` immediately sends a `SIGKILL` to prevent device lockups. 
 
 Because Yellowjacket pre-allocates structures for loaded chapter chunks:
-- Rendering an unfragmented section containing hundreds of blocks or tens of thousands of characters easily triggers a sudden spike in allocated heap memory.
-- To safely operate within Yellowjacket's memory ceiling, `kfx-converter` employs **Chapter Fragmentation**, splitting oversized sections into sequential sub-sections of under 7,500 characters or 25 blocks.
+- Rendering an unfragmented section with massive text or block counts can trigger a sudden spike in allocated heap memory.
+- To safely operate within Yellowjacket's memory ceiling while preserving native EPUB chapter boundaries, `kfx-converter` employs **Section Fragmentation** (`src/ir.rs`), splitting oversized sections exceeding calibrated defaults (`DEFAULT_MAX_SECTION_CHARS = 1,000,000` characters or `DEFAULT_MAX_SECTION_BLOCKS = 10,000` blocks) as well as author CSS forced page breaks (`page_break_before` / `page_break_after`) into sequential sub-sections.
 
 ---
 
@@ -128,6 +128,7 @@ flowchart TD
 | **`section`** | `$260` | High-level chapter container mapping storylines and auxiliary metadata. |
 | **`position_map`** | `$264` | Correlates storyline offset indices with byte positions in `$145`. |
 | **`position_id_map`** | `$265` | Maps internal DOM element IDs to linear position markers. |
+| **`anchor`** | `$266` | Internal position targets (`$183`) and external URI targets (`$186`) referenced via `$179 link_to`. |
 | **`bcContId`** | `$409` | Unique Amazon container ID payload. |
 | **`container_entity_map`** | `$419` | Exhaustive table listing every entity ID and its Yellowjacket type. |
 | **`book_metadata`** | `$490` | Root book descriptor for library indexing, author display, and ASIN linking. |
@@ -249,6 +250,7 @@ Standard publishing typography dictates that the opening paragraph of a chapter 
 | **`style_dropcap`** | `span.dropcap`, `p.has-dropcap` | `$16`, `$13`, `$42`, `$50`, `$125`, `$126` | `3.0em`, `$361` (bold), `0.9em`, `0.15em`, `3`, `1` |
 | **`style_uppercase`** | `text-transform: uppercase`, `.all-caps` | `$41` (text_transform) | `$372` (uppercase) |
 | **`style_ruby`** | `<ruby>`, `<rt>` | `$765` (ruby_text_align), `$766` (ruby_base_align), `$770` (ruby_base_edge_align) | `$773` (space_around), `$773` (space_around), `$771` (separate) |
+| **`style_link`** | `<a href="...">` | `$23` (underline) (omits `$19` text_color for Light/Dark/Sepia safety) | `true` (SID `890`, emitted iff links exist) |
 
 ### 8.5 Forced Page Break & Section Boundary Mechanics
 Kindle's e-ink rendering engine does not honor CSS `page-break-*` inside a single layout partition. To achieve guaranteed hardware page breaks:

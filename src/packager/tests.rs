@@ -1242,20 +1242,45 @@ fn test_cover_image_metadata_and_template_resolution() {
         "First raw media entity must be the cover image"
     );
 
-    // 4. Verify section 1 was recognized as cover container ($270)
+    // 4. Verify section 1 was recognized as cover container ($270) with scale_fit ($326)
     let sym_sec = SYM_SECTION;
     let sec_ent = packager
         .entities
         .iter()
         .find(|e| e.chunk_type == sym_sec)
         .expect("Section entity missing");
-    let has_scale_fit = sec_ent
-        .data
-        .windows(2)
-        .any(|w| w == [0x72, 0x01, 0x46] || w == [0x71, 0x46]);
+    let has_scale_fit = sec_ent.data.windows(3).any(|w| w == [0x72, 0x01, 0x46]);
     assert!(
-        has_scale_fit || !sec_ent.data.is_empty(),
-        "Cover section must emit container template"
+        has_scale_fit,
+        "Cover section must encode binary Ion Symbol(326) (scale_fit) [0x72, 0x01, 0x46]"
+    );
+
+    let sec_vals = crate::ion::IonReader::new(&sec_ent.data)
+        .decode_all()
+        .expect("Decode $260 cover section");
+    let IonValue::Struct(sec_fields) = &sec_vals[0] else {
+        panic!("Expected struct root in $260 cover section");
+    };
+    let Some((_, IonValue::List(templates))) = sec_fields
+        .iter()
+        .find(|(k, _)| *k == KfxSymbol::PageTemplates as u32)
+    else {
+        panic!("Expected $141 page_templates list in $260 cover section");
+    };
+    assert!(
+        templates.iter().any(|tpl| {
+            let IonValue::Struct(fields) = tpl else {
+                return false;
+            };
+            let has_container = fields
+                .iter()
+                .any(|(k, v)| *k == KfxSymbol::Type as u32 && matches!(v, IonValue::Symbol(270)));
+            let has_scale_fit_sym = fields
+                .iter()
+                .any(|(k, v)| *k == KfxSymbol::Layout as u32 && matches!(v, IonValue::Symbol(326)));
+            has_container && has_scale_fit_sym
+        }),
+        "Cover section $141 page_templates must have $159 type == Symbol(270) and $156 layout == Symbol(326)"
     );
 }
 
@@ -3569,4 +3594,134 @@ fn test_packager_footnote_targets_backlinks_and_unshifted_real_pids() {
             ("fn2".to_string(), "List note two.".to_string()),
         ]
     );
+}
+
+fn extract_content_feature_keys(entities: &[KfxEntity]) -> Vec<String> {
+    let cf_ent = entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_CONTENT_FEATURES)
+        .expect("Content features entity ($585) must exist");
+    let decoded = crate::ion::IonReader::new(&cf_ent.data)
+        .decode_all()
+        .expect("Decode $585 content_features");
+    let IonValue::Struct(root) = &decoded[0] else {
+        panic!("Expected struct root in $585");
+    };
+    let Some((_, IonValue::List(features))) =
+        root.iter().find(|(k, _)| *k == KfxSymbol::Features as u32)
+    else {
+        panic!("Expected $590 features list in $585");
+    };
+    features
+        .iter()
+        .filter_map(|f| {
+            let IonValue::Struct(fields) = f else {
+                return None;
+            };
+            fields.iter().find_map(|(k, v)| {
+                if *k == KfxSymbol::Key as u32
+                    && let IonValue::String(s) = v
+                {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn test_packager_flattened_table_omits_yj_table_content_features() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Flattened Table Test".to_string();
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![
+            Block::Table {
+                id: "tbl1".to_string(),
+                rows: vec![
+                    vec!["Col A".to_string(), "Col B".to_string()],
+                    vec!["Val 1".to_string(), "Val 2".to_string()],
+                ],
+            },
+            Block::List {
+                id: "list1".to_string(),
+                ordered: false,
+                items: vec![vec![Block::Table {
+                    id: "tbl2".to_string(),
+                    rows: vec![vec!["Nested".to_string()], vec!["Cell".to_string()]],
+                }]],
+            },
+        ],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager.package(&mut buf).expect("Packaging failed");
+
+    let keys = extract_content_feature_keys(&packager.entities);
+    assert!(keys.iter().any(|k| k == "CanonicalFormat"));
+    assert!(keys.iter().any(|k| k == "reflow-style"));
+    assert!(
+        !keys.iter().any(|k| k == "yj_table"),
+        "Flattened $269 text table must not emit yj_table in $585: {:?}",
+        keys
+    );
+    assert!(
+        !keys.iter().any(|k| k == "yj_table_viewer"),
+        "Flattened $269 text table must not emit yj_table_viewer in $585: {:?}",
+        keys
+    );
+}
+
+#[test]
+fn test_packager_native_table_storyline_emits_yj_table_content_features() {
+    let book = BookIR::default();
+    let mut packager = KfxPackager::new(&book, "EBOK");
+
+    let mut story_writer = crate::ion::IonWriter::new();
+    story_writer.write_bvm();
+    story_writer.write_value(&IonValue::Struct(vec![(
+        KfxSymbol::ContentList as u32,
+        IonValue::List(vec![IonValue::Struct(vec![
+            (KfxSymbol::Id as u32, IonValue::Int(1001)),
+            (
+                KfxSymbol::Type as u32,
+                IonValue::Symbol(KfxSymbol::Table as u32),
+            ),
+        ])]),
+    )]));
+
+    packager.entities.push(KfxEntity {
+        entity_id: 900,
+        chunk_type: SYM_STORYLINE,
+        data: story_writer.into_bytes(),
+    });
+
+    packager.build_content_features(&[]);
+    let keys = extract_content_feature_keys(&packager.entities);
+    assert!(
+        keys.iter().any(|k| k == "yj_table"),
+        "Native $278 table in $259 storyline must emit yj_table: {:?}",
+        keys
+    );
+    assert!(
+        keys.iter().any(|k| k == "yj_table_viewer"),
+        "Native $278 table in $259 storyline must emit yj_table_viewer: {:?}",
+        keys
+    );
+
+    // Also verify standalone $278/$279 entity chunk triggers yj_table emission
+    let mut direct_packager = KfxPackager::new(&book, "EBOK");
+    direct_packager.entities.push(KfxEntity {
+        entity_id: 901,
+        chunk_type: KfxSymbol::Table as u32,
+        data: vec![0xE0, 0x01, 0x00, 0xEA],
+    });
+    direct_packager.build_content_features(&[]);
+    let direct_keys = extract_content_feature_keys(&direct_packager.entities);
+    assert!(direct_keys.iter().any(|k| k == "yj_table"));
+    assert!(direct_keys.iter().any(|k| k == "yj_table_viewer"));
 }

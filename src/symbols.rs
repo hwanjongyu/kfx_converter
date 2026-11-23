@@ -857,30 +857,30 @@ pub const KFX_SYMBOL_TABLE_SIZE: usize = KFX_SYMBOL_TABLE.len();
 pub const KFX_MAX_SYMBOL_ID: usize = KFX_SYMBOL_TABLE.len() - 1;
 
 // Standard Amazon Yellowjacket (YJ / Enhanced Typesetting) Symbol Constants
-pub const SYM_CONTENT: u32 = 145;
-pub const SYM_STYLE: u32 = 157;
-pub const SYM_METADATA: u32 = 258;
-pub const SYM_STORYLINE: u32 = 259;
-pub const SYM_SECTION: u32 = 260;
-pub const SYM_ANCHOR: u32 = 266;
-pub const SYM_CONTAINER_ENTITY_MAP: u32 = 419;
-pub const SYM_BOOK_METADATA: u32 = 490;
-pub const SYM_DOCUMENT_DATA: u32 = 538;
-pub const SYM_CONTENT_FEATURES: u32 = 585;
-pub const SYM_FORMAT_CAPABILITIES: u32 = 593;
-pub const SYM_BC_FCAPABILITIES_OFFSET: u32 = 594;
-pub const SYM_BC_FCAPABILITIES_LENGTH: u32 = 595;
-pub const SYM_FOOTNOTE: u32 = 281;
-pub const SYM_POPUP: u32 = 440;
-pub const SYM_POPUP_TEXT: u32 = 444;
-pub const SYM_AUXILIARY_DATA: u32 = 597;
-pub const SYM_SECTION_POSITION_ID_MAP: u32 = 609;
-pub const SYM_YJ_NOTE: u32 = 617;
-pub const SYM_YJ_LOCATION_PID_MAP: u32 = 621;
-pub const SYM_RUBY_CONTENT: u32 = 756;
-pub const SYM_RUBY_TEXT_ALIGN: u32 = 765;
-pub const SYM_RUBY_BASE_ALIGN: u32 = 766;
-pub const SYM_RUBY_BASE_EDGE_ALIGN: u32 = 770;
+pub const SYM_CONTENT: u32 = KfxSymbol::Content as u32;
+pub const SYM_STYLE: u32 = KfxSymbol::Style as u32;
+pub const SYM_METADATA: u32 = KfxSymbol::Metadata as u32;
+pub const SYM_STORYLINE: u32 = KfxSymbol::Storyline as u32;
+pub const SYM_SECTION: u32 = KfxSymbol::Section as u32;
+pub const SYM_ANCHOR: u32 = KfxSymbol::Anchor as u32;
+pub const SYM_CONTAINER_ENTITY_MAP: u32 = KfxSymbol::ContainerEntityMap as u32;
+pub const SYM_BOOK_METADATA: u32 = KfxSymbol::BookMetadata as u32;
+pub const SYM_DOCUMENT_DATA: u32 = KfxSymbol::DocumentData as u32;
+pub const SYM_CONTENT_FEATURES: u32 = KfxSymbol::ContentFeatures as u32;
+pub const SYM_FORMAT_CAPABILITIES: u32 = KfxSymbol::FormatCapabilities as u32;
+pub const SYM_BC_FCAPABILITIES_OFFSET: u32 = KfxSymbol::Bcfcapabilitiesoffset as u32;
+pub const SYM_BC_FCAPABILITIES_LENGTH: u32 = KfxSymbol::Bcfcapabilitieslength as u32;
+pub const SYM_FOOTNOTE: u32 = KfxSymbol::Footnote as u32;
+pub const SYM_POPUP: u32 = KfxSymbol::Popup as u32;
+pub const SYM_POPUP_TEXT: u32 = KfxSymbol::PopupText as u32;
+pub const SYM_AUXILIARY_DATA: u32 = KfxSymbol::AuxiliaryData as u32;
+pub const SYM_SECTION_POSITION_ID_MAP: u32 = KfxSymbol::SectionPositionIdMap as u32;
+pub const SYM_YJ_NOTE: u32 = KfxSymbol::YjNote as u32;
+pub const SYM_YJ_LOCATION_PID_MAP: u32 = KfxSymbol::YjLocationPidMap as u32;
+pub const SYM_RUBY_CONTENT: u32 = KfxSymbol::RubyContent as u32;
+pub const SYM_RUBY_TEXT_ALIGN: u32 = KfxSymbol::RubyTextAlign as u32;
+pub const SYM_RUBY_BASE_ALIGN: u32 = KfxSymbol::RubyBaseAlign as u32;
+pub const SYM_RUBY_BASE_EDGE_ALIGN: u32 = KfxSymbol::RubyBaseEdgeAlign as u32;
 
 /// Get the symbol name for a given symbol ID.
 /// This is the preferred way to look up symbol names.
@@ -908,13 +908,24 @@ pub fn symbol_id(name: &str) -> Option<u32> {
     map.get(name).copied()
 }
 
-/// KFX symbol enum with values matching KFX_SYMBOL_TABLE indices.
-/// Generated from the table using `scripts/gen_kfx_enum.py`.
+macro_rules! define_kfx_symbols {
+    ($($variant:ident = $id:literal),* $(,)?) => {
+        /// KFX symbol enum with values matching KFX_SYMBOL_TABLE indices.
+        /// Generated from the table using `scripts/gen_kfx_enum.py`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[repr(u32)]
+        #[allow(non_camel_case_types)]
+        pub enum KfxSymbol {
+            $($variant = $id,)*
+        }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
-#[allow(non_camel_case_types)]
-pub enum KfxSymbol {
+        const ALL_KFX_SYMBOLS: [KfxSymbol; KFX_SYMBOL_TABLE.len()] = [
+            $(KfxSymbol::$variant,)*
+        ];
+    };
+}
+
+define_kfx_symbols! {
     KpropertyInvalid = 0,
     Ion = 1,
     Ion10 = 2,
@@ -1769,9 +1780,43 @@ pub enum KfxSymbol {
     VertexList = 851,
 }
 
+impl KfxSymbol {
+    /// Returns the numeric Yellowjacket symbol ID (`0..=851`).
+    #[inline]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Looks up the `KfxSymbol` variant for a numeric symbol ID (`0..=851`) in O(1) time.
+    #[inline]
+    pub const fn from_id(id: u32) -> Option<Self> {
+        if (id as u64) < (ALL_KFX_SYMBOLS.len() as u64) {
+            Some(ALL_KFX_SYMBOLS[id as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Returns the canonical Yellowjacket symbol string from `KFX_SYMBOL_TABLE`.
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        KFX_SYMBOL_TABLE[self as usize]
+    }
+}
+
+impl TryFrom<u32> for KfxSymbol {
+    type Error = u32;
+
+    #[inline]
+    fn try_from(id: u32) -> Result<Self, Self::Error> {
+        Self::from_id(id).ok_or(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_symbol_id_lookups() {
@@ -1784,5 +1829,133 @@ mod tests {
         assert_eq!(symbol_id("book_navigation"), Some(389));
         assert_eq!(symbol_id("vertex_list"), Some(851));
         assert_eq!(symbol_id("non_existent_symbol"), None);
+    }
+
+    fn canonical_variant_name(raw: &str) -> String {
+        match raw {
+            "ISBN-10" => "Isbn10".to_string(),
+            "ISBN-13" => "Isbn13".to_string(),
+            "==" => "Eq".to_string(),
+            "!=" => "Neq".to_string(),
+            ">" => "Gt".to_string(),
+            ">=" => "Gte".to_string(),
+            "<" => "Lt".to_string(),
+            "<=" => "Lte".to_string(),
+            "+" => "Plus".to_string(),
+            "-" => "Minus".to_string(),
+            "*" => "Mul".to_string(),
+            "/" => "Div".to_string(),
+            _ => raw
+                .trim_start_matches('$')
+                .split(['_', '.'])
+                .filter(|part| !part.is_empty())
+                .map(|part| {
+                    let mut chars = part.chars();
+                    let mut out = String::with_capacity(part.len());
+                    if let Some(first) = chars.next() {
+                        out.push(first.to_ascii_uppercase());
+                    }
+                    for ch in chars {
+                        out.push(ch.to_ascii_lowercase());
+                    }
+                    out
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_kfx_symbol_enum_full_parity_0_to_851() {
+        assert_eq!(KFX_SYMBOL_TABLE.len(), 852);
+        assert_eq!(KFX_SYMBOL_TABLE_SIZE, 852);
+        assert_eq!(KFX_MAX_SYMBOL_ID, 851);
+        assert_eq!(ALL_KFX_SYMBOLS.len(), 852);
+
+        let mut unique_names = HashSet::with_capacity(KFX_SYMBOL_TABLE.len());
+        let mut unique_variants = HashSet::with_capacity(ALL_KFX_SYMBOLS.len());
+
+        for id in 0u32..852 {
+            let table_name = KFX_SYMBOL_TABLE[id as usize];
+            assert!(
+                unique_names.insert(table_name),
+                "Duplicate KFX_SYMBOL_TABLE entry at {}: {}",
+                id,
+                table_name
+            );
+
+            let sym = KfxSymbol::from_id(id).expect("valid symbol id 0..=851");
+            assert_eq!(sym as u32, id);
+            assert_eq!(sym.as_u32(), id);
+            assert_eq!(sym.as_str(), table_name);
+            assert_eq!(KfxSymbol::try_from(id), Ok(sym));
+            assert_eq!(symbol_id(table_name), Some(id));
+            assert_eq!(symbol_name(id as u64), Some(table_name));
+
+            let debug_name = format!("{:?}", sym);
+            assert!(
+                unique_variants.insert(debug_name.clone()),
+                "Duplicate KfxSymbol variant name at {}: {}",
+                id,
+                debug_name
+            );
+            assert_eq!(
+                debug_name,
+                canonical_variant_name(table_name),
+                "Parity mismatch at SID {} ({})",
+                id,
+                table_name
+            );
+        }
+
+        assert_eq!(unique_names.len(), 852);
+        assert_eq!(unique_variants.len(), 852);
+        assert_eq!(KfxSymbol::from_id(852), None);
+        assert_eq!(KfxSymbol::try_from(852), Err(852));
+        assert_eq!(symbol_name(852), None);
+        assert_eq!(symbol_name(u64::MAX), None);
+
+        // Verify all SYM_* constants stay aligned with KfxSymbol
+        assert_eq!(SYM_CONTENT, KfxSymbol::Content as u32);
+        assert_eq!(SYM_STYLE, KfxSymbol::Style as u32);
+        assert_eq!(SYM_METADATA, KfxSymbol::Metadata as u32);
+        assert_eq!(SYM_STORYLINE, KfxSymbol::Storyline as u32);
+        assert_eq!(SYM_SECTION, KfxSymbol::Section as u32);
+        assert_eq!(SYM_ANCHOR, KfxSymbol::Anchor as u32);
+        assert_eq!(
+            SYM_CONTAINER_ENTITY_MAP,
+            KfxSymbol::ContainerEntityMap as u32
+        );
+        assert_eq!(SYM_BOOK_METADATA, KfxSymbol::BookMetadata as u32);
+        assert_eq!(SYM_DOCUMENT_DATA, KfxSymbol::DocumentData as u32);
+        assert_eq!(SYM_CONTENT_FEATURES, KfxSymbol::ContentFeatures as u32);
+        assert_eq!(
+            SYM_FORMAT_CAPABILITIES,
+            KfxSymbol::FormatCapabilities as u32
+        );
+        assert_eq!(
+            SYM_BC_FCAPABILITIES_OFFSET,
+            KfxSymbol::Bcfcapabilitiesoffset as u32
+        );
+        assert_eq!(
+            SYM_BC_FCAPABILITIES_LENGTH,
+            KfxSymbol::Bcfcapabilitieslength as u32
+        );
+        assert_eq!(SYM_FOOTNOTE, KfxSymbol::Footnote as u32);
+        assert_eq!(SYM_POPUP, KfxSymbol::Popup as u32);
+        assert_eq!(SYM_POPUP_TEXT, KfxSymbol::PopupText as u32);
+        assert_eq!(SYM_AUXILIARY_DATA, KfxSymbol::AuxiliaryData as u32);
+        assert_eq!(
+            SYM_SECTION_POSITION_ID_MAP,
+            KfxSymbol::SectionPositionIdMap as u32
+        );
+        assert_eq!(SYM_YJ_NOTE, KfxSymbol::YjNote as u32);
+        assert_eq!(SYM_YJ_LOCATION_PID_MAP, KfxSymbol::YjLocationPidMap as u32);
+        assert_eq!(SYM_RUBY_CONTENT, KfxSymbol::RubyContent as u32);
+        assert_eq!(SYM_RUBY_TEXT_ALIGN, KfxSymbol::RubyTextAlign as u32);
+        assert_eq!(SYM_RUBY_BASE_ALIGN, KfxSymbol::RubyBaseAlign as u32);
+        assert_eq!(
+            SYM_RUBY_BASE_EDGE_ALIGN,
+            KfxSymbol::RubyBaseEdgeAlign as u32
+        );
     }
 }

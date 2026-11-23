@@ -362,6 +362,21 @@ impl KindleStudio {
                                                     .text_color(hsla(0.0, 0.0, 0.0, 1.0))
                                                     .child("KFX"),
                                             )
+                                            .children(if task.word_wise {
+                                                Some(
+                                                    div()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(Theme::accent_purple())
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(Theme::text_primary())
+                                                        .child("WW"),
+                                                )
+                                            } else {
+                                                None
+                                            })
                                             .child(
                                                 div()
                                                     .px_1p5()

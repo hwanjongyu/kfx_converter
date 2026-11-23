@@ -8,9 +8,17 @@ fn get_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kfx-conv")
 }
 
+fn cli_cmd(log_dir: &std::path::Path) -> Command {
+    let mut cmd = Command::new(get_bin());
+    cmd.env("XDG_DATA_HOME", log_dir)
+        .env("LOCALAPPDATA", log_dir);
+    cmd
+}
+
 #[test]
 fn test_cli_missing_positional_args_returns_code_2() {
-    let output = Command::new(get_bin())
+    let temp = common::temp_dir();
+    let output = cli_cmd(temp.path())
         .output()
         .expect("Failed to execute binary");
 
@@ -29,7 +37,8 @@ fn test_cli_missing_positional_args_returns_code_2() {
 
 #[test]
 fn test_cli_invalid_option_returns_code_2() {
-    let output = Command::new(get_bin())
+    let temp = common::temp_dir();
+    let output = cli_cmd(temp.path())
         .arg("--unrecognized-invalid-option-xyz")
         .output()
         .expect("Failed to execute binary");
@@ -43,7 +52,8 @@ fn test_cli_invalid_option_returns_code_2() {
 
 #[test]
 fn test_cli_help_flag() {
-    let output = Command::new(get_bin())
+    let temp = common::temp_dir();
+    let output = cli_cmd(temp.path())
         .arg("--help")
         .output()
         .expect("Failed to execute binary");
@@ -59,7 +69,8 @@ fn test_cli_help_flag() {
 
 #[test]
 fn test_cli_version_flag() {
-    let output = Command::new(get_bin())
+    let temp = common::temp_dir();
+    let output = cli_cmd(temp.path())
         .arg("--version")
         .output()
         .expect("Failed to execute binary");
@@ -75,7 +86,7 @@ fn test_cli_inspect_valid_kfx() {
     let kfx_path = temp.path().join("valid_sample.kfx");
     common::create_valid_kfx(&kfx_path);
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&kfx_path)
         .arg("--inspect")
         .output()
@@ -98,7 +109,7 @@ fn test_cli_inspect_nonexistent_file_returns_code_1() {
     let temp = common::temp_dir();
     let non_existent = temp.path().join("does_not_exist.kfx");
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&non_existent)
         .arg("-i")
         .output()
@@ -121,7 +132,7 @@ fn test_cli_inspect_drm_protected_kfx_returns_code_1() {
     let drm_path_1 = temp.path().join("drm_protected_1.kfx");
     common::create_drm_kfx(&drm_path_1, b"\xeaDRM");
 
-    let output1 = Command::new(get_bin())
+    let output1 = cli_cmd(temp.path())
         .arg(&drm_path_1)
         .arg("-i")
         .output()
@@ -135,7 +146,7 @@ fn test_cli_inspect_drm_protected_kfx_returns_code_1() {
     let drm_path_2 = temp.path().join("drm_protected_2.kfx");
     common::create_drm_kfx(&drm_path_2, b"\xa8DRM");
 
-    let output2 = Command::new(get_bin())
+    let output2 = cli_cmd(temp.path())
         .arg(&drm_path_2)
         .arg("--inspect")
         .output()
@@ -153,7 +164,7 @@ fn test_cli_inspect_corrupt_kfx_returns_code_1() {
     // Write truncated header (<18 bytes)
     std::fs::write(&corrupt_path, b"CONT_TRUNCATED").unwrap();
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&corrupt_path)
         .arg("-i")
         .output()
@@ -175,7 +186,7 @@ fn test_cli_convert_default_output() {
         false,
     );
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&epub_path)
         .output()
         .expect("Failed to execute binary");
@@ -190,6 +201,11 @@ fn test_cli_convert_default_output() {
     assert!(
         expected_sdr.is_dir(),
         "Companion SDR directory should exist"
+    );
+    let isolated_log = temp.path().join("kfx-converter").join("conversion.log");
+    assert!(
+        isolated_log.is_file(),
+        "CLI test log must be written inside isolated temp dir"
     );
 }
 
@@ -206,7 +222,7 @@ fn test_cli_convert_custom_output_flag() {
     let custom_output = temp.path().join("custom_nested").join("custom_target.kfx");
     std::fs::create_dir_all(custom_output.parent().unwrap()).unwrap();
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-o")
         .arg(&custom_output)
@@ -230,7 +246,7 @@ fn test_cli_convert_word_wise_toggle() {
         common::create_minimal_epub(temp.path(), "noww.epub", "No Word Wise Book", "en", false);
     let target_kfx = temp.path().join("noww.kfx");
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-o")
         .arg(&target_kfx)
@@ -268,7 +284,7 @@ fn test_cli_convert_content_type_pdoc() {
         common::create_minimal_epub(temp.path(), "doc.epub", "Personal Document", "en", false);
     let target_kfx = temp.path().join("doc.kfx");
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-o")
         .arg(&target_kfx)
@@ -286,7 +302,8 @@ fn test_cli_convert_content_type_pdoc() {
 
 #[test]
 fn test_cli_convert_missing_input_file_returns_code_1() {
-    let output = Command::new(get_bin())
+    let temp = common::temp_dir();
+    let output = cli_cmd(temp.path())
         .arg("/path/to/missing/book/that/does/not/exist.epub")
         .output()
         .expect("Failed to execute binary");
@@ -302,7 +319,8 @@ fn test_cli_convert_missing_input_file_returns_code_1() {
 
 #[test]
 fn test_cli_help_shows_word_wise_and_content_type_ebok() {
-    let output = Command::new(get_bin())
+    let temp = common::temp_dir();
+    let output = cli_cmd(temp.path())
         .arg("--help")
         .output()
         .expect("Failed to execute binary");
@@ -321,7 +339,7 @@ fn test_cli_short_word_wise_flag_with_positional_input() {
     let epub_path =
         common::create_minimal_epub(temp.path(), "ww_short.epub", "Word Wise Short", "en", false);
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg("-w")
         .arg(&epub_path)
         .output()
@@ -343,7 +361,7 @@ fn test_cli_word_wise_equals_and_short_space_false() {
         common::create_minimal_epub(temp.path(), "ww_off.epub", "No WW Modes", "en", false);
 
     let out_eq = temp.path().join("eq_off.kfx");
-    let res_eq = Command::new(get_bin())
+    let res_eq = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-o")
         .arg(&out_eq)
@@ -354,7 +372,7 @@ fn test_cli_word_wise_equals_and_short_space_false() {
     assert!(out_eq.is_file());
 
     let out_short = temp.path().join("short_off.kfx");
-    let res_short = Command::new(get_bin())
+    let res_short = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-o")
         .arg(&out_short)
@@ -382,7 +400,7 @@ fn test_cli_content_type_case_insensitive_and_invalid_exit_2() {
         common::create_minimal_epub(temp.path(), "ctype.epub", "Content Type Book", "en", false);
     let target_kfx = temp.path().join("ctype.kfx");
 
-    let ok_lower = Command::new(get_bin())
+    let ok_lower = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-o")
         .arg(&target_kfx)
@@ -392,7 +410,7 @@ fn test_cli_content_type_case_insensitive_and_invalid_exit_2() {
         .expect("Failed to execute binary");
     assert!(ok_lower.status.success(), "-c pdoc should succeed");
 
-    let invalid = Command::new(get_bin())
+    let invalid = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-c")
         .arg("INVALID")
@@ -416,7 +434,7 @@ fn test_cli_word_wise_error_emits_stderr_warning_and_no_success_line() {
     // and populates `report.word_wise_error` while conversion itself still succeeds.
     std::fs::write(target_kfx.with_extension("sdr"), b"blocking-file").unwrap();
 
-    let output = Command::new(get_bin())
+    let output = cli_cmd(temp.path())
         .arg(&epub_path)
         .arg("-o")
         .arg(&target_kfx)

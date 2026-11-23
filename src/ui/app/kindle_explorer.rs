@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use super::KindleStudio;
-use crate::state::{EpubSortField, KindleFile, SortDirection, case_insensitive_cmp};
+use crate::state::{EpubSortField, KindleFile};
 use crate::theme::Theme;
 use gpui::*;
 
@@ -13,64 +15,7 @@ impl KindleStudio {
         let is_offline = !self.device.connected;
         let active_filter = self.filter_format.as_deref().unwrap_or("ALL");
 
-        let count_kfx = self.files.iter().filter(|f| f.format == "KFX").count();
-        let count_wordwise = self.files.iter().filter(|f| f.has_word_wise).count();
-        let count_azw3 = self.files.iter().filter(|f| f.format == "AZW3").count();
-        let count_mobi = self.files.iter().filter(|f| f.format == "MOBI").count();
-        let count_all = self.files.len();
-
-        let search_lower = self.search_query.to_lowercase();
-        let mut filtered_indices: Vec<usize> = self
-            .files
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| {
-                let fmt_match = match self.filter_format.as_deref() {
-                    Some("KFX") => f.format == "KFX",
-                    Some("WORDWISE") => f.has_word_wise,
-                    Some("AZW3") => f.format == "AZW3",
-                    Some("MOBI") => f.format == "MOBI",
-                    _ => true,
-                };
-                let query_match = if search_lower.is_empty() {
-                    true
-                } else {
-                    f.name.to_lowercase().contains(&search_lower)
-                        || f.title.to_lowercase().contains(&search_lower)
-                        || f.author.to_lowercase().contains(&search_lower)
-                };
-                fmt_match && query_match
-            })
-            .map(|(idx, _)| idx)
-            .collect();
-
-        filtered_indices.sort_by(|&a_idx, &b_idx| {
-            let a = &self.files[a_idx];
-            let b = &self.files[b_idx];
-
-            let cmp = match self.explorer_sort_field {
-                EpubSortField::Title => case_insensitive_cmp(&a.title, &b.title),
-                EpubSortField::Author => {
-                    let a_unknown = a.author.eq_ignore_ascii_case("unknown");
-                    let b_unknown = b.author.eq_ignore_ascii_case("unknown");
-                    match (a_unknown, b_unknown) {
-                        (true, false) => std::cmp::Ordering::Greater,
-                        (false, true) => std::cmp::Ordering::Less,
-                        _ => case_insensitive_cmp(&a.author, &b.author),
-                    }
-                }
-                EpubSortField::FileSize => a.size_bytes.cmp(&b.size_bytes),
-                EpubSortField::DateModified => a.modified_timestamp.cmp(&b.modified_timestamp),
-                EpubSortField::Status => a.format.cmp(&b.format),
-            };
-
-            let ordered_cmp = match self.explorer_sort_direction {
-                SortDirection::Ascending => cmp,
-                SortDirection::Descending => cmp.reverse(),
-            };
-
-            ordered_cmp.then_with(|| a.name.cmp(&b.name))
-        });
+        let (counts, filtered_indices) = self.cached_explorer_view();
         let file_count = filtered_indices.len();
 
         let free_gb = (self.device.total_gb - self.device.used_gb).max(0.0);
@@ -112,7 +57,7 @@ impl KindleStudio {
                             .child(if is_offline {
                                 "Disconnected".to_string()
                             } else {
-                                format!("Total {} books (Filtered: {})", count_all, file_count)
+                                format!("Total {} books (Filtered: {})", counts.all, file_count)
                             }),
                     ),
             )
@@ -183,7 +128,7 @@ impl KindleStudio {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .bg(if active_filter == "ALL" { Theme::accent_amber() } else { Theme::bg_card() })
                                 .text_color(if active_filter == "ALL" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
-                                .child(format!("All ({})", count_all))
+                                .child(format!("All ({})", counts.all))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.filter_format = None;
                                     cx.notify();
@@ -200,7 +145,7 @@ impl KindleStudio {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .bg(if active_filter == "KFX" { Theme::accent_amber() } else { Theme::bg_card() })
                                 .text_color(if active_filter == "KFX" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
-                                .child(format!("KFX ({})", count_kfx))
+                                .child(format!("KFX ({})", counts.kfx))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.filter_format = Some("KFX".into());
                                     cx.notify();
@@ -217,7 +162,7 @@ impl KindleStudio {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .bg(if active_filter == "WORDWISE" { Theme::accent_purple() } else { Theme::bg_card() })
                                 .text_color(if active_filter == "WORDWISE" { Theme::text_primary() } else { Theme::text_muted() })
-                                .child(format!("Word Wise ({})", count_wordwise))
+                                .child(format!("Word Wise ({})", counts.word_wise))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.filter_format = Some("WORDWISE".into());
                                     cx.notify();
@@ -234,7 +179,7 @@ impl KindleStudio {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .bg(if active_filter == "AZW3" { Theme::accent_blue() } else { Theme::bg_card() })
                                 .text_color(if active_filter == "AZW3" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
-                                .child(format!("AZW3 ({})", count_azw3))
+                                .child(format!("AZW3 ({})", counts.azw3))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.filter_format = Some("AZW3".into());
                                     cx.notify();
@@ -251,7 +196,7 @@ impl KindleStudio {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .bg(if active_filter == "MOBI" { Theme::accent_purple() } else { Theme::bg_card() })
                                 .text_color(if active_filter == "MOBI" { hsla(0.0, 0.0, 0.0, 1.0) } else { Theme::text_muted() })
-                                .child(format!("MOBI ({})", count_mobi))
+                                .child(format!("MOBI ({})", counts.mobi))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.filter_format = Some("MOBI".into());
                                     cx.notify();
@@ -336,7 +281,7 @@ impl KindleStudio {
                         .into_any_element()
                 } else {
                     let view = cx.entity().downgrade();
-                    let indices = filtered_indices.clone();
+                    let indices = Arc::clone(&filtered_indices);
                     div()
                         .flex()
                         .flex_col()
@@ -405,9 +350,6 @@ impl KindleStudio {
         &self,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let sort_field = self.explorer_sort_field;
-        let sort_dir = self.explorer_sort_direction;
-
         div()
             .flex()
             .items_center()
@@ -424,8 +366,6 @@ impl KindleStudio {
             .child(self.render_explorer_sort_column_cell(
                 "Format",
                 EpubSortField::Status,
-                sort_field,
-                sort_dir,
                 div().w(px(70.0)).flex_shrink_0(),
                 cx,
             ))
@@ -433,8 +373,6 @@ impl KindleStudio {
             .child(self.render_explorer_sort_column_cell(
                 "Title",
                 EpubSortField::Title,
-                sort_field,
-                sort_dir,
                 div().flex_1().min_w_0(),
                 cx,
             ))
@@ -442,8 +380,6 @@ impl KindleStudio {
             .child(self.render_explorer_sort_column_cell(
                 "Author",
                 EpubSortField::Author,
-                sort_field,
-                sort_dir,
                 div().w(px(130.0)).flex_shrink_0().min_w_0(),
                 cx,
             ))
@@ -451,8 +387,6 @@ impl KindleStudio {
             .child(self.render_explorer_sort_column_cell(
                 "Size",
                 EpubSortField::FileSize,
-                sort_field,
-                sort_dir,
                 div().w(px(65.0)).flex_shrink_0(),
                 cx,
             ))
@@ -460,8 +394,6 @@ impl KindleStudio {
             .child(self.render_explorer_sort_column_cell(
                 "Date",
                 EpubSortField::DateModified,
-                sort_field,
-                sort_dir,
                 div().w(px(75.0)).flex_shrink_0(),
                 cx,
             ))

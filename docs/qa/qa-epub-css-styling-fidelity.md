@@ -1,6 +1,6 @@
 # QA Report: EPUB CSS Styling Fidelity
 
-Spec: [spec-epub-css-styling-fidelity.md](spec-epub-css-styling-fidelity.md)
+Spec: [spec-epub-css-styling-fidelity.md](../specs/spec-epub-css-styling-fidelity.md)
 Date: 2026-10-20 · Attempt 1/3 · Result: **PASS**
 
 ## Changes

@@ -416,57 +416,76 @@ impl EpubReader {
 
     /// Opens and parses an EPUB file into a normalized `BookIR`.
     pub fn read_from_file<P: AsRef<Path>>(path: P) -> Result<BookIR, EpubError> {
+        Self::read_from_file_with_total_limit(path, MAX_EPUB_UNCOMPRESSED_TOTAL)
+    }
+
+    /// Opens and parses an EPUB file enforcing a caller-specified cumulative uncompressed budget.
+    pub(crate) fn read_from_file_with_total_limit<P: AsRef<Path>>(
+        path: P,
+        max_total_bytes: u64,
+    ) -> Result<BookIR, EpubError> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let mut archive = ZipArchive::new(reader)?;
+        Self::read_from_archive_with_limit(&mut archive, max_total_bytes, false)
+    }
 
+    /// Parses an opened EPUB `ZipArchive` under an explicit cumulative decompression budget.
+    pub(crate) fn read_from_archive_with_limit<R: Read + std::io::Seek>(
+        archive: &mut ZipArchive<R>,
+        max_total_bytes: u64,
+        skip_prescan: bool,
+    ) -> Result<BookIR, EpubError> {
         // 1. Zip bomb & security guardrails
-        let num_files = archive.len();
-        if num_files > MAX_EPUB_FILES {
-            return Err(EpubError::Security(format!(
-                "Archive contains {} files, exceeding limit of {}",
-                num_files, MAX_EPUB_FILES
-            )));
-        }
-
-        let mut total_uncompressed: u64 = 0;
-        for i in 0..num_files {
-            let entry = archive.by_index_raw(i)?;
-            let size = entry.size();
-            let compressed = entry.compressed_size();
-
-            if size > MAX_EPUB_FILE_SIZE {
+        if !skip_prescan {
+            let num_files = archive.len();
+            if num_files > MAX_EPUB_FILES {
                 return Err(EpubError::Security(format!(
-                    "Member '{}' exceeds maximum file size limit",
-                    entry.name()
+                    "Archive contains {} files, exceeding limit of {}",
+                    num_files, MAX_EPUB_FILES
                 )));
             }
 
-            if compressed > 0 && size > 1024 * 1024 {
-                let ratio = (size as f64) / (compressed as f64);
-                if ratio > MAX_COMPRESSION_RATIO {
+            let mut total_uncompressed: u64 = 0;
+            for i in 0..num_files {
+                let entry = archive.by_index_raw(i)?;
+                let size = entry.size();
+                let compressed = entry.compressed_size();
+
+                if size > MAX_EPUB_FILE_SIZE {
                     return Err(EpubError::Security(format!(
-                        "Member '{}' has compression ratio {:.1}:1 exceeding limit",
-                        entry.name(),
-                        ratio
+                        "Member '{}' exceeds maximum file size limit",
+                        entry.name()
                     )));
                 }
-            }
 
-            total_uncompressed = total_uncompressed.checked_add(size).ok_or_else(|| {
-                EpubError::Security("Total uncompressed size overflows u64 limit".to_string())
-            })?;
-            if total_uncompressed > MAX_EPUB_UNCOMPRESSED_TOTAL {
-                return Err(EpubError::Security(
-                    "Total uncompressed size exceeds 1 GB limit".to_string(),
-                ));
+                if compressed > 0 && size > 1024 * 1024 {
+                    let ratio = (size as f64) / (compressed as f64);
+                    if ratio > MAX_COMPRESSION_RATIO {
+                        return Err(EpubError::Security(format!(
+                            "Member '{}' has compression ratio {:.1}:1 exceeding limit",
+                            entry.name(),
+                            ratio
+                        )));
+                    }
+                }
+
+                total_uncompressed = total_uncompressed.checked_add(size).ok_or_else(|| {
+                    EpubError::Security("Total uncompressed size overflows u64 limit".to_string())
+                })?;
+                if total_uncompressed > max_total_bytes {
+                    return Err(EpubError::Security(format!(
+                        "Total uncompressed size ({} bytes) exceeds {} byte limit",
+                        total_uncompressed, max_total_bytes
+                    )));
+                }
             }
         }
 
         // 2. Locate OPF file via META-INF/container.xml
-        let mut budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
+        let mut budget = DecompressionBudget::new(max_total_bytes);
 
-        let opf_path = archive::find_opf_path_with_budget(&mut archive, &mut budget)?;
+        let opf_path = archive::find_opf_path_with_budget(archive, &mut budget)?;
         let opf_dir = Path::new(&opf_path)
             .parent()
             .map(|p| p.to_string_lossy().to_string())
@@ -474,19 +493,21 @@ impl EpubReader {
 
         // 3. Read and parse OPF file
         let opf_content = {
-            let mut entry = archive::open_zip_entry(&mut archive, &opf_path)
+            let mut entry = archive::open_zip_entry(archive, &opf_path)
                 .map_err(|_| EpubError::Invalid(format!("OPF file not found: {}", opf_path)))?;
             archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget)?
         };
 
         let (metadata, manifest, spine) = Self::parse_opf(&opf_content)?;
+        let mut manifest_items: Vec<&opf::ManifestItem> = manifest.values().collect();
+        manifest_items.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.href.cmp(&b.href)));
 
-        // 3b. Build the book-level stylesheet from all manifest CSS files
+        // 3b. Build the book-level stylesheet from all manifest CSS files in deterministic order
         let mut book_css = CssStylesheet::new();
-        for item in manifest.values() {
+        for item in &manifest_items {
             if item.media_type == "text/css" || item.href.to_ascii_lowercase().ends_with(".css") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
-                if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
+                if let Ok(mut entry) = archive::open_zip_entry(archive, &full_path) {
                     match archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget) {
                         Ok(s) => book_css.add_css(&s),
                         Err(e @ EpubError::Security(_)) => return Err(e),
@@ -499,27 +520,20 @@ impl EpubReader {
         // 4. Extract resources (images, fonts) and build href -> item_id lookup map
         let mut resources = HashMap::new();
         let mut href_to_id = HashMap::new();
-        for item in manifest.values() {
-            let file_name = Path::new(&item.href)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| item.href.clone());
+        for item in &manifest_items {
             let clean_href = item.href.trim_start_matches("./").to_string();
             let decoded_href = Self::decode_percent(&item.href);
             let decoded_clean_href = Self::decode_percent(&clean_href);
-            let decoded_file_name = Self::decode_percent(&file_name);
 
             href_to_id.insert(item.href.clone(), item.id.clone());
             href_to_id.insert(clean_href, item.id.clone());
             href_to_id.insert(decoded_href, item.id.clone());
             href_to_id.insert(decoded_clean_href, item.id.clone());
-            href_to_id.insert(file_name, item.id.clone());
-            href_to_id.insert(decoded_file_name, item.id.clone());
             href_to_id.insert(item.id.clone(), item.id.clone());
 
             if item.media_type.starts_with("image/") || item.media_type.starts_with("font/") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
-                if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
+                if let Ok(mut entry) = archive::open_zip_entry(archive, &full_path) {
                     match archive::read_entry_bytes(&mut entry, MAX_EPUB_FILE_SIZE, &mut budget) {
                         Ok(data) => {
                             resources.insert(
@@ -536,6 +550,20 @@ impl EpubReader {
                     }
                 }
             }
+        }
+        // Insert bare filenames only as fallbacks so colliding filenames never overwrite exact paths.
+        for item in &manifest_items {
+            let file_name = Path::new(&item.href)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| item.href.clone());
+            let decoded_file_name = Self::decode_percent(&file_name);
+            href_to_id
+                .entry(file_name)
+                .or_insert_with(|| item.id.clone());
+            href_to_id
+                .entry(decoded_file_name)
+                .or_insert_with(|| item.id.clone());
         }
 
         // 5a. Build complete spine section & href maps BEFORE parsing XHTML so forward and relative
@@ -600,7 +628,7 @@ impl EpubReader {
         let mut all_footnotes = HashMap::new();
 
         for (idx, sec_id, full_path, item, file_name) in spine_entries {
-            if let Ok(mut entry) = archive::open_zip_entry(&mut archive, &full_path) {
+            if let Ok(mut entry) = archive::open_zip_entry(archive, &full_path) {
                 let xhtml = match archive::read_entry_string(
                     &mut entry,
                     MAX_CHAPTER_XHTML_BYTES,
@@ -626,7 +654,10 @@ impl EpubReader {
                     &book_css,
                     Some(&link_ctx),
                 );
-                for (fn_id, fn_text) in sec_footnotes {
+                let mut sorted_footnotes: Vec<(String, String)> =
+                    sec_footnotes.into_iter().collect();
+                sorted_footnotes.sort_by(|a, b| a.0.cmp(&b.0));
+                for (fn_id, fn_text) in sorted_footnotes {
                     all_footnotes.insert(format!("{}#{}", item.href, fn_id), fn_text.clone());
                     if !file_name.is_empty() {
                         all_footnotes.insert(format!("{}#{}", file_name, fn_id), fn_text.clone());
@@ -662,7 +693,7 @@ impl EpubReader {
 
         // 6. Extract Table of Contents and Page List (NCX, NAV, or Section Headings Fallback)
         let (toc, page_list) = nav::extract_navigation_with_budget(
-            &mut archive,
+            archive,
             &opf_dir,
             &manifest,
             &href_to_section,
@@ -908,14 +939,93 @@ mod tests {
         assert!(t_block.contains(&"indented_block".to_string()));
     }
 
+    fn write_test_epub_entries(
+        opf_path: &str,
+        entries: &[(&str, &[u8], zip::CompressionMethod)],
+    ) -> tempfile::NamedTempFile {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(tmp.path()).unwrap());
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        zip.start_file("mimetype", stored).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+
+        zip.start_file("META-INF/container.xml", deflated).unwrap();
+        let container_xml = format!(
+            r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="{}" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            opf_path
+        );
+        zip.write_all(container_xml.as_bytes()).unwrap();
+
+        for (name, bytes, method) in entries {
+            let opts = zip::write::SimpleFileOptions::default().compression_method(*method);
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        tmp
+    }
+
     #[test]
     fn test_epub_reader_real_originals_chapter1_styles() {
-        let path =
-            "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
-        if !std::path::Path::new(path).exists() {
-            return;
-        }
-        let book = EpubReader::read_from_file(path).expect("Failed to read Originals epub");
+        let opf = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Originals Fixture</dc:title>
+    <dc:creator>Adam Grant</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:identifier id="uid">urn:uuid:originals-ch1-fixture</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="css" href="styles.css" media-type="text/css"/>
+    <item id="fw" href="foreword.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="fw"/>
+    <itemref idref="ch1"/>
+  </spine>
+</package>"#;
+
+        let foreword_xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+  <h1>Foreword</h1>
+  <p>Before ideas reshape organizations, someone has to question the default.</p>
+  <p>Few writers study nonconformity with as much rigor and warmth.</p>
+  <p><span class="_idGenDropcap-1">A</span>dam Grant is the perfect person to write this book.</p>
+</body></html>"#;
+
+        let tmp = write_test_epub_entries(
+            "OEBPS/content.opf",
+            &[
+                (
+                    "OEBPS/content.opf",
+                    opf.as_bytes(),
+                    zip::CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/styles.css",
+                    ORIGINALS_CH1_CSS.as_bytes(),
+                    zip::CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/foreword.xhtml",
+                    foreword_xhtml.as_bytes(),
+                    zip::CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/chapter1.xhtml",
+                    ORIGINALS_CH1_XHTML.as_bytes(),
+                    zip::CompressionMethod::Deflated,
+                ),
+            ],
+        );
+
+        let book = EpubReader::read_from_file(tmp.path())
+            .expect("Failed to read deterministic Originals chapter fixture");
         let sec = book
             .sections
             .iter()
@@ -1224,12 +1334,117 @@ mod tests {
 
     #[test]
     fn test_epub_reader_real_originals_book_toc_and_page_list() {
-        let path =
-            "/home/drew/Calibre Library/Adam Grant/Originals (1429)/Originals - Adam Grant.epub";
-        if !std::path::Path::new(path).exists() {
-            return;
+        let roman_pages = [
+            "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii",
+        ];
+        let mut manifest_items = String::from(
+            r#"<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#,
+        );
+        let mut spine_refs = String::new();
+        let mut nav_points = String::new();
+        let mut owned_entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(22);
+
+        let toc_titles = [
+            "Cover",
+            "Title Page",
+            "Foreword",
+            "Chapter 1",
+            "Chapter 2",
+            "Chapter 3",
+            "Chapter 4",
+            "Chapter 5",
+            "Chapter 6",
+            "Chapter 7",
+            "Chapter 8",
+            "Chapter 9",
+            "Chapter 10",
+            "Chapter 11",
+            "Chapter 12",
+            "Chapter 13",
+            "Chapter 14",
+            "Chapter 15",
+            "Acknowledgments",
+            "Index",
+        ];
+
+        for (idx, title) in toc_titles.iter().enumerate() {
+            let id = format!("sec_{:02}", idx);
+            let href = format!("sec_{:02}.xhtml", idx);
+            manifest_items.push_str(&format!(
+                r#"<item id="{}" href="{}" media-type="application/xhtml+xml"/>"#,
+                id, href
+            ));
+            spine_refs.push_str(&format!(r#"<itemref idref="{}"/>"#, id));
+            nav_points.push_str(&format!(
+                r#"<navPoint id="np_{}" playOrder="{}"><navLabel><text>{}</text></navLabel><content src="{}"/></navPoint>"#,
+                idx,
+                idx + 1,
+                title,
+                href
+            ));
+            let xhtml = format!(
+                r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>{}</h1><p>Section content {}.</p></body></html>"#,
+                title, idx
+            );
+            owned_entries.push((format!("OEBPS/{}", href), xhtml.into_bytes()));
         }
-        let book = EpubReader::read_from_file(path).expect("Failed to read Originals epub");
+
+        let mut page_targets = String::new();
+        for r in roman_pages {
+            page_targets.push_str(&format!(
+                r#"<pageTarget type="front" value="{}"><navLabel><text>{}</text></navLabel><content src="sec_02.xhtml#p_{}"/></pageTarget>"#,
+                r, r, r
+            ));
+        }
+        for n in 1..=322 {
+            let sec_idx = 3 + ((n - 1) % 15);
+            page_targets.push_str(&format!(
+                r#"<pageTarget type="normal" value="{}"><navLabel><text>{}</text></navLabel><content src="sec_{:02}.xhtml#p_{}"/></pageTarget>"#,
+                n, n, sec_idx, n
+            ));
+        }
+
+        let opf = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Originals TOC Fixture</dc:title>
+    <dc:creator>Adam Grant</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:identifier id="uid">urn:uuid:originals-toc-fixture</dc:identifier>
+  </metadata>
+  <manifest>{}</manifest>
+  <spine toc="ncx">{}</spine>
+</package>"#,
+            manifest_items, spine_refs
+        );
+        let ncx = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="urn:uuid:originals-toc-fixture"/></head>
+  <docTitle><text>Originals TOC Fixture</text></docTitle>
+  <navMap>{}</navMap>
+  <pageList>{}</pageList>
+</ncx>"#,
+            nav_points, page_targets
+        );
+        owned_entries.push(("OEBPS/content.opf".to_string(), opf.into_bytes()));
+        owned_entries.push(("OEBPS/toc.ncx".to_string(), ncx.into_bytes()));
+
+        let entry_refs: Vec<(&str, &[u8], zip::CompressionMethod)> = owned_entries
+            .iter()
+            .map(|(name, bytes)| {
+                (
+                    name.as_str(),
+                    bytes.as_slice(),
+                    zip::CompressionMethod::Deflated,
+                )
+            })
+            .collect();
+        let tmp = write_test_epub_entries("OEBPS/content.opf", &entry_refs);
+
+        let book = EpubReader::read_from_file(tmp.path())
+            .expect("Failed to read deterministic TOC/pageList fixture");
         assert_eq!(
             book.toc.len(),
             20,
@@ -1625,42 +1840,20 @@ mod tests {
 
     #[test]
     fn test_epub_reader_read_metadata_from_file() {
-        let sample_path =
-            "/home/drew/github/hwanjongyu/Converter_epub_kfx/sample/Originals - Adam Grant.epub";
-        let (tmp_file, target_path) = if std::path::Path::new(sample_path).exists() {
-            (None, std::path::PathBuf::from(sample_path))
-        } else {
-            let tmp = tempfile::NamedTempFile::new().unwrap();
-            let mut zip = zip::ZipWriter::new(std::fs::File::create(tmp.path()).unwrap());
-            zip.start_file(
-                "mimetype",
-                zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored),
-            )
-            .unwrap();
-            zip.write_all(b"application/epub+zip").unwrap();
-            zip.start_file(
-                "META-INF/container.xml",
-                zip::write::SimpleFileOptions::default(),
-            )
-            .unwrap();
-            zip.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
-            zip.start_file("content.opf", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Originals</dc:title><dc:creator>Adam Grant</dc:creator></metadata><manifest><item id="t" href="t.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>"#).unwrap();
-            zip.start_file("t.xhtml", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Text</p></body></html>"#).unwrap();
-            zip.finish().unwrap();
-            let p = tmp.path().to_path_buf();
-            (Some(tmp), p)
-        };
+        let opf = br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Originals</dc:title><dc:creator>Adam Grant</dc:creator></metadata><manifest><item id="t" href="t.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="t"/></spine></package>"#;
+        let xhtml = br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>Text</p></body></html>"#;
+        let tmp = write_test_epub_entries(
+            "content.opf",
+            &[
+                ("content.opf", opf, zip::CompressionMethod::Deflated),
+                ("t.xhtml", xhtml, zip::CompressionMethod::Deflated),
+            ],
+        );
 
         let meta =
-            EpubReader::read_metadata_from_file(&target_path).expect("Failed to read metadata");
+            EpubReader::read_metadata_from_file(tmp.path()).expect("Failed to read metadata");
         assert_eq!(meta.title, "Originals");
         assert!(meta.creators.iter().any(|c| c.contains("Adam Grant")));
-        drop(tmp_file);
     }
 
     #[test]
@@ -1919,6 +2112,103 @@ mod tests {
             matches!(err_css, EpubError::Security(_)),
             "Expected EpubError::Security for oversized CSS, got {:?}",
             err_css
+        );
+
+        // 5. True multi-entry cumulative decompression bomb:
+        //    5 Stored chapters (~100 KiB each = ~500 KiB total), each well below per-entry
+        //    limits and at 1:1 compression ratio, exceeding a 300 KiB cumulative budget.
+        let padding = " ".repeat(100 * 1024);
+        let chapter_body = format!(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>{}</p></body></html>"#,
+            padding
+        );
+        let mut manifest = String::new();
+        let mut spine = String::new();
+        for idx in 1..=5 {
+            manifest.push_str(&format!(
+                r#"<item id="c{0}" href="c{0}.xhtml" media-type="application/xhtml+xml"/>"#,
+                idx
+            ));
+            spine.push_str(&format!(r#"<itemref idref="c{}"/>"#, idx));
+        }
+        let multi_opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Multi-Entry Cumulative Bomb</dc:title>
+  </metadata>
+  <manifest>{}</manifest>
+  <spine>{}</spine>
+</package>"#,
+            manifest, spine
+        );
+        let temp_multi = write_test_epub_entries(
+            "content.opf",
+            &[
+                (
+                    "content.opf",
+                    multi_opf.as_bytes(),
+                    CompressionMethod::Stored,
+                ),
+                (
+                    "c1.xhtml",
+                    chapter_body.as_bytes(),
+                    CompressionMethod::Stored,
+                ),
+                (
+                    "c2.xhtml",
+                    chapter_body.as_bytes(),
+                    CompressionMethod::Stored,
+                ),
+                (
+                    "c3.xhtml",
+                    chapter_body.as_bytes(),
+                    CompressionMethod::Stored,
+                ),
+                (
+                    "c4.xhtml",
+                    chapter_body.as_bytes(),
+                    CompressionMethod::Stored,
+                ),
+                (
+                    "c5.xhtml",
+                    chapter_body.as_bytes(),
+                    CompressionMethod::Stored,
+                ),
+            ],
+        );
+
+        // 5a. Pre-scan + budget enforces cumulative limit across entries
+        let err_multi =
+            EpubReader::read_from_file_with_total_limit(temp_multi.path(), 300 * 1024).unwrap_err();
+        assert!(
+            matches!(err_multi, EpubError::Security(_)),
+            "Expected EpubError::Security for multi-entry cumulative payload, got {:?}",
+            err_multi
+        );
+
+        // 5b. Even bypassing pre-scan, streaming DecompressionBudget catches cumulative multi-entry overflow
+        let f_multi = File::open(temp_multi.path()).unwrap();
+        let mut archive_multi = ZipArchive::new(BufReader::new(f_multi)).unwrap();
+        let err_stream_multi =
+            EpubReader::read_from_archive_with_limit(&mut archive_multi, 300 * 1024, true)
+                .unwrap_err();
+        assert!(
+            matches!(err_stream_multi, EpubError::Security(_)),
+            "Expected EpubError::Security from streaming DecompressionBudget, got {:?}",
+            err_stream_multi
+        );
+
+        // 5c. Control check: sufficient cumulative budget succeeds
+        assert!(
+            EpubReader::read_from_file_with_total_limit(temp_multi.path(), 600 * 1024).is_ok(),
+            "Multi-entry fixture must succeed when cumulative budget is sufficient"
+        );
+        let f_ok = File::open(temp_multi.path()).unwrap();
+        let mut archive_ok = ZipArchive::new(BufReader::new(f_ok)).unwrap();
+        assert!(
+            EpubReader::read_from_archive_with_limit(&mut archive_ok, 600 * 1024, true).is_ok(),
+            "Streaming archive parser must succeed when cumulative budget is sufficient"
         );
     }
 
@@ -2505,5 +2795,166 @@ mod tests {
             Some("section_2#top2")
         );
         assert_eq!(find_href(2, "part1 root").as_deref(), Some("section_1"));
+    }
+
+    #[test]
+    fn test_epub_and_kfx_packaging_deterministic_across_manifest_order() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let mut manifest_entries: Vec<String> = vec![
+            r#"<item id="css_a" href="Styles/a.css" media-type="text/css"/>"#.to_string(),
+            r#"<item id="css_b" href="Styles/b.css" media-type="text/css"/>"#.to_string(),
+            r#"<item id="nav1" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#.to_string(),
+            r#"<item id="ncx1" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#.to_string(),
+            r#"<item id="cov_b" href="Images/cover_b.jpg" media-type="image/jpeg"/>"#.to_string(),
+            r#"<item id="cov_a" href="Images/cover_a.jpg" media-type="image/jpeg"/>"#.to_string(),
+            r#"<item id="fig_ch1" href="ch1/fig.jpg" media-type="image/jpeg"/>"#.to_string(),
+            r#"<item id="fig_ch2" href="ch2/fig.jpg" media-type="image/jpeg"/>"#.to_string(),
+            r#"<item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>"#.to_string(),
+        ];
+        for i in 1..=10 {
+            manifest_entries.push(format!(
+                r#"<item id="pic_{i:02}" href="Images/pic_{i:02}.jpg" media-type="image/jpeg"/>"#
+            ));
+        }
+
+        let build_epub_bytes = |entries: &[String]| -> Vec<u8> {
+            let mut buf = Cursor::new(Vec::new());
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+            )
+            .unwrap();
+
+            zip.start_file("OEBPS/content.opf", opts).unwrap();
+            let opf = format!(
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Determinism Volume</dc:title>
+    <dc:identifier>urn:uuid:determinism-test-1</dc:identifier>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    {}
+  </manifest>
+  <spine toc="ncx1">
+    <itemref idref="ch1"/>
+  </spine>
+</package>"#,
+                entries.join("\n    ")
+            );
+            zip.write_all(opf.as_bytes()).unwrap();
+
+            zip.start_file("OEBPS/Styles/a.css", opts).unwrap();
+            zip.write_all(b"p.clash { font-style: italic; text-align: left; }")
+                .unwrap();
+            zip.start_file("OEBPS/Styles/b.css", opts).unwrap();
+            zip.write_all(b"p.clash { font-style: normal; text-align: center; }")
+                .unwrap();
+
+            zip.start_file("OEBPS/nav.xhtml", opts).unwrap();
+            zip.write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body><nav epub:type="toc"><ol><li><a href="Text/ch1.xhtml">Chapter One</a></li></ol></nav></body></html>"#,
+            )
+            .unwrap();
+
+            zip.start_file("OEBPS/toc.ncx", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+<navMap><navPoint id="np1" playOrder="1"><navLabel><text>NCX One</text></navLabel><content src="Text/ch1.xhtml"/></navPoint></navMap></ncx>"#,
+            )
+            .unwrap();
+
+            zip.start_file("OEBPS/Text/ch1.xhtml", opts).unwrap();
+            zip.write_all(
+                br##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+  <p class="clash">Cascaded text <a epub:type="noteref" href="#fn1">1</a></p>
+  <img src="../ch2/fig.jpg" alt="fig"/>
+  <aside id="fn1" epub:type="footnote">Note one</aside>
+  <aside id="fn2" epub:type="footnote">Note two</aside>
+</body></html>"##,
+            )
+            .unwrap();
+
+            // Minimal valid JPEG-like header bytes per image
+            let fake_jpg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+            for img_path in [
+                "OEBPS/Images/cover_a.jpg",
+                "OEBPS/Images/cover_b.jpg",
+                "OEBPS/ch1/fig.jpg",
+                "OEBPS/ch2/fig.jpg",
+            ] {
+                zip.start_file(img_path, opts).unwrap();
+                zip.write_all(&fake_jpg).unwrap();
+            }
+            for i in 1..=10 {
+                zip.start_file(format!("OEBPS/Images/pic_{i:02}.jpg"), opts)
+                    .unwrap();
+                zip.write_all(&fake_jpg).unwrap();
+            }
+
+            zip.finish().unwrap();
+            buf.into_inner()
+        };
+
+        let mut outputs = Vec::new();
+        for run_idx in 0..4 {
+            let mut order = manifest_entries.clone();
+            if run_idx % 2 == 1 {
+                order.reverse();
+            }
+            let rot = (run_idx * 5) % order.len();
+            order.rotate_left(rot);
+
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), build_epub_bytes(&order)).unwrap();
+            let mut book = EpubReader::read_from_file(tmp.path()).unwrap();
+            book.normalize();
+
+            assert_eq!(book.metadata.cover_image_id.as_deref(), Some("cov_a"));
+            assert_eq!(book.resolve_cover_resource_id().as_deref(), Some("cov_a"));
+            // CSS b.css always wins over a.css regardless of manifest insertion order
+            assert!(
+                book.sections[1].blocks[0]
+                    .resolved_style()
+                    .custom_classes
+                    .iter()
+                    .all(|c| c != "italic")
+            );
+            assert_eq!(
+                book.sections[1].blocks[0].resolved_style().alignment,
+                crate::ir::TextAlignment::Center
+            );
+            // Exact path ch2/fig.jpg resolves to fig_ch2, never clobbered by ch1/fig.jpg
+            assert!(matches!(
+                &book.sections[1].blocks[1],
+                Block::Image { resource_id, .. } if resource_id == "fig_ch2"
+            ));
+
+            let mut kfx_buf = Cursor::new(Vec::new());
+            let mut packager = crate::packager::KfxPackager::new(&book, "EBOK");
+            packager.package(&mut kfx_buf).unwrap();
+            outputs.push(kfx_buf.into_inner());
+        }
+
+        for i in 1..outputs.len() {
+            assert_eq!(
+                outputs[0], outputs[i],
+                "Packaged KFX output must be byte-identical across runs (run 0 vs run {})",
+                i
+            );
+        }
     }
 }

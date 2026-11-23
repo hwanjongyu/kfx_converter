@@ -147,9 +147,19 @@ impl SdrDeployer {
 
     /// Safely writes bytes to a file inside the `.sdr` directory, handling pre-existing read-only permissions
     /// and performing atomic file persistence via a staged temporary file (or `gio copy` on GVFS MTP).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        Self::write_file_with_mtp(path, bytes, true)
+    }
+
+    fn write_file_with_mtp(path: &Path, bytes: &[u8], lock_mtp: bool) -> std::io::Result<()> {
         if Self::is_mtp_path(path) {
-            return crate::sync::transfer::write_bytes(path, bytes).map_err(|e| match e {
+            let res = if lock_mtp {
+                crate::sync::transfer::write_bytes(path, bytes)
+            } else {
+                crate::sync::transfer::write_bytes_unlocked(path, bytes)
+            };
+            return res.map_err(|e| match e {
                 crate::sync::SyncError::Io(io_err) => io_err,
                 other => std::io::Error::other(other.to_string()),
             });
@@ -190,6 +200,51 @@ impl SdrDeployer {
         book_language: Option<&str>,
         cover_jpeg: Option<&[u8]>,
         kll_bytes: Option<&[u8]>,
+    ) -> std::io::Result<()> {
+        Self::deploy_inner(
+            sdr_dir,
+            asin,
+            content_id,
+            cde_content_type,
+            book_language,
+            cover_jpeg,
+            kll_bytes,
+            true,
+        )
+    }
+
+    /// Internal unlocked deployment helper for callers already holding `DEVICE_SYNC_LOCK`.
+    pub(crate) fn deploy_unlocked(
+        sdr_dir: &Path,
+        asin: &str,
+        content_id: Option<&str>,
+        cde_content_type: Option<&str>,
+        book_language: Option<&str>,
+        cover_jpeg: Option<&[u8]>,
+        kll_bytes: Option<&[u8]>,
+    ) -> std::io::Result<()> {
+        Self::deploy_inner(
+            sdr_dir,
+            asin,
+            content_id,
+            cde_content_type,
+            book_language,
+            cover_jpeg,
+            kll_bytes,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deploy_inner(
+        sdr_dir: &Path,
+        asin: &str,
+        content_id: Option<&str>,
+        cde_content_type: Option<&str>,
+        book_language: Option<&str>,
+        cover_jpeg: Option<&[u8]>,
+        kll_bytes: Option<&[u8]>,
+        lock_mtp: bool,
     ) -> std::io::Result<()> {
         Self::ensure_dir_exists(sdr_dir)?;
 
@@ -233,7 +288,7 @@ impl SdrDeployer {
         }
 
         for target in plan.targets {
-            Self::write_file(&target.path, target.bytes)?;
+            Self::write_file_with_mtp(&target.path, target.bytes, lock_mtp)?;
         }
 
         Ok(())

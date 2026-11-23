@@ -8,18 +8,18 @@ use crate::symbols::*;
 
 impl<'a> KfxPackager<'a> {
     pub(crate) fn build_position_maps(&mut self, section_data: &[SectionPackData]) {
-        let sym_section_name = symbol_id("section_name").unwrap_or(174);
-        let sym_contains = symbol_id("contains").unwrap_or(181);
-        let sym_pid = symbol_id("pid").unwrap_or(184);
-        let sym_length = symbol_id("length").unwrap_or(144);
-        let sym_id = symbol_id("id").unwrap_or(155);
-        let sym_offset = symbol_id("offset").unwrap_or(143);
-        let sym_locations = symbol_id("locations").unwrap_or(182);
+        let sym_section_name = KfxSymbol::SectionName as u32;
+        let sym_contains = KfxSymbol::Contains as u32;
+        let sym_pid = KfxSymbol::Pid as u32;
+        let sym_length = KfxSymbol::Length as u32;
+        let sym_id = KfxSymbol::Id as u32;
+        let sym_offset = KfxSymbol::Offset as u32;
+        let sym_locations = KfxSymbol::Locations as u32;
 
         let sym_spidm = SYM_SECTION_POSITION_ID_MAP; // 609
-        let sym_pos_map = symbol_id("position_map").unwrap_or(264);
-        let sym_pos_id_map = symbol_id("position_id_map").unwrap_or(265);
-        let sym_loc_map = symbol_id("location_map").unwrap_or(550);
+        let sym_pos_map = KfxSymbol::PositionMap as u32;
+        let sym_pos_id_map = KfxSymbol::PositionIdMap as u32;
+        let sym_loc_map = KfxSymbol::LocationMap as u32;
         let sym_loc_pid_map = SYM_YJ_LOCATION_PID_MAP; // 621
 
         // 1. section_position_id_map ($609) for each section
@@ -184,12 +184,12 @@ impl<'a> KfxPackager<'a> {
         symbols: &mut LocalSymbols,
     ) {
         let sym_cem = SYM_CONTAINER_ENTITY_MAP; // 419
-        let sym_container_list = symbol_id("container_list").unwrap_or(252);
-        let sym_id = symbol_id("id").unwrap_or(155);
-        let sym_contains = symbol_id("contains").unwrap_or(181);
-        let sym_entity_dependencies = symbol_id("entity_dependencies").unwrap_or(253);
-        let sym_mandatory_dependencies = symbol_id("mandatory_dependencies").unwrap_or(254);
-        let sym_optional_dependencies = symbol_id("optional_dependencies").unwrap_or(255);
+        let sym_container_list = KfxSymbol::ContainerList as u32;
+        let sym_id = KfxSymbol::Id as u32;
+        let sym_contains = KfxSymbol::Contains as u32;
+        let sym_entity_dependencies = KfxSymbol::EntityDependencies as u32;
+        let sym_mandatory_dependencies = KfxSymbol::MandatoryDependencies as u32;
+        let sym_optional_dependencies = KfxSymbol::OptionalDependencies as u32;
 
         let mut non_singleton_syms: Vec<u32> = self
             .entities
@@ -387,8 +387,8 @@ mod tests {
             .decode_all()
             .expect("CEM Ion must decode");
 
-        let sym_entity_dependencies = symbol_id("entity_dependencies").unwrap_or(253);
-        let sym_mandatory_dependencies = symbol_id("mandatory_dependencies").unwrap_or(254);
+        let sym_entity_dependencies = KfxSymbol::EntityDependencies as u32;
+        let sym_mandatory_dependencies = KfxSymbol::MandatoryDependencies as u32;
 
         let expected_syms = vec![
             IonValue::Symbol(symbols.intern("res_first")),

@@ -3,7 +3,7 @@
 use super::{KfxPackager, symbols::LocalSymbols};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
-use crate::symbols::symbol_id;
+use crate::symbols::KfxSymbol;
 
 impl<'a> KfxPackager<'a> {
     /// Builds external resource entities ($164) and raw binary payload entities ($417)
@@ -15,15 +15,15 @@ impl<'a> KfxPackager<'a> {
     ///    and bounding boxes. Omission results in height=0px rendering collapse.
     /// 2. $417 (`bcRawMedia`) raw binary image payload entity.
     pub(crate) fn build_resources(&mut self, symbols: &mut LocalSymbols) {
-        let sym_ext_resource = symbol_id("external_resource").unwrap_or(164);
-        let sym_raw_media = symbol_id("bcRawMedia").unwrap_or(417);
-        let sym_resource_name = symbol_id("resource_name").unwrap_or(175);
-        let sym_location = symbol_id("location").unwrap_or(165);
-        let sym_format = symbol_id("format").unwrap_or(161);
-        let sym_mime = symbol_id("mime").unwrap_or(162);
-        let sym_resource_width = symbol_id("resource_width").unwrap_or(422);
-        let sym_resource_height = symbol_id("resource_height").unwrap_or(423);
-        let sym_jpg = symbol_id("jpg").unwrap_or(285);
+        let sym_ext_resource = KfxSymbol::ExternalResource as u32;
+        let sym_raw_media = KfxSymbol::Bcrawmedia as u32;
+        let sym_resource_name = KfxSymbol::ResourceName as u32;
+        let sym_location = KfxSymbol::Location as u32;
+        let sym_format = KfxSymbol::Format as u32;
+        let sym_mime = KfxSymbol::Mime as u32;
+        let sym_resource_width = KfxSymbol::ResourceWidth as u32;
+        let sym_resource_height = KfxSymbol::ResourceHeight as u32;
+        let sym_jpg = KfxSymbol::Jpg as u32;
 
         let cover_id = self.resolve_cover_resource_id();
         let mut sorted_resources: Vec<_> = self.book.resources.iter().collect();

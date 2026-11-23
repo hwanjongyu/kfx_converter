@@ -326,6 +326,12 @@ impl WordWiseBuilder {
             }
 
             for block in &section.blocks {
+                if let crate::ir::Block::Image { alt, .. } = block {
+                    let block_len = alt.as_deref().map_or(0, |a| a.chars().count()).max(1);
+                    pid += block_len;
+                    continue;
+                }
+
                 let text = block.plain_text();
                 let mut word_char_start = None;
                 let mut word_str = String::new();
@@ -386,34 +392,56 @@ impl WordWiseBuilder {
         self.glosses.len() - initial_count
     }
 
+    /// Ensures `path` is not a symlink and clears read-only attributes on regular files before replacement.
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn ensure_non_symlink_writable(path: &Path) -> SqlResult<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!("Refusing to overwrite symlink destination: {:?}", path),
+                        ),
+                    )));
+                }
+                if meta.permissions().readonly() {
+                    let mut perms = meta.permissions();
+                    perms.set_readonly(false);
+                    std::fs::set_permissions(path, perms)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        }
+    }
+
     /// Writes the Word Wise `.kll` SQLite database atomically to disk.
     /// Uses a temporary file in the target directory and renames to prevent partial/corrupted
     /// writes that trigger Kindle OS `.bad_file` blacklisting.
-    #[allow(clippy::permissions_set_readonly_false)]
     pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> SqlResult<()> {
         let path = path.as_ref();
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
 
-        if let Ok(tmp_file) = tempfile::NamedTempFile::new_in(parent) {
-            {
-                let mut conn = Connection::open(tmp_file.path())?;
-                self.populate_connection(&mut conn)?;
-            }
-            if let Ok(meta) = std::fs::metadata(path)
-                && meta.permissions().readonly()
-            {
-                let mut perms = meta.permissions();
-                perms.set_readonly(false);
-                let _ = std::fs::set_permissions(path, perms);
-            }
-            if tmp_file.persist(path).is_ok() {
-                return Ok(());
-            }
+        Self::ensure_non_symlink_writable(path)?;
+
+        let tmp_file = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        {
+            let mut conn = Connection::open(tmp_file.path())?;
+            self.populate_connection(&mut conn)?;
         }
 
-        // Fallback: direct connection open if temporary file creation/persisting is unsupported
-        let mut conn = Connection::open(path)?;
-        self.populate_connection(&mut conn)
+        Self::ensure_non_symlink_writable(path)?;
+        tmp_file
+            .persist(path)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e.error)))?;
+        Ok(())
     }
 
     /// Serializes the Word Wise `.kll` SQLite database directly into an in-memory byte vector.
@@ -973,5 +1001,148 @@ mod tests {
             level5.iter().map(|g| g.difficulty).collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5]
         );
+    }
+
+    #[test]
+    fn test_word_wise_skips_image_alt_glosses_while_advancing_pid() {
+        use crate::ir::{Block, BookIR, BookMetadata, Section, TextSpan};
+
+        let alt_text = "An abstruse and chimerical diagram"; // 34 chars
+        let ir = BookIR {
+            metadata: BookMetadata::default(),
+            sections: vec![Section {
+                id: "sec1".to_string(),
+                title: "Chapter 1".to_string(),
+                blocks: vec![
+                    Block::Image {
+                        id: "img_alt".to_string(),
+                        resource_id: "diagram.png".to_string(),
+                        alt: Some(alt_text.to_string()),
+                        width: None,
+                        height: None,
+                    },
+                    Block::Image {
+                        id: "img_none".to_string(),
+                        resource_id: "spacer.png".to_string(),
+                        alt: None,
+                        width: None,
+                        height: None,
+                    },
+                    Block::Paragraph {
+                        id: "p1".to_string(),
+                        spans: vec![TextSpan {
+                            text: "To elucidate.".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        }],
+                        style: None,
+                    },
+                ],
+            }],
+            resources: std::collections::HashMap::new(),
+            toc: Vec::new(),
+            page_list: Vec::new(),
+            footnotes: std::collections::HashMap::new(),
+        };
+
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
+            WordWisePacingConfig {
+                max_difficulty_level: 5,
+                min_distance: 1,
+                max_glosses_per_window: 10,
+                window_size: 500,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 100,
+            },
+        );
+
+        let count = builder.generate_from_book(&ir);
+        assert_eq!(
+            count, 1,
+            "Image alt text must NOT emit glosses; only 'elucidate' should match: {:?}",
+            builder.glosses
+        );
+        let gloss = builder.glosses.values().next().unwrap();
+        assert_eq!(gloss.sense_id, 36391, "Expected gloss for 'elucidate'");
+        // Section root (1) + alt_text (34) + empty image alt (max(0, 1) = 1) + "To " (3) = 39
+        assert_eq!(gloss.start, 1 + alt_text.chars().count() + 1 + 3);
+    }
+
+    #[test]
+    fn test_write_to_file_bare_relative_filename() {
+        if std::env::var_os("KFX_WW_BARE_FILE_CHILD").is_some() {
+            let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1");
+            builder.add_gloss(10, Some(15), 3, 101, false);
+            let out = Path::new("bare_words.kll");
+            assert_eq!(out.parent(), Some(Path::new("")));
+            builder
+                .write_to_file(out)
+                .expect("write_to_file must succeed on bare relative filename");
+            let conn = Connection::open(out).unwrap();
+            let count: i64 = conn
+                .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "enhancements::word_wise::tests::test_write_to_file_bare_relative_filename",
+            ])
+            .current_dir(temp.path())
+            .env("KFX_WW_BARE_FILE_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Bare KLL child test failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(temp.path().join("bare_words.kll").is_file());
+    }
+
+    #[test]
+    fn test_write_to_file_rejects_symlinks_and_missing_parent_without_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1");
+        builder.add_gloss(10, Some(15), 3, 101, false);
+
+        // Missing parent directory must fail cleanly without creating files
+        let missing_parent_path = temp.path().join("nonexistent_dir").join("out.kll");
+        assert!(builder.write_to_file(&missing_parent_path).is_err());
+        assert!(!missing_parent_path.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+
+            // Live symlink pointing to read-only victim file
+            let victim = temp.path().join("victim.kll");
+            std::fs::write(&victim, b"UNTOUCHED_VICTIM").unwrap();
+            std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+            let live_link = temp.path().join("live_link.kll");
+            symlink(&victim, &live_link).unwrap();
+            assert!(builder.write_to_file(&live_link).is_err());
+            assert_eq!(std::fs::read(&victim).unwrap(), b"UNTOUCHED_VICTIM");
+            assert_eq!(
+                std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+                0o444
+            );
+
+            // Dangling symlink must be rejected without creating target
+            let missing_target = temp.path().join("never_created.kll");
+            let dangling_link = temp.path().join("dangling_link.kll");
+            symlink(&missing_target, &dangling_link).unwrap();
+            assert!(builder.write_to_file(&dangling_link).is_err());
+            assert!(!missing_target.exists());
+        }
     }
 }

@@ -27,9 +27,11 @@ pub fn extract_navigation_with_budget<R: Read + std::io::Seek>(
 ) -> Result<(Vec<TocItem>, Vec<PageEntry>), EpubError> {
     let mut nav_toc = Vec::new();
     let mut nav_page_list = Vec::new();
+    let mut manifest_items: Vec<&ManifestItem> = manifest.values().collect();
+    manifest_items.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.href.cmp(&b.href)));
 
     // 1. Try EPUB 3 Navigation Document (nav.xhtml or properties="nav")
-    for item in manifest.values() {
+    for item in &manifest_items {
         let is_nav = item
             .properties
             .as_deref()
@@ -63,7 +65,7 @@ pub fn extract_navigation_with_budget<R: Read + std::io::Seek>(
 
     // 2. Try EPUB 2 NCX Document when TOC or page-list is missing from nav.xhtml
     if nav_toc.is_empty() || nav_page_list.is_empty() {
-        for item in manifest.values() {
+        for item in &manifest_items {
             let is_ncx = item.media_type == "application/x-dtbncx+xml"
                 || item.id == "ncx"
                 || item.href.to_ascii_lowercase().ends_with(".ncx");

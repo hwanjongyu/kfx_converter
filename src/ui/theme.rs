@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Theme & Color Tokens for Kindle Studio GPUI
 
 use gpui::*;

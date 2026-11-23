@@ -3,7 +3,7 @@
 use super::{KfxPackager, symbols::LocalSymbols};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
-use crate::symbols::symbol_id;
+use crate::symbols::KfxSymbol;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StyleSymMap {
@@ -70,29 +70,29 @@ impl<'a> KfxPackager<'a> {
         &mut self,
         symbols: &mut LocalSymbols,
     ) -> (StyleSymMap, Vec<(u32, IonValue)>) {
-        let sym_style_name = symbol_id("style_name").unwrap_or(173);
-        let sym_font_family = symbol_id("font_family").unwrap_or(11);
-        let sym_font_size = symbol_id("font_size").unwrap_or(16);
-        let sym_font_weight = symbol_id("font_weight").unwrap_or(13);
-        let sym_font_style = symbol_id("font_style").unwrap_or(12);
-        let sym_underline = symbol_id("underline").unwrap_or(23);
-        let sym_strikethrough = symbol_id("strikethrough").unwrap_or(27);
-        let sym_baseline_shift = symbol_id("baseline_shift").unwrap_or(31);
-        let sym_text_alignment = symbol_id("text_alignment").unwrap_or(34);
-        let sym_margin_top = symbol_id("margin_top").unwrap_or(47);
-        let sym_margin_bottom = symbol_id("margin_bottom").unwrap_or(49);
-        let sym_margin_left = symbol_id("margin_left").unwrap_or(48);
-        let sym_margin_right = symbol_id("margin_right").unwrap_or(50);
-        let sym_text_indent = symbol_id("text_indent").unwrap_or(36);
-        let sym_line_height = symbol_id("line_height").unwrap_or(42);
-        let sym_value = symbol_id("value").unwrap_or(307);
-        let sym_unit = symbol_id("unit").unwrap_or(306);
-        let sym_em = symbol_id("em").unwrap_or(308);
-        let sym_bold = symbol_id("bold").unwrap_or(361);
-        let sym_italic = symbol_id("italic").unwrap_or(382);
-        let sym_center = symbol_id("center").unwrap_or(320);
-        let sym_right = symbol_id("right").unwrap_or(61);
-        let sym_justify = symbol_id("justify").unwrap_or(321);
+        let sym_style_name = KfxSymbol::StyleName as u32;
+        let sym_font_family = KfxSymbol::FontFamily as u32;
+        let sym_font_size = KfxSymbol::FontSize as u32;
+        let sym_font_weight = KfxSymbol::FontWeight as u32;
+        let sym_font_style = KfxSymbol::FontStyle as u32;
+        let sym_underline = KfxSymbol::Underline as u32;
+        let sym_strikethrough = KfxSymbol::Strikethrough as u32;
+        let sym_baseline_shift = KfxSymbol::BaselineShift as u32;
+        let sym_text_alignment = KfxSymbol::TextAlignment as u32;
+        let sym_margin_top = KfxSymbol::MarginTop as u32;
+        let sym_margin_bottom = KfxSymbol::MarginBottom as u32;
+        let sym_margin_left = KfxSymbol::MarginLeft as u32;
+        let sym_margin_right = KfxSymbol::MarginRight as u32;
+        let sym_text_indent = KfxSymbol::TextIndent as u32;
+        let sym_line_height = KfxSymbol::LineHeight as u32;
+        let sym_value = KfxSymbol::Value as u32;
+        let sym_unit = KfxSymbol::Unit as u32;
+        let sym_em = KfxSymbol::Em as u32;
+        let sym_bold = KfxSymbol::Bold as u32;
+        let sym_italic = KfxSymbol::Italic as u32;
+        let sym_center = KfxSymbol::Center as u32;
+        let sym_right = KfxSymbol::Right as u32;
+        let sym_justify = KfxSymbol::Justify as u32;
 
         let h1_sym = symbols.intern("style_h1");
         let h2_sym = symbols.intern("style_h2");
@@ -134,20 +134,20 @@ impl<'a> KfxPackager<'a> {
         let hanging_indent_sym = symbols.intern("style_hanging_indent");
         let link_sym = symbols.intern("style_link");
 
-        let sym_font_variant = symbol_id("font_variant").unwrap_or(14);
-        let sym_small_caps = symbol_id("small_caps").unwrap_or(369);
-        let sym_dropcap_lines = symbol_id("dropcap_lines").unwrap_or(125);
-        let sym_dropcap_chars = symbol_id("dropcap_chars").unwrap_or(126);
-        let sym_text_transform = symbol_id("text_transform").unwrap_or(41);
-        let sym_uppercase = symbol_id("uppercase").unwrap_or(372);
-        let sym_ruby_text_align = symbol_id("ruby_text_align").unwrap_or(765);
-        let sym_ruby_base_align = symbol_id("ruby_base_align").unwrap_or(766);
-        let sym_ruby_base_edge_align = symbol_id("ruby_base_edge_align").unwrap_or(770);
-        let sym_space_around = symbol_id("space_around").unwrap_or(773);
-        let sym_separate = symbol_id("separate").unwrap_or(771);
-        let sym_box_align = symbol_id("box_align").unwrap_or(580);
-        let sym_percent = symbol_id("percent").unwrap_or(314);
-        let sym_width = symbol_id("width").unwrap_or(56);
+        let sym_font_variant = KfxSymbol::FontVariant as u32;
+        let sym_small_caps = KfxSymbol::SmallCaps as u32;
+        let sym_dropcap_lines = KfxSymbol::DropcapLines as u32;
+        let sym_dropcap_chars = KfxSymbol::DropcapChars as u32;
+        let sym_text_transform = KfxSymbol::TextTransform as u32;
+        let sym_uppercase = KfxSymbol::Uppercase as u32;
+        let sym_ruby_text_align = KfxSymbol::RubyTextAlign as u32;
+        let sym_ruby_base_align = KfxSymbol::RubyBaseAlign as u32;
+        let sym_ruby_base_edge_align = KfxSymbol::RubyBaseEdgeAlign as u32;
+        let sym_space_around = KfxSymbol::SpaceAround as u32;
+        let sym_separate = KfxSymbol::Separate as u32;
+        let sym_box_align = KfxSymbol::BoxAlign as u32;
+        let sym_percent = KfxSymbol::Percent as u32;
+        let sym_width = KfxSymbol::Width as u32;
 
         let make_em = |val: &str| {
             IonValue::Struct(vec![
@@ -583,7 +583,7 @@ impl<'a> KfxPackager<'a> {
         style_list: Vec<(u32, IonValue)>,
         used_styles: &std::collections::HashSet<u32>,
     ) {
-        let sym_style = symbol_id("style").unwrap_or(157);
+        let sym_style = KfxSymbol::Style as u32;
         for (sym_id_val, val) in style_list {
             if used_styles.contains(&sym_id_val) {
                 let mut writer = IonWriter::new();

@@ -91,13 +91,15 @@ fn append_conversion_log_at(path: &Path, message: &str) {
     }
 }
 
-fn append_conversion_log(message: &str) {
+fn log_pipeline_event(log_path: Option<&Path>, message: &str) {
+    let Some(path) = log_path else {
+        return;
+    };
     let _guard = match LOG_LOCK.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let path = conversion_log_path();
-    append_conversion_log_at(&path, message);
+    append_conversion_log_at(path, message);
 }
 
 use crate::enhancements::{CoverOptimizer, WordWiseBuilder};
@@ -169,6 +171,18 @@ impl ConversionPipeline {
         options: &ConversionOptions,
         progress: Option<F>,
     ) -> Result<ConversionReport, PipelineError> {
+        let log_path = conversion_log_path();
+        Self::run_with_log_path(input_path, output_path, options, Some(&log_path), progress)
+    }
+
+    /// Executes the complete EPUB to KFX conversion pipeline, optionally logging events to `log_path`.
+    pub fn run_with_log_path<P: AsRef<Path>, F: Fn(f32, &str)>(
+        input_path: P,
+        output_path: Option<&Path>,
+        options: &ConversionOptions,
+        log_path: Option<&Path>,
+        progress: Option<F>,
+    ) -> Result<ConversionReport, PipelineError> {
         let input_path = input_path.as_ref().to_path_buf();
         if !input_path.exists() {
             return Err(PipelineError::Other(format!(
@@ -223,13 +237,15 @@ impl ConversionPipeline {
                 let fn_opt = std::path::Path::new(&target_id)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string());
-                ir.resources.iter().find_map(|(k, v)| {
-                    if let Some(ref fn_str) = fn_opt
-                        && (k == fn_str || k.ends_with(fn_str))
-                    {
-                        return Some(v);
+                let fn_str = fn_opt.as_deref()?;
+                let mut keys: Vec<&String> = ir.resources.keys().collect();
+                keys.sort();
+                keys.into_iter().find_map(|k| {
+                    if k == fn_str || k.ends_with(fn_str) {
+                        ir.resources.get(k)
+                    } else {
+                        None
                     }
-                    None
                 })
             });
             if let Some(asset) = asset
@@ -244,15 +260,18 @@ impl ConversionPipeline {
         let mut kll_bytes = None;
         let mut word_wise_glosses = None;
         let mut word_wise_error = None;
-        append_conversion_log(&format!(
-            "START input=\"{}\" output=\"{}\" word_wise={} content_type={} auto_deploy={} lang=\"{}\"",
-            input_path.display(),
-            output_path.display(),
-            options.word_wise,
-            options.content_type,
-            options.auto_deploy,
-            ir.metadata.language
-        ));
+        log_pipeline_event(
+            log_path,
+            &format!(
+                "START input=\"{}\" output=\"{}\" word_wise={} content_type={} auto_deploy={} lang=\"{}\"",
+                input_path.display(),
+                output_path.display(),
+                options.word_wise,
+                options.content_type,
+                options.auto_deploy,
+                ir.metadata.language
+            ),
+        );
 
         if options.word_wise {
             if let Some(ref cb) = progress {
@@ -269,25 +288,31 @@ impl ConversionPipeline {
             word_wise_glosses = Some(gloss_count);
 
             if gloss_count == 0 {
-                append_conversion_log(&format!(
-                    "WARN Word Wise enabled but 0 glosses matched (asin={}, lang=\"{}\")",
-                    asin, ir.metadata.language
-                ));
-            }
-
-            match ww_builder.to_bytes() {
-                Ok(bytes) => {
-                    append_conversion_log(&format!(
-                        "WORD_WISE generated glosses={} kll_bytes={}",
-                        gloss_count,
-                        bytes.len()
-                    ));
-                    kll_bytes = Some(bytes);
-                }
-                Err(e) => {
-                    let msg = format!("Word Wise KLL serialization failed: {}", e);
-                    append_conversion_log(&format!("ERROR {}", msg));
-                    word_wise_error = Some(msg);
+                log_pipeline_event(
+                    log_path,
+                    &format!(
+                        "WARN Word Wise enabled but 0 glosses matched (asin={}, lang=\"{}\"); skipping .kll sidecar emission",
+                        asin, ir.metadata.language
+                    ),
+                );
+            } else {
+                match ww_builder.to_bytes() {
+                    Ok(bytes) => {
+                        log_pipeline_event(
+                            log_path,
+                            &format!(
+                                "WORD_WISE generated glosses={} kll_bytes={}",
+                                gloss_count,
+                                bytes.len()
+                            ),
+                        );
+                        kll_bytes = Some(bytes);
+                    }
+                    Err(e) => {
+                        let msg = format!("Word Wise KLL serialization failed: {}", e);
+                        log_pipeline_event(log_path, &format!("ERROR {}", msg));
+                        word_wise_error = Some(msg);
+                    }
                 }
             }
         }
@@ -304,16 +329,19 @@ impl ConversionPipeline {
             kll_bytes.as_deref(),
         ) {
             let msg = format!("SDR sidecar deploy failed ({}): {}", sdr_path.display(), e);
-            append_conversion_log(&format!("ERROR {}", msg));
+            log_pipeline_event(log_path, &format!("ERROR {}", msg));
             if word_wise_error.is_none() {
                 word_wise_error = Some(msg);
             }
         } else {
-            append_conversion_log(&format!(
-                "SDR deployed path=\"{}\" has_kll={}",
-                sdr_path.display(),
-                kll_bytes.is_some()
-            ));
+            log_pipeline_event(
+                log_path,
+                &format!(
+                    "SDR deployed path=\"{}\" has_kll={}",
+                    sdr_path.display(),
+                    kll_bytes.is_some()
+                ),
+            );
         }
 
         // 5. Automatic Device Sync if enabled or if destination is inside a Kindle drive
@@ -326,14 +354,23 @@ impl ConversionPipeline {
             .clone()
             .or_else(|| {
                 // Check if output_path is located inside a Kindle directory structure
-                let mut current = output_path.parent();
+                let effective_output = if output_path.is_absolute() {
+                    output_path.clone()
+                } else {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(&output_path))
+                        .unwrap_or_else(|_| output_path.clone())
+                };
+                let mut current = effective_output
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty());
                 while let Some(parent) = current {
                     if parent.join("documents").is_dir()
                         && (parent.join("system").is_dir() || parent.join(".system").is_dir())
                     {
                         return Some(parent.to_path_buf());
                     }
-                    current = parent.parent();
+                    current = parent.parent().filter(|p| !p.as_os_str().is_empty());
                 }
                 None
             })
@@ -361,16 +398,19 @@ impl ConversionPipeline {
                 kll_bytes.as_deref(),
             ) {
                 Ok(sdr_path) => {
-                    append_conversion_log(&format!(
-                        "SYNC ok sdr_path=\"{}\" has_kll={}",
-                        sdr_path.display(),
-                        kll_bytes.is_some()
-                    ));
+                    log_pipeline_event(
+                        log_path,
+                        &format!(
+                            "SYNC ok sdr_path=\"{}\" has_kll={}",
+                            sdr_path.display(),
+                            kll_bytes.is_some()
+                        ),
+                    );
                     synced_to_device = true;
                     synced_device_path = Some(sdr_path);
                 }
                 Err(e) => {
-                    append_conversion_log(&format!("ERROR SYNC failed: {}", e));
+                    log_pipeline_event(log_path, &format!("ERROR SYNC failed: {}", e));
                     sync_error = Some(e.to_string());
                 }
             }
@@ -381,14 +421,17 @@ impl ConversionPipeline {
         }
 
         let duration = start_time.elapsed();
-        append_conversion_log(&format!(
-            "DONE output=\"{}\" bytes={} duration_ms={} word_wise_glosses={:?} synced={}",
-            output_path.display(),
-            total_bytes,
-            duration.as_millis(),
-            word_wise_glosses,
-            synced_to_device
-        ));
+        log_pipeline_event(
+            log_path,
+            &format!(
+                "DONE output=\"{}\" bytes={} duration_ms={} word_wise_glosses={:?} synced={}",
+                output_path.display(),
+                total_bytes,
+                duration.as_millis(),
+                word_wise_glosses,
+                synced_to_device
+            ),
+        );
 
         Ok(ConversionReport {
             input_path,
@@ -413,35 +456,9 @@ impl ConversionPipeline {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_pipeline_nonexistent_file() {
-        let options = ConversionOptions::default();
-        let res = ConversionPipeline::run(
-            Path::new("/nonexistent/fake.epub"),
-            None,
-            &options,
-            None::<fn(f32, &str)>,
-        );
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn test_conversion_options_default() {
-        let opts = ConversionOptions::default();
-        assert_eq!(opts.content_type, "EBOK");
-        assert!(opts.word_wise);
-        assert!(opts.auto_deploy);
-        assert!(opts.device_root.is_none());
-    }
-
-    #[test]
-    fn test_pipeline_generates_word_wise_sdr_sidecars() {
+    fn create_test_epub(epub_path: &Path) {
         use std::io::Cursor;
         use zip::write::{SimpleFileOptions, ZipWriter};
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let epub_path = temp_dir.path().join("test_book.epub");
-        let kfx_path = temp_dir.path().join("test_book.kfx");
 
         let mut buf = Cursor::new(Vec::new());
         {
@@ -486,7 +503,38 @@ mod tests {
             zip.finish().unwrap();
         }
 
-        std::fs::write(&epub_path, buf.into_inner()).unwrap();
+        std::fs::write(epub_path, buf.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn test_pipeline_nonexistent_file() {
+        let options = ConversionOptions::default();
+        let res = ConversionPipeline::run_with_log_path(
+            Path::new("/nonexistent/fake.epub"),
+            None,
+            &options,
+            None,
+            None::<fn(f32, &str)>,
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_conversion_options_default() {
+        let opts = ConversionOptions::default();
+        assert_eq!(opts.content_type, "EBOK");
+        assert!(opts.word_wise);
+        assert!(opts.auto_deploy);
+        assert!(opts.device_root.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_generates_word_wise_sdr_sidecars() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let epub_path = temp_dir.path().join("test_book.epub");
+        let kfx_path = temp_dir.path().join("test_book.kfx");
+        let log_path = temp_dir.path().join("test.log");
+        create_test_epub(&epub_path);
 
         let options = ConversionOptions {
             content_type: "EBOK".into(),
@@ -495,9 +543,14 @@ mod tests {
             device_root: None,
         };
 
-        let report =
-            ConversionPipeline::run(&epub_path, Some(&kfx_path), &options, None::<fn(f32, &str)>)
-                .expect("Pipeline should succeed");
+        let report = ConversionPipeline::run_with_log_path(
+            &epub_path,
+            Some(&kfx_path),
+            &options,
+            Some(&log_path),
+            None::<fn(f32, &str)>,
+        )
+        .expect("Pipeline should succeed");
 
         assert!(kfx_path.is_file(), "KFX file must be created");
         assert!(
@@ -574,5 +627,102 @@ mod tests {
         let active_log = std::fs::read_to_string(&log_path).unwrap();
         assert!(active_log.contains("FALLBACK_FRESH_LINE"));
         assert!(active_log.len() < 1024);
+    }
+
+    #[test]
+    fn test_pipeline_run_with_log_path_isolation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let epub_path = temp_dir.path().join("book.epub");
+        let kfx_path = temp_dir.path().join("book.kfx");
+        create_test_epub(&epub_path);
+
+        let options = ConversionOptions {
+            content_type: "EBOK".into(),
+            word_wise: true,
+            auto_deploy: false,
+            device_root: None,
+        };
+
+        // 1. Some(custom_log) emits START and DONE to custom_log only
+        let custom_log = temp_dir.path().join("logs").join("custom.log");
+        ConversionPipeline::run_with_log_path(
+            &epub_path,
+            Some(&kfx_path),
+            &options,
+            Some(&custom_log),
+            None::<fn(f32, &str)>,
+        )
+        .expect("run_with_log_path(Some) should succeed");
+        let log_content = std::fs::read_to_string(&custom_log).unwrap();
+        assert!(log_content.contains("START "));
+        assert!(log_content.contains("DONE "));
+
+        // 2. None suppresses log file creation
+        let no_log_dir = temp_dir.path().join("no_log_out");
+        std::fs::create_dir_all(&no_log_dir).unwrap();
+        let kfx_no_log = no_log_dir.join("silent.kfx");
+        ConversionPipeline::run_with_log_path(
+            &epub_path,
+            Some(&kfx_no_log),
+            &options,
+            None,
+            None::<fn(f32, &str)>,
+        )
+        .expect("run_with_log_path(None) should succeed");
+        assert!(kfx_no_log.is_file());
+        assert!(!no_log_dir.join("conversion.log").exists());
+    }
+
+    #[test]
+    fn test_pipeline_relative_output_path_discovers_ancestor_kindle_root() {
+        if std::env::var_os("KFX_PIPELINE_REL_CHILD").is_some() {
+            let options = ConversionOptions {
+                content_type: "EBOK".into(),
+                word_wise: false,
+                auto_deploy: false,
+                device_root: None,
+            };
+            let report = ConversionPipeline::run_with_log_path(
+                Path::new("input.epub"),
+                Some(Path::new("rel_book.kfx")),
+                &options,
+                Some(Path::new("../test_pipeline.log")),
+                None::<fn(f32, &str)>,
+            )
+            .expect("Relative pipeline run inside Kindle documents/ must succeed");
+            assert!(
+                report.synced_to_device,
+                "Relative output inside Kindle documents/ must trigger ancestor Kindle root discovery"
+            );
+            assert!(Path::new("rel_book.kfx").is_file());
+            assert!(Path::new("rel_book.sdr").is_dir());
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let kindle_root = temp.path().join("mock_kindle");
+        let docs_dir = kindle_root.join("documents");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::create_dir_all(kindle_root.join("system")).unwrap();
+        create_test_epub(&docs_dir.join("input.epub"));
+
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "pipeline::tests::test_pipeline_relative_output_path_discovers_ancestor_kindle_root",
+            ])
+            .current_dir(&docs_dir)
+            .env("KFX_PIPELINE_REL_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Pipeline relative child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(docs_dir.join("rel_book.kfx").is_file());
+        assert!(docs_dir.join("rel_book.sdr").is_dir());
     }
 }

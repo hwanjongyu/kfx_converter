@@ -200,6 +200,53 @@ impl CssRule {
 #[derive(Debug, Clone, Default)]
 pub struct CssStylesheet {
     rules: Vec<CssRule>,
+    has_first_letter: bool,
+}
+
+enum ElementClasses<'a> {
+    Empty,
+    Inline([&'a str; 8], usize),
+    Heap(Vec<&'a str>),
+}
+
+impl<'a> ElementClasses<'a> {
+    fn from_attr(class_attr: Option<&'a str>) -> Self {
+        let Some(attr) = class_attr else {
+            return Self::Empty;
+        };
+        let mut arr = [""; 8];
+        let mut len = 0usize;
+        let mut heap: Option<Vec<&'a str>> = None;
+        for token in attr.split_whitespace() {
+            if let Some(vec) = heap.as_mut() {
+                vec.push(token);
+            } else if len < arr.len() {
+                arr[len] = token;
+                len += 1;
+            } else {
+                let mut vec = Vec::with_capacity(16);
+                vec.extend_from_slice(&arr);
+                vec.push(token);
+                heap = Some(vec);
+            }
+        }
+        if let Some(vec) = heap {
+            Self::Heap(vec)
+        } else if len == 0 {
+            Self::Empty
+        } else {
+            Self::Inline(arr, len)
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[&'a str] {
+        match self {
+            Self::Empty => &[],
+            Self::Inline(arr, len) => &arr[..*len],
+            Self::Heap(vec) => vec.as_slice(),
+        }
+    }
 }
 
 /// Upper bound on accepted rules to guard against pathological stylesheets.
@@ -318,6 +365,9 @@ impl CssStylesheet {
                         (s, false)
                     };
                 if let Some((tag, classes)) = parse_simple_selector(target_sel) {
+                    if is_first_letter {
+                        self.has_first_letter = true;
+                    }
                     let order = self.rules.len();
                     self.rules.push(CssRule {
                         tag,
@@ -331,33 +381,44 @@ impl CssStylesheet {
         }
     }
 
-    /// Returns the cascaded declarations for an element as a `prop: value; ...` string,
-    /// ordered so that later declarations override earlier ones (last-wins).
-    pub fn declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
-        if self.rules.is_empty() {
+    fn resolve_declarations(
+        &self,
+        tag: &str,
+        class_attr: Option<&str>,
+        first_letter: bool,
+    ) -> String {
+        if self.rules.is_empty() || (first_letter && !self.has_first_letter) {
             return String::new();
         }
-        let tag_lc = tag.to_ascii_lowercase();
-        let classes: Vec<String> = class_attr
-            .map(|c| {
-                c.split_whitespace()
-                    .map(|s| s.to_ascii_lowercase())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let classes = ElementClasses::from_attr(class_attr);
+        let class_slice = classes.as_slice();
 
-        let mut matched: Vec<&CssRule> = self
-            .rules
+        let mut matched: Vec<&CssRule> = Vec::new();
+        for r in &self.rules {
+            if r.is_first_letter == first_letter
+                && r.tag.as_deref().is_none_or(|t| t.eq_ignore_ascii_case(tag))
+                && (r.classes.is_empty()
+                    || (!class_slice.is_empty()
+                        && r.classes
+                            .iter()
+                            .all(|c| class_slice.iter().any(|cls| cls.eq_ignore_ascii_case(c)))))
+            {
+                matched.push(r);
+            }
+        }
+        if matched.is_empty() {
+            return String::new();
+        }
+        if matched.len() > 1 {
+            matched.sort_by_key(|r| (r.specificity(), r.order));
+        }
+
+        let total_len: usize = matched
             .iter()
-            .filter(|r| {
-                !r.is_first_letter
-                    && r.tag.as_deref().is_none_or(|t| t == tag_lc)
-                    && r.classes.iter().all(|c| classes.contains(c))
-            })
-            .collect();
-        matched.sort_by_key(|r| (r.specificity(), r.order));
-
-        let mut out = String::new();
+            .flat_map(|r| r.decls.iter())
+            .map(|(p, v)| p.len() + v.len() + 2)
+            .sum();
+        let mut out = String::with_capacity(total_len);
         for r in matched {
             for (p, v) in &r.decls {
                 out.push_str(p);
@@ -369,41 +430,15 @@ impl CssStylesheet {
         out
     }
 
+    /// Returns the cascaded declarations for an element as a `prop: value; ...` string,
+    /// ordered so that later declarations override earlier ones (last-wins).
+    pub fn declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        self.resolve_declarations(tag, class_attr, false)
+    }
+
     /// Returns the cascaded declarations for an element's `::first-letter` pseudo-element.
     pub fn first_letter_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
-        if self.rules.is_empty() {
-            return String::new();
-        }
-        let tag_lc = tag.to_ascii_lowercase();
-        let classes: Vec<String> = class_attr
-            .map(|c| {
-                c.split_whitespace()
-                    .map(|s| s.to_ascii_lowercase())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut matched: Vec<&CssRule> = self
-            .rules
-            .iter()
-            .filter(|r| {
-                r.is_first_letter
-                    && r.tag.as_deref().is_none_or(|t| t == tag_lc)
-                    && r.classes.iter().all(|c| classes.contains(c))
-            })
-            .collect();
-        matched.sort_by_key(|r| (r.specificity(), r.order));
-
-        let mut out = String::new();
-        for r in matched {
-            for (p, v) in &r.decls {
-                out.push_str(p);
-                out.push(':');
-                out.push_str(v);
-                out.push(';');
-            }
-        }
-        out
+        self.resolve_declarations(tag, class_attr, true)
     }
 }
 
@@ -713,23 +748,59 @@ fn parse_simple_selector(sel: &str) -> Option<(Option<String>, Vec<String>)> {
     Some((tag, classes))
 }
 
+/// Finds an ASCII tag prefix (e.g. `b"<style"` or `b"</style"`) case-insensitively
+/// while verifying a valid tag boundary (`>`, whitespace, or `/` on opening tags).
+fn find_ascii_tag_ignore_case(
+    bytes: &[u8],
+    mut from: usize,
+    tag_prefix_lower: &[u8],
+) -> Option<usize> {
+    let len = tag_prefix_lower.len();
+    let allow_slash = tag_prefix_lower == b"<style";
+    while from + len < bytes.len() {
+        let rel = bytes[from..].iter().position(|&b| b == b'<')?;
+        let idx = from + rel;
+        if idx + len >= bytes.len() {
+            return None;
+        }
+        if bytes[idx..idx + len].eq_ignore_ascii_case(tag_prefix_lower) {
+            let next = bytes[idx + len];
+            if next == b'>' || next.is_ascii_whitespace() || (allow_slash && next == b'/') {
+                return Some(idx);
+            }
+        }
+        from = idx + 1;
+    }
+    None
+}
+
 /// Extracts the text of all inline `<style>` blocks from an XHTML document.
 pub fn extract_inline_style_blocks(xhtml: &str) -> String {
+    let bytes = xhtml.as_bytes();
     let mut out = String::new();
-    let lower = xhtml.to_ascii_lowercase();
     let mut pos = 0;
-    while let Some(rel) = lower[pos..].find("<style") {
-        let start = pos + rel;
-        let Some(gt) = lower[start..].find('>') else {
+    while let Some(start) = find_ascii_tag_ignore_case(bytes, pos, b"<style") {
+        let after_tag = start + b"<style".len();
+        let Some(gt_rel) = bytes[after_tag..].iter().position(|&b| b == b'>') else {
             break;
         };
-        let content_start = start + gt + 1;
-        let Some(end_rel) = lower[content_start..].find("</style") else {
+        let gt_pos = after_tag + gt_rel;
+        let content_start = gt_pos + 1;
+        if bytes[gt_pos - 1] == b'/' {
+            pos = content_start;
+            continue;
+        }
+        let Some(end_idx) = find_ascii_tag_ignore_case(bytes, content_start, b"</style") else {
             break;
         };
-        out.push_str(&xhtml[content_start..content_start + end_rel]);
+        out.push_str(&xhtml[content_start..end_idx]);
         out.push('\n');
-        pos = content_start + end_rel;
+        let close_after = end_idx + b"</style".len();
+        pos = if let Some(close_gt_rel) = bytes[close_after..].iter().position(|&b| b == b'>') {
+            close_after + close_gt_rel + 1
+        } else {
+            close_after
+        };
     }
     out
 }
@@ -1054,5 +1125,56 @@ mod tests {
         let d = sheet.declarations_for("p", Some("q"));
         assert!(d.contains("/* kept */"), "decls: {}", d);
         assert!(d.contains("font-weight:bold"), "decls: {}", d);
+    }
+
+    #[test]
+    fn test_extract_inline_style_blocks_case_insensitive_and_no_alloc_when_absent() {
+        let no_style = "<html><head><stylesheet/><title>한국어 테스트</title></head><body><p>Body</p></body></html>";
+        let empty = extract_inline_style_blocks(no_style);
+        assert!(empty.is_empty());
+        assert_eq!(
+            empty.capacity(),
+            0,
+            "Absent <style> tags must return empty String with zero heap allocation"
+        );
+
+        let mixed = concat!(
+            "<html><head>",
+            "<stylesheet>ignored</stylesheet>",
+            "<style/>",
+            "<STYLE Type=\"text/css\">p.A{color:#111;}</StYlE>",
+            "<style\nmedia=\"screen\">/* 한글 */ p.B{font-style:italic;}</STYLE >",
+            "</head><body><p>Hi</p></body></html>"
+        );
+        let extracted = extract_inline_style_blocks(mixed);
+        assert_eq!(
+            extracted,
+            "p.A{color:#111;}\n/* 한글 */ p.B{font-style:italic;}\n"
+        );
+    }
+
+    #[test]
+    fn test_css_first_letter_fast_path_and_case_insensitive_classes() {
+        let mut no_fl_sheet = CssStylesheet::new();
+        no_fl_sheet.add_css("p.Intro { font-weight: bold; } .a.b { font-style: italic; }");
+        assert!(!no_fl_sheet.has_first_letter);
+        assert!(
+            no_fl_sheet
+                .first_letter_declarations_for("P", Some("Intro"))
+                .is_empty()
+        );
+        assert_eq!(
+            no_fl_sheet.declarations_for("P", Some("c1 c2 c3 c4 c5 c6 c7 c8 A b INTRO")),
+            "font-weight:bold;font-style:italic;"
+        );
+
+        let mut fl_sheet = CssStylesheet::new();
+        fl_sheet.add_css("P.Drop::first-letter { font-size: 3em; float: left; }");
+        assert!(fl_sheet.has_first_letter);
+        assert!(fl_sheet.declarations_for("p", Some("drop")).is_empty());
+        assert_eq!(
+            fl_sheet.first_letter_declarations_for("p", Some("DROP")),
+            "font-size:3em;float:left;"
+        );
     }
 }

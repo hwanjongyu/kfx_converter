@@ -4,7 +4,7 @@
 //! over UMS and Linux GVFS MTP (`gio copy`), with atomic `.part` renames and streaming copy.
 
 use super::DEVICE_SYNC_LOCK;
-use super::catalog::clean_stale_sdr_files_with_content_id;
+use super::catalog::clean_stale_sdr_files_unlocked;
 use super::sanitize::{
     collect_thumbnail_stems, sanitize_asin, sanitize_cde_content_type, sanitize_filename,
     sanitize_sidecar_stem,
@@ -40,7 +40,9 @@ pub fn sync_to_device(
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
         if let Ok(c_path) = CString::new(docs_dir.as_os_str().as_bytes()) {
+            // SAFETY: `libc::statvfs` is a C POD struct where all-zero bits is a valid initial state.
             let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+            // SAFETY: `c_path` is a valid NUL-terminated `CString` and `stat` is a valid output buffer.
             if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0
                 && (stat.f_flag & libc::ST_RDONLY as libc::c_ulong) != 0
             {
@@ -80,7 +82,7 @@ pub fn sync_to_device(
 
     // 1. Copy KFX file if source and destination differ
     if kfx_source != dest_kfx_path {
-        copy_file(kfx_source, &dest_kfx_path)?;
+        copy_file_unlocked(kfx_source, &dest_kfx_path)?;
     }
 
     // 2. Sync Cover Thumbnail across system/thumbnails, .system/thumbnails, and amazon-cover-bug
@@ -111,13 +113,14 @@ pub fn sync_to_device(
                 ];
                 for name in &thumb_names {
                     let path = thumb_dir.join(name);
-                    if path.starts_with(&thumb_dir) {
-                        let _ = write_bytes(&path, jpeg);
-                        if let Ok(meta) = std::fs::metadata(&path) {
-                            let mut perms = meta.permissions();
-                            perms.set_readonly(true);
-                            let _ = std::fs::set_permissions(&path, perms);
-                        }
+                    if path.starts_with(&thumb_dir)
+                        && write_bytes_unlocked(&path, jpeg).is_ok()
+                        && let Ok(meta) = std::fs::symlink_metadata(&path)
+                        && !meta.file_type().is_symlink()
+                    {
+                        let mut perms = meta.permissions();
+                        perms.set_readonly(true);
+                        let _ = std::fs::set_permissions(&path, perms);
                     }
                 }
             }
@@ -133,7 +136,7 @@ pub fn sync_to_device(
         )));
     }
     // 3. Deploy companion .sdr folder, Word Wise sidecars, and thumbnails
-    crate::enhancements::SdrDeployer::deploy(
+    crate::enhancements::SdrDeployer::deploy_unlocked(
         &sdr_dir,
         &safe_asin,
         safe_cid.as_deref(),
@@ -144,12 +147,8 @@ pub fn sync_to_device(
     )?;
 
     let purge_ww = kll_bytes.is_none();
-    let _ = clean_stale_sdr_files_with_content_id(
-        &sdr_dir,
-        Some(&safe_asin),
-        safe_cid.as_deref(),
-        purge_ww,
-    );
+    let _ =
+        clean_stale_sdr_files_unlocked(&sdr_dir, Some(&safe_asin), safe_cid.as_deref(), purge_ww);
 
     // Flush dirty OS page cache to physical storage before reporting completion,
     // preventing truncated files and Kindle .bad_file markers on USB disconnect.
@@ -157,12 +156,15 @@ pub fn sync_to_device(
     {
         use std::os::unix::io::AsRawFd;
         if let Ok(root_file) = std::fs::File::open(device_root) {
+            // SAFETY: `root_file` is an open `File` whose raw fd remains valid for the `syncfs` call.
             let _ = unsafe { libc::syncfs(root_file.as_raw_fd()) };
         } else {
+            // SAFETY: `libc::sync` takes no arguments and flushes kernel buffers without pointer access.
             unsafe { libc::sync() };
         }
     }
     #[cfg(all(unix, not(target_os = "linux")))]
+    // SAFETY: `libc::sync` takes no arguments and flushes kernel buffers without pointer access.
     unsafe {
         libc::sync()
     };
@@ -204,6 +206,12 @@ pub fn prepare_destination_for_overwrite(dst: &Path) {
 /// SYNCHRONIZE CACHE commands cause Kindle's USB gadget driver (fsg) to stall on slow eMMC
 /// and trigger "capacity change from N to 0" (medium drop / disconnect).
 pub fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
+    let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    copy_file_unlocked(src, dst)
+}
+
+/// Internal unlocked copy helper for callers already holding `DEVICE_SYNC_LOCK`.
+pub(crate) fn copy_file_unlocked(src: &Path, dst: &Path) -> Result<(), SyncError> {
     let dst_str = dst.to_string_lossy();
     if dst_str.contains("/gvfs/mtp:") {
         // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
@@ -297,13 +305,19 @@ pub fn execute_gio_copy_with_timeout(
 
 /// Writes raw bytes to device, using a temporary file and `gio copy` if on MTP.
 pub fn write_bytes(dst: &Path, data: &[u8]) -> Result<(), SyncError> {
+    let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    write_bytes_unlocked(dst, data)
+}
+
+/// Internal unlocked write helper for callers already holding `DEVICE_SYNC_LOCK`.
+pub(crate) fn write_bytes_unlocked(dst: &Path, data: &[u8]) -> Result<(), SyncError> {
     let dst_str = dst.to_string_lossy();
     if dst_str.contains("/gvfs/mtp:") {
         let mut tmp = tempfile::NamedTempFile::new()?;
         use std::io::Write;
         tmp.write_all(data)?;
         tmp.flush()?;
-        copy_file(tmp.path(), dst)?;
+        copy_file_unlocked(tmp.path(), dst)?;
     } else {
         use std::io::Write;
         reject_symlink_destination(dst)?;
@@ -330,30 +344,82 @@ mod tests {
 
     #[test]
     fn test_sync_to_device_traversal_rejection() {
-        let temp = tempfile::tempdir().unwrap();
-        let docs = temp.path().join("documents");
-        std::fs::create_dir_all(&docs).unwrap();
-
-        let kfx_src = temp.path().join("source.kfx");
-        std::fs::write(&kfx_src, b"FAKE_KFX_BYTES").unwrap();
-
-        // Sync with a malicious title that attempts traversal
-        let result = KindleSync::sync_to_device(
-            temp.path(),
-            &kfx_src,
-            "../../../../etc/shadow",
-            "B00TESTASIN",
-            Some("1234567890ABCDEF1234567890ABCDEF"),
-            Some("EBOK"),
-            Some("en"),
-            None,
-            None,
+        assert_eq!(
+            KindleSync::sanitize_filename("../../../../etc/shadow"),
+            "________etc_shadow"
         );
-        assert!(result.is_ok());
-        let synced_path = result.unwrap();
-        // Ensure destination path stays strictly inside documents
-        assert!(synced_path.starts_with(&docs));
-        assert!(!synced_path.to_string_lossy().contains(".."));
+        assert_eq!(KindleSync::sanitize_filename("CON"), "book_CON");
+
+        let temp = tempfile::tempdir().unwrap();
+        let device_root = temp.path().join("kindle_device");
+        let docs = device_root.join("documents");
+        let src_dir = temp.path().join("sources");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let mut cases = vec![("...kfx", "book"), ("..hidden.. .kfx", "_hidden")];
+        // DOS reserved filenames cannot be created as real files on Windows hosts.
+        #[cfg(not(windows))]
+        cases.push(("CON.kfx", "book_CON"));
+
+        for (src_name, expected_stem) in cases {
+            let kfx_src = src_dir.join(src_name);
+            std::fs::write(&kfx_src, b"FAKE_KFX_BYTES").unwrap();
+
+            let synced_path = KindleSync::sync_to_device(
+                &device_root,
+                &kfx_src,
+                "../../../../etc/shadow",
+                "../../../../etc/passwd",
+                Some("../../etc/cron"),
+                Some("../evil"),
+                Some("../../en"),
+                Some(b"FAKE_JPEG"),
+                Some(b"FAKE_KLL"),
+            )
+            .expect("sync_to_device must sanitize traversal inputs safely");
+
+            let expected_kfx = docs.join(format!("{}.kfx", expected_stem));
+            let expected_sdr = docs.join(format!("{}.sdr", expected_stem));
+            assert_eq!(synced_path, expected_kfx);
+            assert!(synced_path.starts_with(&docs));
+            assert!(!synced_path.to_string_lossy().contains(".."));
+            assert!(expected_kfx.is_file());
+            assert!(expected_sdr.is_dir());
+            assert!(
+                expected_sdr
+                    .join("LanguageLayer.en.etcpasswd.kll")
+                    .is_file()
+            );
+            assert!(expected_sdr.join("LanguageLayer.en.etccron.kll").is_file());
+        }
+
+        // Thumbnails must also stay strictly inside device_root using sanitized stems and EBOK fallback.
+        assert!(
+            device_root
+                .join("system")
+                .join("thumbnails")
+                .join("thumbnail_etcpasswd_EBOK_portrait.jpg")
+                .is_file()
+        );
+        assert!(
+            device_root
+                .join("amazon-cover-bug")
+                .join("thumbnail_etccron_EBOK_portrait.jpg")
+                .is_file()
+        );
+
+        // No traversal directories/files may escape device_root into the parent sandbox.
+        let mut root_entries: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        root_entries.sort();
+        assert_eq!(
+            root_entries,
+            vec!["kindle_device".to_string(), "sources".to_string()]
+        );
     }
 
     #[test]
@@ -678,5 +744,47 @@ mod tests {
                 .join("thumbnail_CID_ACTIVE_123_EBOK_portrait.jpg")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn test_sync_to_device_does_not_deadlock_under_device_sync_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        let kfx_src = temp.path().join("lock_free_sync.kfx");
+        std::fs::write(&kfx_src, b"KFX_SYNC_BYTES").unwrap();
+
+        let sdr_dir = docs.join("lock_free_sync.sdr");
+        std::fs::create_dir_all(&sdr_dir).unwrap();
+        std::fs::write(sdr_dir.join("stale.han"), b"stale").unwrap();
+
+        let fake_jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        let synced = KindleSync::sync_to_device(
+            temp.path(),
+            &kfx_src,
+            "Lock Test Book",
+            "B0LOCKTEST1",
+            Some("CID_LOCK_TEST"),
+            Some("EBOK"),
+            Some("en"),
+            Some(&fake_jpeg),
+            Some(b"SQLite format 3\0KLL"),
+        )
+        .expect("sync_to_device must complete without deadlocking DEVICE_SYNC_LOCK");
+
+        assert_eq!(synced, docs.join("lock_free_sync.kfx"));
+        assert!(synced.is_file());
+        assert!(!sdr_dir.join("stale.han").exists());
+        assert!(sdr_dir.join("LanguageLayer.en.CID_LOCK_TEST.kll").is_file());
+
+        // Standalone locked entrypoints also work immediately after sync_to_device drops the lock
+        let extra_dst = temp.path().join("extra.bin");
+        KindleSync::write_bytes(&extra_dst, b"EXTRA").unwrap();
+        assert_eq!(std::fs::read(&extra_dst).unwrap(), b"EXTRA");
+
+        let extra_copy = temp.path().join("extra_copy.kfx");
+        KindleSync::copy_file(&kfx_src, &extra_copy).unwrap();
+        assert_eq!(std::fs::read(&extra_copy).unwrap(), b"KFX_SYNC_BYTES");
     }
 }

@@ -6,14 +6,49 @@ use super::{
 };
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
-use crate::ir::Block;
 use crate::symbols::*;
+
+/// Iteratively checks whether decoded storyline Ion values contain any native
+/// `$278 table` or `$279 table_row` structure (`$159 type: $278 | $279`).
+fn storyline_contains_native_table(
+    values: &[IonValue],
+    sym_type: u32,
+    sym_table: u32,
+    sym_table_row: u32,
+) -> bool {
+    let mut stack: Vec<&IonValue> = values.iter().collect();
+    while let Some(val) = stack.pop() {
+        match val {
+            IonValue::Struct(fields) => {
+                for (k, v) in fields {
+                    if *k == sym_type
+                        && matches!(
+                            v,
+                            IonValue::Symbol(s) if *s == sym_table || *s == sym_table_row
+                        )
+                    {
+                        return true;
+                    }
+                    stack.push(v);
+                }
+            }
+            IonValue::List(items) => {
+                stack.extend(items.iter());
+            }
+            IonValue::Annotated(_, inner) => {
+                stack.push(inner.as_ref());
+            }
+            _ => {}
+        }
+    }
+    false
+}
 
 impl<'a> KfxPackager<'a> {
     pub(crate) fn build_format_capabilities(&self) -> Vec<u8> {
         let sym_fcap = SYM_FORMAT_CAPABILITIES; // 593
-        let sym_key = symbol_id("key").unwrap_or(492);
-        let sym_version = symbol_id("version").unwrap_or(5);
+        let sym_key = KfxSymbol::Key as u32;
+        let sym_version = KfxSymbol::Version as u32;
 
         let caps = IonValue::List(vec![
             IonValue::Struct(vec![
@@ -35,13 +70,13 @@ impl<'a> KfxPackager<'a> {
 
     pub(crate) fn build_content_features(&mut self, section_data: &[SectionPackData]) {
         let sym_cf = SYM_CONTENT_FEATURES; // 585
-        let sym_features = symbol_id("features").unwrap_or(590);
-        let sym_namespace = symbol_id("namespace").unwrap_or(586);
-        let sym_key = symbol_id("key").unwrap_or(492);
-        let sym_ver_info = symbol_id("version_info").unwrap_or(589);
-        let sym_version = symbol_id("version").unwrap_or(5);
-        let sym_major = symbol_id("major_version").unwrap_or(587);
-        let sym_minor = symbol_id("minor_version").unwrap_or(588);
+        let sym_features = KfxSymbol::Features as u32;
+        let sym_namespace = KfxSymbol::Namespace as u32;
+        let sym_key = KfxSymbol::Key as u32;
+        let sym_ver_info = KfxSymbol::VersionInfo as u32;
+        let sym_version = KfxSymbol::Version as u32;
+        let sym_major = KfxSymbol::MajorVersion as u32;
+        let sym_minor = KfxSymbol::MinorVersion as u32;
 
         let mut feature_list = vec![
             IonValue::Struct(vec![
@@ -113,10 +148,11 @@ impl<'a> KfxPackager<'a> {
 
         // 2. yj_jpg_rst_marker_present: Required when emitted JPEG images ($417) have restart markers.
         // Falls back to raw resources only if build_content_features is invoked standalone before build_resources.
-        let has_emitted_417 = self.entities.iter().any(|e| e.chunk_type == 417);
+        let sym_raw_media = KfxSymbol::Bcrawmedia as u32;
+        let has_emitted_417 = self.entities.iter().any(|e| e.chunk_type == sym_raw_media);
         let has_rst_marker = if has_emitted_417 {
             self.entities.iter().any(|e| {
-                e.chunk_type == 417
+                e.chunk_type == sym_raw_media
                     && e.data.starts_with(b"\xFF\xD8\xFF")
                     && e.data
                         .windows(2)
@@ -154,12 +190,28 @@ impl<'a> KfxPackager<'a> {
             ]));
         }
 
-        // 3. yj_table and yj_table_viewer: Required when tables are present
-        let has_tables = self
-            .sections
-            .iter()
-            .any(|s| s.blocks.iter().any(|b| matches!(b, Block::Table { .. })));
-        if has_tables {
+        // 3. yj_table and yj_table_viewer: Required ONLY when native $278/$279 table structures
+        // are actually emitted (flattened $269 text tables must not trigger yj_table negotiation).
+        let sym_table = KfxSymbol::Table as u32;
+        let sym_table_row = KfxSymbol::TableRow as u32;
+        let sym_type = KfxSymbol::Type as u32;
+        let has_native_tables = self.entities.iter().any(|e| {
+            if e.chunk_type == sym_table || e.chunk_type == sym_table_row {
+                return true;
+            }
+            if e.chunk_type == SYM_STORYLINE
+                && let Ok(values) = crate::ion::IonReader::new(&e.data).decode_all()
+            {
+                return storyline_contains_native_table(
+                    &values,
+                    sym_type,
+                    sym_table,
+                    sym_table_row,
+                );
+            }
+            false
+        });
+        if has_native_tables {
             feature_list.push(IonValue::Struct(vec![
                 (
                     sym_namespace,
@@ -298,11 +350,11 @@ impl<'a> KfxPackager<'a> {
 
     pub(crate) fn build_book_metadata(&mut self) {
         let sym_book_meta = SYM_BOOK_METADATA; // 490
-        let sym_categorised = symbol_id("categorised_metadata").unwrap_or(491);
-        let sym_category = symbol_id("category").unwrap_or(495);
-        let sym_metadata = symbol_id("metadata").unwrap_or(258);
-        let sym_key = symbol_id("key").unwrap_or(492);
-        let sym_val = symbol_id("value").unwrap_or(307);
+        let sym_categorised = KfxSymbol::CategorisedMetadata as u32;
+        let sym_category = KfxSymbol::Category as u32;
+        let sym_metadata = KfxSymbol::Metadata as u32;
+        let sym_key = KfxSymbol::Key as u32;
+        let sym_val = KfxSymbol::Value as u32;
 
         let lang = Self::normalize_bcp47_tag(&self.book.metadata.language);
 
@@ -503,10 +555,10 @@ impl<'a> KfxPackager<'a> {
 
     pub(crate) fn build_metadata(&mut self, section_data: &[SectionPackData]) {
         let sym_meta = SYM_METADATA; // 258
-        let sym_reading_orders = symbol_id("reading_orders").unwrap_or(169);
-        let sym_reading_order_name = symbol_id("reading_order_name").unwrap_or(178);
-        let sym_default = symbol_id("default").unwrap_or(351);
-        let sym_sections = symbol_id("sections").unwrap_or(170);
+        let sym_reading_orders = KfxSymbol::ReadingOrders as u32;
+        let sym_reading_order_name = KfxSymbol::ReadingOrderName as u32;
+        let sym_default = KfxSymbol::Default as u32;
+        let sym_sections = KfxSymbol::Sections as u32;
 
         let section_sym_vals: Vec<IonValue> = section_data
             .iter()
@@ -539,27 +591,27 @@ impl<'a> KfxPackager<'a> {
         symbols: &LocalSymbols,
     ) {
         let sym_doc_data = SYM_DOCUMENT_DATA; // 538
-        let sym_direction = symbol_id("direction").unwrap_or(192);
-        let sym_ltr = symbol_id("ltr").unwrap_or(376);
-        let sym_column_count = symbol_id("column_count").unwrap_or(112);
-        let sym_auto = symbol_id("auto").unwrap_or(383);
-        let sym_font_size = symbol_id("font_size").unwrap_or(16);
-        let sym_value = symbol_id("value").unwrap_or(307);
-        let sym_unit = symbol_id("unit").unwrap_or(306);
-        let sym_em = symbol_id("em").unwrap_or(308);
-        let sym_writing_mode = symbol_id("writing_mode").unwrap_or(560);
-        let sym_horiz_tb = symbol_id("horizontal_tb").unwrap_or(557);
-        let sym_selection = symbol_id("selection").unwrap_or(436);
-        let sym_enabled = symbol_id("enabled").unwrap_or(441);
-        let sym_max_id = symbol_id("max_id").unwrap_or(8);
-        let sym_line_height = symbol_id("line_height").unwrap_or(42);
-        let sym_font_family = symbol_id("font_family").unwrap_or(11);
-        let sym_spacing_base = symbol_id("spacing_percent_base").unwrap_or(477);
-        let sym_width = symbol_id("width").unwrap_or(56);
-        let sym_reading_orders = symbol_id("reading_orders").unwrap_or(169);
-        let sym_reading_order_name = symbol_id("reading_order_name").unwrap_or(178);
-        let sym_default = symbol_id("default").unwrap_or(351);
-        let sym_sections = symbol_id("sections").unwrap_or(170);
+        let sym_direction = KfxSymbol::Direction as u32;
+        let sym_ltr = KfxSymbol::Ltr as u32;
+        let sym_column_count = KfxSymbol::ColumnCount as u32;
+        let sym_auto = KfxSymbol::Auto as u32;
+        let sym_font_size = KfxSymbol::FontSize as u32;
+        let sym_value = KfxSymbol::Value as u32;
+        let sym_unit = KfxSymbol::Unit as u32;
+        let sym_em = KfxSymbol::Em as u32;
+        let sym_writing_mode = KfxSymbol::WritingMode as u32;
+        let sym_horiz_tb = KfxSymbol::HorizontalTb as u32;
+        let sym_selection = KfxSymbol::Selection as u32;
+        let sym_enabled = KfxSymbol::Enabled as u32;
+        let sym_max_id = KfxSymbol::MaxId as u32;
+        let sym_line_height = KfxSymbol::LineHeight as u32;
+        let sym_font_family = KfxSymbol::FontFamily as u32;
+        let sym_spacing_base = KfxSymbol::SpacingPercentBase as u32;
+        let sym_width = KfxSymbol::Width as u32;
+        let sym_reading_orders = KfxSymbol::ReadingOrders as u32;
+        let sym_reading_order_name = KfxSymbol::ReadingOrderName as u32;
+        let sym_default = KfxSymbol::Default as u32;
+        let sym_sections = KfxSymbol::Sections as u32;
 
         let section_sym_vals: Vec<IonValue> = section_data
             .iter()

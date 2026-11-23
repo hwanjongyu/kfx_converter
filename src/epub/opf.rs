@@ -364,7 +364,10 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
     };
 
     if cover_needs_resolution {
-        let cover_prop_item = manifest.values().find(|item| {
+        let mut manifest_items: Vec<&ManifestItem> = manifest.values().collect();
+        manifest_items.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.href.cmp(&b.href)));
+
+        let cover_prop_item = manifest_items.iter().copied().find(|item| {
             item.media_type.starts_with("image/")
                 && item
                     .properties
@@ -375,7 +378,7 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
         if let Some(item) = cover_prop_item {
             metadata.cover_image_id = Some(item.id.clone());
         } else {
-            let cover_name_item = manifest.values().find(|item| {
+            let cover_name_item = manifest_items.iter().copied().find(|item| {
                 item.media_type.starts_with("image/")
                     && (item.id.to_lowercase().contains("cover")
                         || item.href.to_lowercase().contains("cover"))

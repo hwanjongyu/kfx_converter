@@ -10,12 +10,12 @@ The project maintains in-depth, production-grade technical monographs detailing 
 
 | Document | Primary Focus | Key Coverage |
 | :--- | :--- | :--- |
-| **[YELLOWJACKET.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/YELLOWJACKET.md)** | **Amazon Enhanced Typesetting Engine** | $0..851 symbols, entity DAG, 240MB `pmond` memory ceiling, image link contracts, positioning maps ($264, $265, $609, $550, $621). |
-| **[WORD_WISE.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/WORD_WISE.md)** | **Word Wise (LanguageLayer) Engine** | Two-tier SQLite model, `kll.en.en.klld` schema, Base64 gloss definitions, ASIN/ACR binding, 5-tier difficulty model, and cache invalidation. |
-| **[FORMAT_SPEC.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/FORMAT_SPEC.md)** | **KFX Binary & Ion Specification** | 18-byte `CONT` header, `bcIndexTab` chunk indexing, `ENTY` envelope wrapping, and 7-bit `VarUInt` encoding. |
-| **[ARCHITECTURE.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/ARCHITECTURE.md)** | **System Subsystems & Pipeline** | `BookIR` intermediate model, chapter fragmentation, symbol intern pools, cover optimization, and non-blocking GVFS MTP sync. |
-| **[CLI_GUIDE.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/CLI_GUIDE.md)** | **Command-Line Interface & Usage** | CLI arguments, standalone conversions, batch processing, hardware auto-sync, and troubleshooting. |
-| **[multi_model_review_report.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/multi_model_review_report.md)** | **Multi-Model Engineering Audit** | Tri-model consensus review (Gemini Pro, Claude Sonnet, Claude Opus) assessing security, architecture, and memory safety. |
+| **[YELLOWJACKET.md](YELLOWJACKET.md)** | **Amazon Enhanced Typesetting Engine** | $0..851 symbols, entity DAG, 240MB `pmond` memory ceiling, image link contracts, positioning maps ($264, $265, $609, $550, $621). |
+| **[WORD_WISE.md](WORD_WISE.md)** | **Word Wise (LanguageLayer) Engine** | Two-tier SQLite model, `kll.en.en.klld` schema, Base64 gloss definitions, ASIN/ACR binding, 5-tier difficulty model, and cache invalidation. |
+| **[FORMAT_SPEC.md](FORMAT_SPEC.md)** | **KFX Binary & Ion Specification** | 18-byte `CONT` header, `bcIndexTab` chunk indexing, `ENTY` envelope wrapping, and 7-bit `VarUInt` encoding. |
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | **System Subsystems & Pipeline** | `BookIR` intermediate model, chapter fragmentation, symbol intern pools, cover optimization, and non-blocking GVFS MTP sync. |
+| **[CLI_GUIDE.md](CLI_GUIDE.md)** | **Command-Line Interface & Usage** | CLI arguments, standalone conversions, batch processing, hardware auto-sync, and troubleshooting. |
+| **[multi_model_review_report.md](multi_model_review_report.md)** | **Multi-Model Engineering Audit** | Tri-model consensus review (Gemini Pro, Claude Sonnet, Claude Opus) assessing security, architecture, and memory safety. |
 
 ---
 
@@ -29,68 +29,71 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 ### 1. Word Wise & Linguistic Enhancements
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
-| **Kindle Master Vocabulary (52k+ Lemmas)** | [spec-word-wise-master-vocabulary-expansion.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-word-wise-master-vocabulary-expansion.md) | [qa-word-wise-master-vocabulary-expansion.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-word-wise-master-vocabulary-expansion.md) | **PASS** |
-| **Word Wise Priority Window Pacing** | [spec-word-wise-priority-pacing.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-word-wise-priority-pacing.md) | [qa-word-wise-priority-pacing.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-word-wise-priority-pacing.md) | **PASS** |
-| **Multi-Language Tag Alias Deployment** | [spec-fix-word-wise-language-tag.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-word-wise-language-tag.md) | [qa-fix-word-wise-language-tag.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-word-wise-language-tag.md) | **PASS** |
-| **Amazon Ground Truth Vocabulary (20k Lemmas)** | [spec-amazon-ground-truth-word-wise-dictionary.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-amazon-ground-truth-word-wise-dictionary.md) | [qa-amazon-ground-truth-word-wise-dictionary.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-amazon-ground-truth-word-wise-dictionary.md) | **PASS** |
-| **Word Wise E-Ink In-line Rendering & Visibility** | [spec-fix-word-wise-visibility.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-word-wise-visibility.md) | [qa-fix-word-wise-visibility.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-word-wise-visibility.md) | **PASS** |
-| **Word Wise Sidecar Deployment & Pairing** | [spec-fix-word-wise-deployment.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-word-wise-deployment.md) | [qa-fix-word-wise-deployment.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-word-wise-deployment.md) | **PASS** |
+| **Kindle Master Vocabulary (52k+ Lemmas)** | [spec-word-wise-master-vocabulary-expansion.md](specs/spec-word-wise-master-vocabulary-expansion.md) | [qa-word-wise-master-vocabulary-expansion.md](qa/qa-word-wise-master-vocabulary-expansion.md) | **PASS** |
+| **Word Wise Priority Window Pacing** | [spec-word-wise-priority-pacing.md](specs/spec-word-wise-priority-pacing.md) | [qa-word-wise-priority-pacing.md](qa/qa-word-wise-priority-pacing.md) | **PASS** |
+| **Multi-Language Tag Alias Deployment** | [spec-fix-word-wise-language-tag.md](specs/spec-fix-word-wise-language-tag.md) | [qa-fix-word-wise-language-tag.md](qa/qa-fix-word-wise-language-tag.md) | **PASS** |
+| **Amazon Ground Truth Vocabulary (20k Lemmas)** | [spec-amazon-ground-truth-word-wise-dictionary.md](specs/spec-amazon-ground-truth-word-wise-dictionary.md) | [qa-amazon-ground-truth-word-wise-dictionary.md](qa/qa-amazon-ground-truth-word-wise-dictionary.md) | **PASS** |
+| **Word Wise E-Ink In-line Rendering & Visibility** | [spec-fix-word-wise-visibility.md](specs/spec-fix-word-wise-visibility.md) | [qa-fix-word-wise-visibility.md](qa/qa-fix-word-wise-visibility.md) | **PASS** |
+| **Word Wise Sidecar Deployment & Pairing** | [spec-fix-word-wise-deployment.md](specs/spec-fix-word-wise-deployment.md) | [qa-fix-word-wise-deployment.md](qa/qa-fix-word-wise-deployment.md) | **PASS** |
 
 ### 2. Enhanced Typesetting & Typographical Rendering
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
-| **Advanced Typesetting (Drop Caps, Small Caps, Ruby)** | [spec-advanced-typesetting.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-advanced-typesetting.md) | [qa-advanced-typesetting-phase1.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase1.md)<br/>[qa-advanced-typesetting-phase2.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase2.md)<br/>[qa-advanced-typesetting-phase3.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase3.md)<br/>[qa-advanced-typesetting-phase4.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-typesetting-phase4.md) | **PASS** |
-| **EPUB CSS Styling Fidelity & Cascading Inheritance** | [spec-epub-css-styling-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-epub-css-styling-fidelity.md) | [qa-epub-css-styling-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-epub-css-styling-fidelity.md) | **PASS** |
-| **Drop Cap Line Detection & Advanced Styling Fidelity** | [spec-advanced-styling-and-dropcap-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-advanced-styling-and-dropcap-fidelity.md) | [qa-advanced-styling-and-dropcap-fidelity.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-advanced-styling-and-dropcap-fidelity.md) | **PASS** |
-| **TOC & Formatting Stability** | [spec-kfx-toc-and-formatting-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-kfx-toc-and-formatting-fix.md) | [qa-kfx-toc-and-formatting-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-kfx-toc-and-formatting-fix.md) | **PASS** |
+| **Advanced Typesetting (Drop Caps, Small Caps, Ruby)** | [spec-advanced-typesetting.md](specs/spec-advanced-typesetting.md) | [qa-advanced-typesetting-phase1.md](qa/qa-advanced-typesetting-phase1.md)<br/>[qa-advanced-typesetting-phase2.md](qa/qa-advanced-typesetting-phase2.md)<br/>[qa-advanced-typesetting-phase3.md](qa/qa-advanced-typesetting-phase3.md)<br/>[qa-advanced-typesetting-phase4.md](qa/qa-advanced-typesetting-phase4.md) | **PASS** |
+| **EPUB CSS Styling Fidelity & Cascading Inheritance** | [spec-epub-css-styling-fidelity.md](specs/spec-epub-css-styling-fidelity.md) | [qa-epub-css-styling-fidelity.md](qa/qa-epub-css-styling-fidelity.md) | **PASS** |
+| **Drop Cap Line Detection & Advanced Styling Fidelity** | [spec-advanced-styling-and-dropcap-fidelity.md](specs/spec-advanced-styling-and-dropcap-fidelity.md) | [qa-advanced-styling-and-dropcap-fidelity.md](qa/qa-advanced-styling-and-dropcap-fidelity.md) | **PASS** |
+| **TOC & Formatting Stability** | [spec-kfx-toc-and-formatting-fix.md](specs/spec-kfx-toc-and-formatting-fix.md) | [qa-kfx-toc-and-formatting-fix.md](qa/qa-kfx-toc-and-formatting-fix.md) | **PASS** |
 
 ### 3. Yellowjacket Structural Integrity & Navigation
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
-| **Pre-Flight Structural Reference Validator** | [spec-preflight-reference-validator.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-preflight-reference-validator.md) | [qa-preflight-reference-validator.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-preflight-reference-validator.md) | **PASS** |
-| **EPUB File Boundary Preservation** | [spec-preserve-epub-file-boundaries.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-preserve-epub-file-boundaries.md) | [qa-preserve-epub-file-boundaries.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-preserve-epub-file-boundaries.md) | **PASS** |
-| **TOC & Page-List Section Link Filtering** | [spec-fix-toc-page-list-filtering.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-toc-page-list-filtering.md) | [qa-fix-toc-page-list-filtering.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-toc-page-list-filtering.md) | **PASS** |
-| **libYJSDK Navigation Crash Resolution** | [spec-fix-navigation-crash.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-navigation-crash.md) | [qa-fix-navigation-crash.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-navigation-crash.md) | **PASS** |
+| **Pre-Flight Structural Reference Validator** | [spec-preflight-reference-validator.md](specs/spec-preflight-reference-validator.md) | [qa-preflight-reference-validator.md](qa/qa-preflight-reference-validator.md) | **PASS** |
+| **EPUB File Boundary Preservation** | [spec-preserve-epub-file-boundaries.md](specs/spec-preserve-epub-file-boundaries.md) | [qa-preserve-epub-file-boundaries.md](qa/qa-preserve-epub-file-boundaries.md) | **PASS** |
+| **TOC & Page-List Section Link Filtering** | [spec-fix-toc-page-list-filtering.md](specs/spec-fix-toc-page-list-filtering.md) | [qa-fix-toc-page-list-filtering.md](qa/qa-fix-toc-page-list-filtering.md) | **PASS** |
+| **libYJSDK Navigation Crash Resolution** | [spec-fix-navigation-crash.md](specs/spec-fix-navigation-crash.md) | [qa-fix-navigation-crash.md](qa/qa-fix-navigation-crash.md) | **PASS** |
+| **EPUB-to-KFX Links, Anchors & Footnote Popups** | [spec-epub-kfx-links.md](specs/spec-epub-kfx-links.md) | [qa-epub-kfx-links.md](qa/qa-epub-kfx-links.md) | **PASS** |
 
 ### 4. Sleep Screen Cover Art & Kindle Lockscreen Compliance
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
-| **Sleep Cover & Yellowjacket Spec Compliance (Chunking, $597, $585)** | [spec-fix-sleep-cover-and-kfx-compliance.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-sleep-cover-and-kfx-compliance.md) | [qa-fix-sleep-cover-and-kfx-compliance.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-sleep-cover-and-kfx-compliance.md) | **PASS** |
-| **Lockscreen Cover Display & Multi-Alias Thumbnails** | [spec-fix-kindle-lockscreen-cover.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-kindle-lockscreen-cover.md) | [qa-fix-kindle-lockscreen-cover.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-kindle-lockscreen-cover.md) | **PASS** |
+| **Sleep Cover & Yellowjacket Spec Compliance (Chunking, $597, $585)** | [spec-fix-sleep-cover-and-kfx-compliance.md](specs/spec-fix-sleep-cover-and-kfx-compliance.md) | [qa-fix-sleep-cover-and-kfx-compliance.md](qa/qa-fix-sleep-cover-and-kfx-compliance.md) | **PASS** |
+| **Lockscreen Cover Display & Multi-Alias Thumbnails** | [spec-fix-kindle-lockscreen-cover.md](specs/spec-fix-kindle-lockscreen-cover.md) | [qa-fix-kindle-lockscreen-cover.md](qa/qa-fix-kindle-lockscreen-cover.md) | **PASS** |
 
 ### 5. Image & Resource Subsystem
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
-| **Storyline Image Link Symbol Invariant ($175 vs $162)** | [spec-fix-image-rendering-symbol.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-image-rendering-symbol.md) | [qa-fix-image-rendering-symbol.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-image-rendering-symbol.md) | **PASS** |
-| **Cover Image Ordering & Precedence** | [spec-fix-cover-image-order.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-cover-image-order.md) | [qa-fix-cover-image-order.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-cover-image-order.md) | **PASS** |
-| **Resource Swapping & Index Deduplication** | - | [qa-fix-image-swap-order.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-image-swap-order.md) | **PASS** |
-| **Image Dimension Emittance ($422, $423)** | [spec-fix-image-rendering.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-image-rendering.md) | [qa-fix-image-rendering.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-image-rendering.md) | **PASS** |
+| **Storyline Image Link Symbol Invariant ($175 vs $162)** | [spec-fix-image-rendering-symbol.md](specs/spec-fix-image-rendering-symbol.md) | [qa-fix-image-rendering-symbol.md](qa/qa-fix-image-rendering-symbol.md) | **PASS** |
+| **Cover Image Ordering & Precedence** | [spec-fix-cover-image-order.md](specs/spec-fix-cover-image-order.md) | [qa-fix-cover-image-order.md](qa/qa-fix-cover-image-order.md) | **PASS** |
+| **Resource Swapping & Index Deduplication** | - | [qa-fix-image-swap-order.md](qa/qa-fix-image-swap-order.md) | **PASS** |
+| **Image Dimension Emittance ($422, $423)** | [spec-fix-image-rendering.md](specs/spec-fix-image-rendering.md) | [qa-fix-image-rendering.md](qa/qa-fix-image-rendering.md) | **PASS** |
 
 ### 6. Hardware Synchronization & Stability
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
-| **Kindle Paperwhite Mount & Sync Fix** | [spec-kindle-paperwhite-sync-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-kindle-paperwhite-sync-fix.md) | [qa-kindle-paperwhite-sync-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-kindle-paperwhite-sync-fix.md) | **PASS** |
-| **Permanent Guards: Image Bombs & Non-Wearing USB Sync** | [spec-permanent-guards-image-usb.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-permanent-guards-image-usb.md) | [qa-permanent-guards-image-usb.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-permanent-guards-image-usb.md) | **PASS** |
-| **240MB Memory Ceiling & Fragmentation Guard** | [spec-kfx-crash-and-perf-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-kfx-crash-and-perf-fix.md) | [qa-kfx-crash-and-perf-fix.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-kfx-crash-and-perf-fix.md) | **PASS** |
+| **Kindle Paperwhite Mount & Sync Fix** | [spec-kindle-paperwhite-sync-fix.md](specs/spec-kindle-paperwhite-sync-fix.md) | [qa-kindle-paperwhite-sync-fix.md](qa/qa-kindle-paperwhite-sync-fix.md) | **PASS** |
+| **Permanent Guards: Image Bombs & Non-Wearing USB Sync** | [spec-permanent-guards-image-usb.md](specs/spec-permanent-guards-image-usb.md) | [qa-permanent-guards-image-usb.md](qa/qa-permanent-guards-image-usb.md) | **PASS** |
+| **240MB Memory Ceiling & Fragmentation Guard** | [spec-kfx-crash-and-perf-fix.md](specs/spec-kfx-crash-and-perf-fix.md) | [qa-kfx-crash-and-perf-fix.md](qa/qa-kfx-crash-and-perf-fix.md) | **PASS** |
 
 ### 7. Desktop UI (`kfx-studio` / GPUI)
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
-| **Virtualized Library List & Smooth 60fps Scrolling** | [spec-gui-virtualized-list-performance.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-gui-virtualized-list-performance.md) | [qa-gui-virtualized-list-performance.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-gui-virtualized-list-performance.md) | **PASS** |
-| **Local Folder EPUB Explorer & Batch UI** | [spec-batch-folder-epub-ui.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-batch-folder-epub-ui.md) | [qa-batch-folder-epub-ui.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-batch-folder-epub-ui.md) | **PASS** |
-| **Dual-Pane Desktop Studio UI** | [spec-dual-pane-ui.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-dual-pane-ui.md) | [qa-dual-pane-ui.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-dual-pane-ui.md) | **PASS** |
-| **UI UX Polish & Dark Theme Tokens** | [spec-gui-ux-polish.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-gui-ux-polish.md) | [qa-gui-ux-polish.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-gui-ux-polish.md) | **PASS** |
+| **Virtualized Library List & Smooth 60fps Scrolling** | [spec-gui-virtualized-list-performance.md](specs/spec-gui-virtualized-list-performance.md) | [qa-gui-virtualized-list-performance.md](qa/qa-gui-virtualized-list-performance.md) | **PASS** |
+| **Local Folder EPUB Explorer & Batch UI** | [spec-batch-folder-epub-ui.md](specs/spec-batch-folder-epub-ui.md) | [qa-batch-folder-epub-ui.md](qa/qa-batch-folder-epub-ui.md) | **PASS** |
+| **Dual-Pane Desktop Studio UI** | [spec-dual-pane-ui.md](specs/spec-dual-pane-ui.md) | [qa-dual-pane-ui.md](qa/qa-dual-pane-ui.md) | **PASS** |
+| **UI UX Polish & Dark Theme Tokens** | [spec-gui-ux-polish.md](specs/spec-gui-ux-polish.md) | [qa-gui-ux-polish.md](qa/qa-gui-ux-polish.md) | **PASS** |
 
 ### 8. Prioritized Defect Remediation & Audits
 | Category | Spec | QA Log | Core Issues Resolved |
 | :--- | :--- | :--- | :--- |
-| **Multi-Model Engineering Audit Remediation** | [spec-fix-multi-model-audit.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-multi-model-audit.md) | [qa-fix-multi-model-audit.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-multi-model-audit.md) | Address all consensus findings from the tri-model audit. |
-| **P1 Optimizations** | [spec-fix-p1-optimizations.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p1-optimizations.md) | [qa-fix-p1-optimizations.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p1-optimizations.md) | Zero-clone section iteration, sync latency reduction, Word Wise PID alignment, FAT32 EROFS detection. |
-| **P2 Hardening** | [spec-fix-p2-hardening.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p2-hardening.md) | [qa-fix-p2-hardening.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p2-hardening.md) | Unicode prefix slicing, checked container math, single stat syscall, strict float checks, validator recursion guard. |
-| **P0 Blocker** | [spec-fix-p0-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p0-issues.md) | [qa-fix-p0-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p0-issues.md) | Uncompressed BVM, symbol collision in local scope, trailing null bytes. |
-| **P1 Critical** | [spec-fix-p1-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p1-issues.md) | [qa-fix-p1-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p1-issues.md) | Format capabilities envelope order, missing PID maps, cover aspect distortion. |
-| **P2 Major** | [spec-fix-p2-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p2-issues.md) | [qa-fix-p2-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p2-issues.md) | Stale `.sdr` artifacts cleanup, GIO copy non-blocking timeouts, hyphenation flags. |
-| **P3 Polish** | [spec-fix-p3-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/specs/spec-fix-p3-issues.md) | [qa-fix-p3-issues.md](file:///home/drew/github/hwanjongyu/kfx_converter/docs/qa/qa-fix-p3-issues.md) | Documentation cleanup, UI polish, edge-case unit test coverage. |
+| **Multi-Model Engineering Audit Remediation** | [spec-fix-multi-model-audit.md](specs/spec-fix-multi-model-audit.md) | [qa-fix-multi-model-audit.md](qa/qa-fix-multi-model-audit.md) | Address all consensus findings from the tri-model audit. |
+| **P1 High-Severity Review Audit Remediation** | [spec-fix-p1-review-audit.md](specs/spec-fix-p1-review-audit.md) | [qa-fix-p1-review-audit.md](qa/qa-fix-p1-review-audit.md) | Log rotation, ASIN/content-id `.sdr` preservation, Win32 eject, Word Wise pacing, HTML5 void tags, Ion/container bounds, CLI `-c`/`-w`. |
+| **P2 Medium/Low Review Audit Remediation** | [spec-fix-p2-review-audit.md](specs/spec-fix-p2-review-audit.md) | [qa-fix-p2-review-audit.md](qa/qa-fix-p2-review-audit.md) | Bare-path atomic staging, deterministic manifest/cover ordering, chunk bounds, sync locks, iterative `Clone`/`Drop`, CI/release/docs alignment. |
+| **P1 Optimizations** | [spec-fix-p1-optimizations.md](specs/spec-fix-p1-optimizations.md) | [qa-fix-p1-optimizations.md](qa/qa-fix-p1-optimizations.md) | Zero-clone section iteration, sync latency reduction, Word Wise PID alignment, FAT32 EROFS detection. |
+| **P2 Hardening** | [spec-fix-p2-hardening.md](specs/spec-fix-p2-hardening.md) | [qa-fix-p2-hardening.md](qa/qa-fix-p2-hardening.md) | Unicode prefix slicing, checked container math, single stat syscall, strict float checks, validator recursion guard. |
+| **P0 Blocker** | [spec-fix-p0-issues.md](specs/spec-fix-p0-issues.md) | [qa-fix-p0-issues.md](qa/qa-fix-p0-issues.md) | Uncompressed BVM, symbol collision in local scope, trailing null bytes. |
+| **P1 Critical** | [spec-fix-p1-issues.md](specs/spec-fix-p1-issues.md) | [qa-fix-p1-issues.md](qa/qa-fix-p1-issues.md) | Format capabilities envelope order, missing PID maps, cover aspect distortion. |
+| **P2 Major** | [spec-fix-p2-issues.md](specs/spec-fix-p2-issues.md) | [qa-fix-p2-issues.md](qa/qa-fix-p2-issues.md) | Stale `.sdr` artifacts cleanup, GIO copy non-blocking timeouts, hyphenation flags. |
+| **P3 Polish** | [spec-fix-p3-issues.md](specs/spec-fix-p3-issues.md) | [qa-fix-p3-issues.md](qa/qa-fix-p3-issues.md) | Documentation cleanup, UI polish, edge-case unit test coverage. |
 
 ---
 
@@ -113,6 +116,7 @@ docs/
 │   ├── spec-batch-folder-epub-ui.md
 │   ├── spec-dual-pane-ui.md
 │   ├── spec-epub-css-styling-fidelity.md
+│   ├── spec-epub-kfx-links.md
 │   ├── spec-fix-cover-image-order.md
 │   ├── spec-fix-image-rendering.md
 │   ├── spec-fix-image-rendering-symbol.md
@@ -122,8 +126,10 @@ docs/
 │   ├── spec-fix-p0-issues.md
 │   ├── spec-fix-p1-issues.md
 │   ├── spec-fix-p1-optimizations.md
+│   ├── spec-fix-p1-review-audit.md
 │   ├── spec-fix-p2-hardening.md
 │   ├── spec-fix-p2-issues.md
+│   ├── spec-fix-p2-review-audit.md
 │   ├── spec-fix-p3-issues.md
 │   ├── spec-fix-sleep-cover-and-kfx-compliance.md
 │   ├── spec-fix-toc-page-list-filtering.md
@@ -151,6 +157,7 @@ docs/
     ├── qa-batch-folder-epub-ui.md
     ├── qa-dual-pane-ui.md
     ├── qa-epub-css-styling-fidelity.md
+    ├── qa-epub-kfx-links.md
     ├── qa-fix-cover-image-order.md
     ├── qa-fix-image-rendering.md
     ├── qa-fix-image-rendering-symbol.md
@@ -161,8 +168,10 @@ docs/
     ├── qa-fix-p0-issues.md
     ├── qa-fix-p1-issues.md
     ├── qa-fix-p1-optimizations.md
+    ├── qa-fix-p1-review-audit.md
     ├── qa-fix-p2-hardening.md
     ├── qa-fix-p2-issues.md
+    ├── qa-fix-p2-review-audit.md
     ├── qa-fix-p3-issues.md
     ├── qa-fix-sleep-cover-and-kfx-compliance.md
     ├── qa-fix-toc-page-list-filtering.md

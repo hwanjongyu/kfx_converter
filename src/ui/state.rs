@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! State Management & Kindle Hardware Discovery for GPUI
 
 use std::path::{Path, PathBuf};
@@ -323,9 +322,63 @@ pub fn case_insensitive_cmp(a: &str, b: &str) -> std::cmp::Ordering {
         .cmp(b.chars().flat_map(char::to_lowercase))
 }
 
+/// Compares author names case-insensitively while placing `"Unknown"` last.
+pub fn compare_authors_unknown_last(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_unknown = a.eq_ignore_ascii_case("unknown");
+    let b_unknown = b.eq_ignore_ascii_case("unknown");
+    match (a_unknown, b_unknown) {
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => case_insensitive_cmp(a, b),
+    }
+}
+
+/// Checks whether `haystack` contains `needle_lower` case-insensitively with zero heap allocations.
+///
+/// Uses an ASCII byte-window fast path when both inputs are ASCII and falls back to
+/// cloned Unicode lowercase iterators for multi-byte UTF-8 inputs.
+pub fn contains_ascii_or_unicode_icase(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() && needle_lower.is_ascii() {
+        let h = haystack.as_bytes();
+        let n = needle_lower.as_bytes();
+        return h.len() >= n.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
+    }
+
+    let to_lower: fn(char) -> std::char::ToLowercase = char::to_lowercase;
+    let mut needle_iter = needle_lower.chars().flat_map(to_lower);
+    let Some(first) = needle_iter.next() else {
+        return true;
+    };
+
+    let mut hay_iter = haystack.chars().flat_map(to_lower);
+    while let Some(hc) = hay_iter.next() {
+        if hc == first {
+            let mut h_rest = hay_iter.clone();
+            let mut matched = true;
+            for nc in needle_iter.clone() {
+                if h_rest.next() != Some(nc) {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl LocalFolderState {
     pub fn sorted_and_filtered_indices(&self) -> Vec<usize> {
-        let search_query = self.search_query.to_lowercase();
+        let search_lower = if self.search_query.is_empty() {
+            String::new()
+        } else {
+            self.search_query.to_lowercase()
+        };
         let filter_status = self.filter_status.as_deref();
 
         let mut indices: Vec<usize> = self
@@ -333,10 +386,10 @@ impl LocalFolderState {
             .iter()
             .enumerate()
             .filter(|(_, item)| {
-                if !search_query.is_empty()
-                    && !item.title.to_lowercase().contains(&search_query)
-                    && !item.author.to_lowercase().contains(&search_query)
-                    && !item.filename.to_lowercase().contains(&search_query)
+                if !search_lower.is_empty()
+                    && !contains_ascii_or_unicode_icase(&item.title, &search_lower)
+                    && !contains_ascii_or_unicode_icase(&item.author, &search_lower)
+                    && !contains_ascii_or_unicode_icase(&item.filename, &search_lower)
                 {
                     return false;
                 }
@@ -361,15 +414,7 @@ impl LocalFolderState {
 
             let cmp = match self.sort_field {
                 EpubSortField::Title => case_insensitive_cmp(&a.title, &b.title),
-                EpubSortField::Author => {
-                    let a_unknown = a.author.eq_ignore_ascii_case("unknown");
-                    let b_unknown = b.author.eq_ignore_ascii_case("unknown");
-                    match (a_unknown, b_unknown) {
-                        (true, false) => std::cmp::Ordering::Greater,
-                        (false, true) => std::cmp::Ordering::Less,
-                        _ => case_insensitive_cmp(&a.author, &b.author),
-                    }
-                }
+                EpubSortField::Author => compare_authors_unknown_last(&a.author, &b.author),
                 EpubSortField::DateModified => a.modified_timestamp.cmp(&b.modified_timestamp),
                 EpubSortField::FileSize => a.file_size_bytes.cmp(&b.file_size_bytes),
                 EpubSortField::Status => a.status.priority().cmp(&b.status.priority()),
@@ -408,7 +453,6 @@ pub struct ConversionTask {
     pub status: TaskStatus,
     pub progress: f32, // 0.0 to 1.0
     pub word_wise: bool,
-    pub xray: bool,
 }
 
 pub type KindleFile = kfx_converter::KindleBookFile;
@@ -440,7 +484,6 @@ impl Default for DeviceStatus {
 pub struct ConversionSettings {
     pub content_type: String, // "EBOK" or "PDOC"
     pub word_wise: bool,
-    pub x_ray: bool,
     pub auto_deploy: bool,
 }
 
@@ -449,7 +492,6 @@ impl Default for ConversionSettings {
         Self {
             content_type: "EBOK".into(),
             word_wise: true,
-            x_ray: false,
             auto_deploy: true,
         }
     }
@@ -780,6 +822,7 @@ fn collect_epub_files(
 }
 
 /// Scans a local directory for EPUB files, extracts metadata, and cross-references status with Kindle.
+#[cfg(test)]
 pub fn scan_local_epub_directory(
     folder: &std::path::Path,
     recursive: bool,
@@ -1392,7 +1435,6 @@ mod tests {
                 status: TaskStatus::Converting,
                 progress: 0.3,
                 word_wise: true,
-                xray: false,
             },
             ConversionTask {
                 id: 2,
@@ -1401,7 +1443,6 @@ mod tests {
                 status: TaskStatus::Queued,
                 progress: 0.0,
                 word_wise: true,
-                xray: false,
             },
         ];
         let mut items = vec![
@@ -1501,5 +1542,75 @@ mod tests {
         assert_eq!(items[1].status, LocalEpubStatus::Unconverted);
         assert_eq!(bp.failed_tasks, 2);
         assert!((bp.overall_progress() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_contains_ascii_or_unicode_icase_parity_and_edge_cases() {
+        // Empty needle always matches
+        assert!(contains_ascii_or_unicode_icase("", ""));
+        assert!(contains_ascii_or_unicode_icase("Dune", ""));
+
+        // Empty or shorter haystack
+        assert!(!contains_ascii_or_unicode_icase("", "dune"));
+        assert!(!contains_ascii_or_unicode_icase("Du", "dune"));
+
+        // ASCII fast path
+        assert!(contains_ascii_or_unicode_icase(
+            "The Way of Kings.epub",
+            "way of kings"
+        ));
+        assert!(contains_ascii_or_unicode_icase("Brandon Sanderson", "sand"));
+        assert!(!contains_ascii_or_unicode_icase(
+            "Brandon Sanderson",
+            "tolkien"
+        ));
+
+        // Unicode accented + multi-byte CJK/Korean + Turkish dotted I
+        let pairs = [
+            ("Café au Lait", "café", true),
+            ("Café au Lait", "LAIT", true),
+            ("Übermensch", "über", true),
+            ("한글 EPUB 테스트", "epub", true),
+            ("한글 EPUB 테스트", "테스트", true),
+            ("한글 EPUB 테스트", "소설", false),
+            ("İstanbul Chronicles", "i\u{307}stanbul", true),
+            ("Kelvin Key", "key", true),
+            ("Ελληνικά Βιβλία", "ελλην", true),
+            ("Ελληνικά Βιβλία", "αθήνα", false),
+        ];
+
+        for (haystack, needle, expected) in pairs {
+            let needle_lower = needle.to_lowercase();
+            assert_eq!(
+                contains_ascii_or_unicode_icase(haystack, &needle_lower),
+                expected,
+                "failed for haystack={haystack:?}, needle={needle:?}"
+            );
+            assert_eq!(
+                contains_ascii_or_unicode_icase(haystack, &needle_lower),
+                haystack.to_lowercase().contains(&needle_lower),
+                "parity mismatch for haystack={haystack:?}, needle={needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compare_authors_unknown_last() {
+        assert_eq!(
+            compare_authors_unknown_last("Unknown", "Arthur"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_authors_unknown_last("Arthur", "unknown"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_authors_unknown_last("Unknown", "unknown"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_authors_unknown_last("alice", "Bob"),
+            std::cmp::Ordering::Less
+        );
     }
 }

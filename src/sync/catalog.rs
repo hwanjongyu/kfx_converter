@@ -11,8 +11,12 @@ use std::path::Path;
 
 /// Scans the Kindle documents directory (including author subfolders up to max_depth 3) for valid e-book files.
 pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
+    let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut files = Vec::new();
-    if !doc_path.is_dir() {
+    let Ok(root_meta) = std::fs::symlink_metadata(doc_path) else {
+        return files;
+    };
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
         return files;
     }
 
@@ -30,7 +34,13 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if meta.is_dir() {
                     let name = path
                         .file_name()
                         .unwrap_or_default()
@@ -39,7 +49,7 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                     if !name.starts_with('.') && !name.ends_with(".sdr") {
                         scan_dir_recursive(doc_path, &path, depth + 1, max_depth, files);
                     }
-                } else if path.is_file() {
+                } else if meta.is_file() {
                     let ext = path
                         .extension()
                         .and_then(|s| s.to_str())
@@ -53,41 +63,33 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                             .to_string_lossy()
                             .to_string();
                         let format = ext.to_uppercase();
-                        let meta_res = std::fs::metadata(&path);
-                        let (size_bytes, size_formatted) = match &meta_res {
-                            Ok(meta) => {
-                                let bytes = meta.len();
-                                let s = if bytes >= 1024 * 1024 {
-                                    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-                                } else {
-                                    format!("{} KB", bytes / 1024)
-                                };
-                                (bytes, s)
-                            }
-                            Err(_) => (0, "0 KB".into()),
+                        let bytes = meta.len();
+                        let size_formatted = if bytes >= 1024 * 1024 {
+                            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+                        } else {
+                            format!("{} KB", bytes / 1024)
                         };
 
-                        let (modified_timestamp, modified) =
-                            match meta_res.as_ref().ok().and_then(|m| m.modified().ok()) {
-                                Some(time) => {
-                                    let ts = time
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs())
-                                        .unwrap_or(0);
-                                    let duration = time.elapsed().unwrap_or_default();
-                                    let s = if duration.as_secs() < 60 {
-                                        "Just now".into()
-                                    } else if duration.as_secs() < 3600 {
-                                        format!("{}m ago", duration.as_secs() / 60)
-                                    } else if duration.as_secs() < 86400 {
-                                        format!("{}h ago", duration.as_secs() / 3600)
-                                    } else {
-                                        format!("{}d ago", duration.as_secs() / 86400)
-                                    };
-                                    (ts, s)
-                                }
-                                None => (0, "Unknown".into()),
-                            };
+                        let (modified_timestamp, modified) = match meta.modified() {
+                            Ok(time) => {
+                                let ts = time
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let duration = time.elapsed().unwrap_or_default();
+                                let s = if duration.as_secs() < 60 {
+                                    "Just now".into()
+                                } else if duration.as_secs() < 3600 {
+                                    format!("{}m ago", duration.as_secs() / 60)
+                                } else if duration.as_secs() < 86400 {
+                                    format!("{}h ago", duration.as_secs() / 3600)
+                                } else {
+                                    format!("{}d ago", duration.as_secs() / 86400)
+                                };
+                                (ts, s)
+                            }
+                            Err(_) => (0, "Unknown".into()),
+                        };
 
                         let (title, author) = if let Ok(rel) = path.strip_prefix(doc_path) {
                             let components: Vec<_> = rel.iter().collect();
@@ -133,13 +135,17 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                         let file_stem = path.file_stem().unwrap_or_default().to_string_lossy();
                         let parent = path.parent().unwrap_or(dir);
                         let sdr_path = parent.join(format!("{}.sdr", file_stem));
-                        let has_sdr = sdr_path.is_dir();
+                        let has_sdr = std::fs::symlink_metadata(&sdr_path)
+                            .is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir());
                         let mut has_word_wise = false;
                         if has_sdr && let Ok(sdr_entries) = std::fs::read_dir(&sdr_path) {
                             for sdr_entry in sdr_entries.flatten() {
                                 let sdr_name =
                                     sdr_entry.file_name().to_string_lossy().to_lowercase();
-                                if sdr_name.ends_with(".kll") {
+                                if sdr_name.ends_with(".kll")
+                                    && std::fs::symlink_metadata(sdr_entry.path())
+                                        .is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
+                                {
                                     has_word_wise = true;
                                     break;
                                 }
@@ -152,7 +158,7 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
                             author,
                             format,
                             size_formatted,
-                            size_bytes,
+                            size_bytes: bytes,
                             modified,
                             modified_timestamp,
                             full_path: path,
@@ -328,21 +334,18 @@ pub fn delete_book_file(full_path: &Path) -> Result<(), std::io::Error> {
     delete_book_file_safe(None, full_path)
 }
 
-/// Purges `.bad_file` markers, incompatible serialized state files, and orphaned enhancement
-/// sidecars while preserving `.kll`/`.asc` entries matching `current_asin` (including its
-/// 10-character canonical ASIN alias) or `current_content_id` when `purge_word_wise == false`.
-pub fn clean_stale_sdr_files_with_content_id(
+/// Internal unlocked helper for [`clean_stale_sdr_files_with_content_id`].
+/// Caller must already hold `DEVICE_SYNC_LOCK`.
+pub(crate) fn clean_stale_sdr_files_unlocked(
     sdr_dir: &Path,
     current_asin: Option<&str>,
     current_content_id: Option<&str>,
     purge_word_wise: bool,
 ) -> Result<(), SyncError> {
-    if !sdr_dir.is_dir() {
+    let Ok(dir_meta) = std::fs::symlink_metadata(sdr_dir) else {
         return Ok(());
-    }
-    if let Ok(dir_meta) = std::fs::symlink_metadata(sdr_dir)
-        && dir_meta.file_type().is_symlink()
-    {
+    };
+    if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
         return Ok(());
     }
 
@@ -398,6 +401,19 @@ pub fn clean_stale_sdr_files_with_content_id(
     }
 
     Ok(())
+}
+
+/// Purges `.bad_file` markers, incompatible serialized state files, and orphaned enhancement
+/// sidecars while preserving `.kll`/`.asc` entries matching `current_asin` (including its
+/// 10-character canonical ASIN alias) or `current_content_id` when `purge_word_wise == false`.
+pub fn clean_stale_sdr_files_with_content_id(
+    sdr_dir: &Path,
+    current_asin: Option<&str>,
+    current_content_id: Option<&str>,
+    purge_word_wise: bool,
+) -> Result<(), SyncError> {
+    let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clean_stale_sdr_files_unlocked(sdr_dir, current_asin, current_content_id, purge_word_wise)
 }
 
 /// Purges .bad_file markers, incompatible serialized state files, and orphaned enhancement sidecars.
@@ -687,5 +703,73 @@ mod tests {
         let err6 = KindleSync::delete_book_file_safe(Some(&docs), &missing_book).unwrap_err();
         assert_eq!(err6.kind(), ErrorKind::NotFound);
         assert!(missing_sdr.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_device_files_and_clean_stale_sdr_skip_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("documents");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // Outside files that must NEVER be surfaced or deleted via symlinks
+        let outside_kfx = outside.join("Outside.kfx");
+        std::fs::write(&outside_kfx, b"OUTSIDE_KFX").unwrap();
+        let outside_dir = outside.join("OutsideAuthor");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("Hidden.mobi"), b"OUTSIDE_MOBI").unwrap();
+        let outside_sdr = outside.join("OutsideSdr");
+        std::fs::create_dir_all(&outside_sdr).unwrap();
+        std::fs::write(outside_sdr.join("stale.han"), b"KEEP_OUTSIDE_HAN").unwrap();
+        std::fs::write(outside_sdr.join("LanguageLayer.en.TEST.kll"), b"KLL").unwrap();
+
+        // Legit book with symlinked .sdr directory and another legit book with symlinked .kll
+        let legit1 = docs.join("LegitOne.kfx");
+        std::fs::write(&legit1, b"LEGIT1").unwrap();
+        symlink(&outside_sdr, docs.join("LegitOne.sdr")).unwrap();
+
+        let legit2 = docs.join("LegitTwo.kfx");
+        std::fs::write(&legit2, b"LEGIT2").unwrap();
+        let legit2_sdr = docs.join("LegitTwo.sdr");
+        std::fs::create_dir_all(&legit2_sdr).unwrap();
+        symlink(
+            outside_sdr.join("LanguageLayer.en.TEST.kll"),
+            legit2_sdr.join("LanguageLayer.en.TEST.kll"),
+        )
+        .unwrap();
+
+        // Symlinked .kfx and symlinked subdirectory inside docs
+        symlink(&outside_kfx, docs.join("SymBook.kfx")).unwrap();
+        symlink(&outside_dir, docs.join("SymAuthor")).unwrap();
+
+        let scanned = KindleSync::scan_device_files(&docs);
+        let names: Vec<&str> = scanned.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["LegitOne.kfx", "LegitTwo.kfx"]);
+
+        let one = scanned.iter().find(|f| f.name == "LegitOne.kfx").unwrap();
+        assert!(!one.has_sdr, "Symlinked .sdr directory must be ignored");
+        assert!(!one.has_word_wise);
+
+        let two = scanned.iter().find(|f| f.name == "LegitTwo.kfx").unwrap();
+        assert!(two.has_sdr);
+        assert!(
+            !two.has_word_wise,
+            "Symlinked .kll inside .sdr must be ignored"
+        );
+
+        // clean_stale_sdr_files_with_content_id must ignore symlinked .sdr directory
+        KindleSync::clean_stale_sdr_files_with_content_id(
+            &docs.join("LegitOne.sdr"),
+            Some("NEW"),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(outside_sdr.join("stale.han").exists());
+        assert!(outside_sdr.join("LanguageLayer.en.TEST.kll").exists());
     }
 }

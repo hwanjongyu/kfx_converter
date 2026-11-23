@@ -17,6 +17,7 @@ fn test_pipeline_end_to_end_with_cover_and_word_wise() {
         true,
     );
     let kfx_path = temp.path().join("complete_book.kfx");
+    let log_path = temp.path().join("pipeline.log");
 
     let progress_events = Arc::new(AtomicUsize::new(0));
     let progress_events_clone = Arc::clone(&progress_events);
@@ -30,10 +31,11 @@ fn test_pipeline_end_to_end_with_cover_and_word_wise() {
         device_root: None,
     };
 
-    let report = ConversionPipeline::run(
+    let report = ConversionPipeline::run_with_log_path(
         &epub_path,
         Some(&kfx_path),
         &options,
+        Some(&log_path),
         Some(|pct: f32, msg: &str| {
             let mut prev = last_pct_clone.lock().unwrap();
             assert!(
@@ -114,10 +116,12 @@ fn test_pipeline_default_output_path_resolution() {
         device_root: None,
     };
 
-    let report = ConversionPipeline::run(
+    let log_path = temp.path().join("pipeline.log");
+    let report = ConversionPipeline::run_with_log_path(
         &epub_path,
         None, // None specifies default `<input_path>.kfx`
         &options,
+        Some(&log_path),
         None::<fn(f32, &str)>,
     )
     .expect("Pipeline with default output path must succeed");
@@ -146,9 +150,15 @@ fn test_pipeline_word_wise_disabled_skips_kll_emission() {
         device_root: None,
     };
 
-    let report =
-        ConversionPipeline::run(&epub_path, Some(&kfx_path), &options, None::<fn(f32, &str)>)
-            .expect("Pipeline should succeed");
+    let log_path = temp.path().join("pipeline.log");
+    let report = ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&kfx_path),
+        &options,
+        Some(&log_path),
+        None::<fn(f32, &str)>,
+    )
+    .expect("Pipeline should succeed");
 
     assert!(report.word_wise_glosses.is_none());
 
@@ -168,12 +178,22 @@ fn test_pipeline_word_wise_disabled_skips_kll_emission() {
 #[test]
 fn test_pipeline_non_english_book_conversion() {
     let temp = common::temp_dir();
-    let epub_path = common::create_minimal_epub(
+    let korean_xhtml = r#"<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>제1장</title></head>
+<body>
+  <h1>제1장: 시작</h1>
+  <p>안녕하세요. 이것은 한국어 전자책 본문입니다.</p>
+  <p>고즈넉한 새벽 공기를 마시며 새로운 여정을 시작했습니다.</p>
+</body>
+</html>"#;
+    let epub_path = common::create_epub_with_xhtml(
         temp.path(),
         "korean_book.epub",
         "한국어 전자책 테스트",
         "ko",
         false,
+        korean_xhtml,
     );
     let kfx_path = temp.path().join("korean_book.kfx");
 
@@ -184,12 +204,51 @@ fn test_pipeline_non_english_book_conversion() {
         device_root: None,
     };
 
-    let report =
-        ConversionPipeline::run(&epub_path, Some(&kfx_path), &options, None::<fn(f32, &str)>)
-            .expect("Non-English EPUB conversion should succeed");
+    let log_path = temp.path().join("pipeline.log");
+    let report = ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&kfx_path),
+        &options,
+        Some(&log_path),
+        None::<fn(f32, &str)>,
+    )
+    .expect("Non-English EPUB conversion should succeed");
 
     assert_eq!(report.book_title, "한국어 전자책 테스트");
     assert!(kfx_path.is_file());
+    assert_eq!(report.word_wise_glosses, Some(0));
+    assert!(
+        report.word_wise_error.is_none(),
+        "Zero glosses on non-English book must not be reported as an error: {:?}",
+        report.word_wise_error
+    );
+
+    let sdr_path = temp.path().join("korean_book.sdr");
+    assert!(sdr_path.is_dir(), "Companion .sdr folder must be created");
+    let kll_files: Vec<String> = std::fs::read_dir(&sdr_path)
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".kll") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        kll_files.is_empty(),
+        "Must emit 0 .kll files when gloss_count == 0, found: {:?}",
+        kll_files
+    );
+
+    let log_text = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log_text.contains("WARN Word Wise enabled but 0 glosses matched"),
+        "Conversion log must record 0-gloss warning: {}",
+        log_text
+    );
 }
 
 #[test]
@@ -197,7 +256,13 @@ fn test_pipeline_missing_input_file_returns_error() {
     let non_existent = std::path::Path::new("/missing/nonexistent/sample.epub");
     let options = ConversionOptions::default();
 
-    let result = ConversionPipeline::run(non_existent, None, &options, None::<fn(f32, &str)>);
+    let result = ConversionPipeline::run_with_log_path(
+        non_existent,
+        None,
+        &options,
+        None,
+        None::<fn(f32, &str)>,
+    );
 
     match result {
         Err(PipelineError::Other(msg)) => {
@@ -214,11 +279,13 @@ fn test_pipeline_empty_file_fails_without_kfx_residue() {
     std::fs::write(&empty_epub, b"").unwrap();
     let target_kfx = temp.path().join("empty.kfx");
 
+    let log_path = temp.path().join("pipeline.log");
     let options = ConversionOptions::default();
-    let result = ConversionPipeline::run(
+    let result = ConversionPipeline::run_with_log_path(
         &empty_epub,
         Some(&target_kfx),
         &options,
+        Some(&log_path),
         None::<fn(f32, &str)>,
     );
 
@@ -236,11 +303,13 @@ fn test_pipeline_corrupted_zip_fails_cleanly() {
     std::fs::write(&corrupt_epub, b"PK\x03\x04INVALID_TRUNCATED_ZIP_DATA").unwrap();
     let target_kfx = temp.path().join("corrupt.kfx");
 
+    let log_path = temp.path().join("pipeline.log");
     let options = ConversionOptions::default();
-    let result = ConversionPipeline::run(
+    let result = ConversionPipeline::run_with_log_path(
         &corrupt_epub,
         Some(&target_kfx),
         &options,
+        Some(&log_path),
         None::<fn(f32, &str)>,
     );
 
@@ -272,11 +341,13 @@ fn test_pipeline_missing_container_xml_fails_cleanly() {
     }
     std::fs::write(&invalid_epub, buf.into_inner()).unwrap();
 
+    let log_path = temp.path().join("pipeline.log");
     let options = ConversionOptions::default();
-    let result = ConversionPipeline::run(
+    let result = ConversionPipeline::run_with_log_path(
         &invalid_epub,
         Some(&target_kfx),
         &options,
+        Some(&log_path),
         None::<fn(f32, &str)>,
     );
 
@@ -378,9 +449,15 @@ fn test_pipeline_end_to_end_with_links_lists_and_footnote_popups() {
         device_root: None,
     };
 
-    let report =
-        ConversionPipeline::run(&epub_path, Some(&kfx_path), &options, None::<fn(f32, &str)>)
-            .expect("Linked pipeline run must succeed");
+    let log_path = temp.path().join("pipeline.log");
+    let report = ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&kfx_path),
+        &options,
+        Some(&log_path),
+        None::<fn(f32, &str)>,
+    )
+    .expect("Linked pipeline run must succeed");
     assert_eq!(report.sections_count, 3);
     assert!(report.total_bytes > 0);
 

@@ -3,7 +3,7 @@
 use super::{KfxPackager, SINGLETON_ID, SectionPackData, symbols::LocalSymbols};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
-use crate::symbols::symbol_id;
+use crate::symbols::KfxSymbol;
 
 /// Strips trailing `_p<digits>` fragmentation suffix added by `BookIR::fragment_large_sections`.
 pub(crate) fn strip_part_suffix(s: &str) -> &str {
@@ -274,27 +274,27 @@ impl<'a> KfxPackager<'a> {
             return;
         }
 
-        let sym_book_navigation = symbol_id("book_navigation").unwrap_or(389);
-        let sym_nav_container = symbol_id("nav_container").unwrap_or(391);
-        let sym_nav_unit = symbol_id("nav_unit").unwrap_or(393);
-        let sym_toc = symbol_id("toc").unwrap_or(212);
-        let sym_page_list = symbol_id("page_list").unwrap_or(237);
-        let sym_landmarks = symbol_id("landmarks").unwrap_or(236);
-        let sym_landmark_type = symbol_id("landmark_type").unwrap_or(238);
-        let sym_cover_page = symbol_id("cover_page").unwrap_or(233);
-        let sym_index = symbol_id("index").unwrap_or(403);
-        let sym_nav_type = symbol_id("nav_type").unwrap_or(235);
-        let sym_nav_container_name = symbol_id("nav_container_name").unwrap_or(239);
-        let sym_nav_containers = symbol_id("nav_containers").unwrap_or(392);
-        let sym_entries = symbol_id("entries").unwrap_or(247);
-        let sym_representation = symbol_id("representation").unwrap_or(241);
-        let sym_label = symbol_id("label").unwrap_or(244);
-        let sym_target_position = symbol_id("target_position").unwrap_or(246);
-        let sym_id = symbol_id("id").unwrap_or(155);
-        let sym_offset = symbol_id("offset").unwrap_or(143);
+        let sym_book_navigation = KfxSymbol::BookNavigation as u32;
+        let sym_nav_container = KfxSymbol::NavContainer as u32;
+        let sym_nav_unit = KfxSymbol::NavUnit as u32;
+        let sym_toc = KfxSymbol::Toc as u32;
+        let sym_page_list = KfxSymbol::PageList as u32;
+        let sym_landmarks = KfxSymbol::Landmarks as u32;
+        let sym_landmark_type = KfxSymbol::LandmarkType as u32;
+        let sym_cover_page = KfxSymbol::CoverPage as u32;
+        let sym_index = KfxSymbol::Index as u32;
+        let sym_nav_type = KfxSymbol::NavType as u32;
+        let sym_nav_container_name = KfxSymbol::NavContainerName as u32;
+        let sym_nav_containers = KfxSymbol::NavContainers as u32;
+        let sym_entries = KfxSymbol::Entries as u32;
+        let sym_representation = KfxSymbol::Representation as u32;
+        let sym_label = KfxSymbol::Label as u32;
+        let sym_target_position = KfxSymbol::TargetPosition as u32;
+        let sym_id = KfxSymbol::Id as u32;
+        let sym_offset = KfxSymbol::Offset as u32;
 
-        let sym_reading_order_name = symbol_id("reading_order_name").unwrap_or(178);
-        let sym_default = symbol_id("default").unwrap_or(351);
+        let sym_reading_order_name = KfxSymbol::ReadingOrderName as u32;
+        let sym_default = KfxSymbol::Default as u32;
 
         let mut nav_container_syms = Vec::new();
 

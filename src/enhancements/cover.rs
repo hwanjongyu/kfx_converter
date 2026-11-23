@@ -167,10 +167,14 @@ impl CoverOptimizer {
         Ok(out.into_inner())
     }
 
-    /// Transcodes a cover image to Kindle-compliant baseline RGB JPEG (JFIF) format (quality 90),
-    /// alpha-compositing transparent pixels over white and downscaling if exceeding max_dim.
-    /// This is strictly required for Kindle lockscreen ("Display Cover") compatibility.
-    pub fn optimize_cover_image(data: &[u8], max_dim: u32) -> Result<Vec<u8>, CoverError> {
+    /// Resizes `data` if larger than `max_width` x `max_height`, composites alpha over white,
+    /// and encodes as a baseline JPEG with the given quality.
+    fn transcode_to_baseline_jpeg(
+        data: &[u8],
+        max_width: u32,
+        max_height: u32,
+        quality: u8,
+    ) -> Result<Vec<u8>, CoverError> {
         if data.is_empty() {
             return Err(CoverError::EmptyData);
         }
@@ -178,18 +182,25 @@ impl CoverOptimizer {
         let img = Self::decode_with_safety_limits(data)?;
         let (w, h) = (img.width(), img.height());
 
-        let resized = if w > max_dim || h > max_dim {
-            img.resize(max_dim, max_dim, FilterType::Lanczos3)
+        let resized = if w > max_width || h > max_height {
+            img.resize(max_width, max_height, FilterType::Lanczos3)
         } else {
             img
         };
 
         let rgb = Self::to_rgb_with_white_bg(&resized);
         let mut out = Cursor::new(Vec::new());
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
         encoder.encode_image(&rgb).map_err(Self::map_image_error)?;
 
         Ok(out.into_inner())
+    }
+
+    /// Transcodes a cover image to Kindle-compliant baseline RGB JPEG (JFIF) format (quality 90),
+    /// alpha-compositing transparent pixels over white and downscaling if exceeding max_dim.
+    /// This is strictly required for Kindle lockscreen ("Display Cover") compatibility.
+    pub fn optimize_cover_image(data: &[u8], max_dim: u32) -> Result<Vec<u8>, CoverError> {
+        Self::transcode_to_baseline_jpeg(data, max_dim, max_dim, 90)
     }
 
     /// Extracts pixel dimensions (width, height) efficiently without decoding full raster pixels.
@@ -206,36 +217,12 @@ impl CoverOptimizer {
 
     /// Normalizes raw image bytes into a Kindle-compliant baseline JPEG thumbnail.
     pub fn optimize_thumbnail(data: &[u8]) -> Result<Vec<u8>, CoverError> {
-        if data.is_empty() {
-            return Err(CoverError::EmptyData);
-        }
-
-        let img = Self::decode_with_safety_limits(data)?;
-        let rgb_img = Self::to_rgb_with_white_bg(&img);
-
-        // Resize down if larger than 440x660
-        let (w, h) = rgb_img.dimensions();
-        let resized = if w > KINDLE_THUMB_MAX_WIDTH || (h as u64) > KINDLE_THUMB_MAX_HEIGHT {
-            let dyn_img = DynamicImage::ImageRgb8(rgb_img);
-            dyn_img
-                .resize(
-                    KINDLE_THUMB_MAX_WIDTH,
-                    KINDLE_THUMB_MAX_HEIGHT as u32,
-                    FilterType::Lanczos3,
-                )
-                .to_rgb8()
-        } else {
-            rgb_img
-        };
-
-        let mut out = Cursor::new(Vec::new());
-        // Encode standard baseline JPEG (quality 85)
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-        encoder
-            .encode_image(&resized)
-            .map_err(Self::map_image_error)?;
-
-        Ok(out.into_inner())
+        Self::transcode_to_baseline_jpeg(
+            data,
+            KINDLE_THUMB_MAX_WIDTH,
+            KINDLE_THUMB_MAX_HEIGHT as u32,
+            85,
+        )
     }
 
     /// Converts an image to RGB8, alpha-compositing transparent pixels over a white background.
@@ -512,5 +499,47 @@ mod tests {
             CoverOptimizer::map_image_error(limit_err),
             CoverError::LimitExceeded(_)
         ));
+    }
+
+    #[test]
+    fn test_optimize_thumbnail_oversized_alpha_png_resizes_and_composites_white_bg() {
+        // Oversized 1200x1800 RGBA PNG: top half fully transparent, bottom half semi-transparent blue
+        let mut rgba = RgbaImage::new(1200, 1800);
+        for (x, y, pixel) in rgba.enumerate_pixels_mut() {
+            let _ = x;
+            if y < 900 {
+                *pixel = image::Rgba([0, 0, 0, 0]);
+            } else {
+                *pixel = image::Rgba([20, 60, 200, 255]);
+            }
+        }
+
+        let mut png_bytes = Cursor::new(Vec::new());
+        rgba.write_to(&mut png_bytes, ImageFormat::Png).unwrap();
+
+        let thumb = CoverOptimizer::optimize_thumbnail(&png_bytes.into_inner()).unwrap();
+        assert_eq!(&thumb[0..2], b"\xff\xd8");
+        assert!(thumb.windows(2).any(|w| w == [0xff, 0xc0]));
+        assert!(!thumb.windows(2).any(|w| w == [0xff, 0xc2]));
+
+        let decoded = image::load_from_memory(&thumb).unwrap().to_rgb8();
+        assert_eq!(decoded.width(), KINDLE_THUMB_MAX_WIDTH);
+        assert_eq!(decoded.height(), KINDLE_THUMB_MAX_HEIGHT as u32);
+
+        // Transparent top region must composite cleanly onto white
+        let top_px = decoded.get_pixel(220, 100).0;
+        assert!(
+            top_px[0] >= 245 && top_px[1] >= 245 && top_px[2] >= 245,
+            "Expected white background in transparent region, got {:?}",
+            top_px
+        );
+
+        // Opaque bottom region must preserve blue tint
+        let bot_px = decoded.get_pixel(220, 560).0;
+        assert!(
+            bot_px[2] > 170 && bot_px[2] > bot_px[0] + 100,
+            "Expected blue region in opaque half, got {:?}",
+            bot_px
+        );
     }
 }

@@ -170,7 +170,10 @@ impl<'a> KfxPackager<'a> {
     /// Assembles all entities and writes the `.kfx` file atomically using a temporary file.
     pub fn package_to_file<P: AsRef<Path>>(&mut self, path: P) -> Result<u64, PackagerError> {
         let path = path.as_ref();
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         let mut tmp_file = tempfile::Builder::new()
             .prefix(".kfx_tmp.")
             .tempfile_in(parent)?;
@@ -273,5 +276,67 @@ impl<'a> KfxPackager<'a> {
             writer,
         )?;
         Ok(total_size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{Block, BookMetadata, TextSpan};
+
+    #[test]
+    fn test_package_to_file_bare_relative_filename() {
+        if std::env::var_os("KFX_CORE_BARE_FILE_CHILD").is_some() {
+            let book = BookIR {
+                metadata: BookMetadata {
+                    title: "Bare Path Book".to_string(),
+                    identifier: "urn:uuid:bare-path-test".to_string(),
+                    language: "en".to_string(),
+                    ..Default::default()
+                },
+                sections: vec![Section {
+                    id: "sec1".to_string(),
+                    title: "Chapter 1".to_string(),
+                    blocks: vec![Block::Paragraph {
+                        id: "p1".to_string(),
+                        spans: vec![TextSpan {
+                            text: "Bare relative packaging test.".to_string(),
+                            ..Default::default()
+                        }],
+                        style: None,
+                    }],
+                }],
+                ..Default::default()
+            };
+            let mut packager = KfxPackager::new(&book, "EBOK");
+            let out = Path::new("bare_output.kfx");
+            assert_eq!(out.parent(), Some(Path::new("")));
+            let written = packager
+                .package_to_file(out)
+                .expect("package_to_file must succeed on bare relative filename");
+            assert!(written > 0);
+            let container = KfxContainer::open(out).expect("Valid KFX output");
+            assert!(!container.chunks.is_empty());
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "packager::core::tests::test_package_to_file_bare_relative_filename",
+            ])
+            .current_dir(temp.path())
+            .env("KFX_CORE_BARE_FILE_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Bare filename child test failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(temp.path().join("bare_output.kfx").is_file());
     }
 }

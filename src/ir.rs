@@ -258,7 +258,7 @@ impl BlockStyle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Block {
     Paragraph {
         id: String,
@@ -297,7 +297,7 @@ pub struct Section {
     pub blocks: Vec<Block>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TocItem {
     pub title: String,
     pub target_section: String,
@@ -481,6 +481,161 @@ impl Drop for Block {
                     stack.extend(taken);
                 }
             }
+        }
+    }
+}
+
+impl Clone for Block {
+    /// Iteratively clones arbitrarily deep `Block::List` trees in O(1) call-stack space.
+    fn clone(&self) -> Self {
+        let clone_non_list = |b: &Block| -> Option<Block> {
+            match b {
+                Block::Paragraph { id, spans, style } => Some(Block::Paragraph {
+                    id: id.clone(),
+                    spans: spans.clone(),
+                    style: style.clone(),
+                }),
+                Block::Heading {
+                    id,
+                    level,
+                    spans,
+                    style,
+                } => Some(Block::Heading {
+                    id: id.clone(),
+                    level: *level,
+                    spans: spans.clone(),
+                    style: style.clone(),
+                }),
+                Block::Image {
+                    id,
+                    resource_id,
+                    alt,
+                    width,
+                    height,
+                } => Some(Block::Image {
+                    id: id.clone(),
+                    resource_id: resource_id.clone(),
+                    alt: alt.clone(),
+                    width: *width,
+                    height: *height,
+                }),
+                Block::HorizontalRule => Some(Block::HorizontalRule),
+                Block::Table { id, rows } => Some(Block::Table {
+                    id: id.clone(),
+                    rows: rows.clone(),
+                }),
+                Block::List { .. } => None,
+            }
+        };
+
+        if let Some(cloned) = clone_non_list(self) {
+            return cloned;
+        }
+
+        let mut visit: Vec<(&Block, Option<(usize, usize)>)> = vec![(self, None)];
+        let mut nodes: Vec<(Block, Option<(usize, usize)>)> = Vec::new();
+
+        while let Some((src, parent_opt)) = visit.pop() {
+            if let Some(cloned) = clone_non_list(src) {
+                nodes.push((cloned, parent_opt));
+                continue;
+            }
+            if let Block::List { id, ordered, items } = src {
+                let my_idx = nodes.len();
+                let shell_items = items
+                    .iter()
+                    .map(|item| Vec::with_capacity(item.len()))
+                    .collect();
+                nodes.push((
+                    Block::List {
+                        id: id.clone(),
+                        ordered: *ordered,
+                        items: shell_items,
+                    },
+                    parent_opt,
+                ));
+                // Push forward so `visit.pop()` + `nodes.pop()` re-attaches items in exact forward order.
+                for (item_idx, item) in items.iter().enumerate() {
+                    for child in item {
+                        visit.push((child, Some((my_idx, item_idx))));
+                    }
+                }
+            }
+        }
+
+        while let Some((node, parent_opt)) = nodes.pop() {
+            if let Some((parent_idx, item_idx)) = parent_opt {
+                if let Some((Block::List { items, .. }, _)) = nodes.get_mut(parent_idx)
+                    && let Some(slot) = items.get_mut(item_idx)
+                {
+                    slot.push(node);
+                }
+            } else {
+                return node;
+            }
+        }
+
+        Block::HorizontalRule
+    }
+}
+
+impl Drop for TocItem {
+    /// Iteratively tears down arbitrarily deep `TocItem::children` trees in O(1) call-stack space.
+    fn drop(&mut self) {
+        let mut stack: Vec<TocItem> = std::mem::take(&mut self.children);
+        while let Some(mut item) = stack.pop() {
+            stack.extend(std::mem::take(&mut item.children));
+        }
+    }
+}
+
+impl Clone for TocItem {
+    /// Iteratively clones arbitrarily deep `TocItem::children` trees in O(1) call-stack space.
+    fn clone(&self) -> Self {
+        if self.children.is_empty() {
+            return Self {
+                title: self.title.clone(),
+                target_section: self.target_section.clone(),
+                target_anchor: self.target_anchor.clone(),
+                children: Vec::new(),
+            };
+        }
+
+        let mut visit: Vec<(&TocItem, Option<usize>)> = vec![(self, None)];
+        let mut nodes: Vec<(TocItem, Option<usize>)> = Vec::new();
+
+        while let Some((src, parent_opt)) = visit.pop() {
+            let my_idx = nodes.len();
+            nodes.push((
+                Self {
+                    title: src.title.clone(),
+                    target_section: src.target_section.clone(),
+                    target_anchor: src.target_anchor.clone(),
+                    children: Vec::with_capacity(src.children.len()),
+                },
+                parent_opt,
+            ));
+            // Push forward so `visit.pop()` + `nodes.pop()` restores exact original child order.
+            for child in &src.children {
+                visit.push((child, Some(my_idx)));
+            }
+        }
+
+        while let Some((node, parent_opt)) = nodes.pop() {
+            if let Some(parent_idx) = parent_opt {
+                if let Some((parent, _)) = nodes.get_mut(parent_idx) {
+                    parent.children.push(node);
+                }
+            } else {
+                return node;
+            }
+        }
+
+        Self {
+            title: self.title.clone(),
+            target_section: self.target_section.clone(),
+            target_anchor: self.target_anchor.clone(),
+            children: Vec::new(),
         }
     }
 }
@@ -692,6 +847,21 @@ impl BookIR {
     ///
     /// Guarantees that any returned ID points to an existing image resource in `self.resources`.
     pub fn resolve_cover_resource_id(&self) -> Option<String> {
+        let mut sorted_keys: Vec<&String> = self.resources.keys().collect();
+        sorted_keys.sort();
+
+        let find_image_key = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+            sorted_keys
+                .iter()
+                .copied()
+                .find(|k| {
+                    self.resources
+                        .get(*k)
+                        .is_some_and(|v| v.mime_type.starts_with("image/") && pred(k))
+                })
+                .cloned()
+        };
+
         // 1. Explicit metadata cover_image_id
         self.metadata
             .cover_image_id
@@ -703,16 +873,8 @@ impl BookIR {
                     return Some(id.clone());
                 }
                 // Try case-insensitive or stripped filename matching against image resources
-                self.resources.iter().find_map(|(k, v)| {
-                    if v.mime_type.starts_with("image/")
-                        && (k.eq_ignore_ascii_case(id)
-                            || k.ends_with(id)
-                            || id.ends_with(k.as_str()))
-                    {
-                        Some(k.clone())
-                    } else {
-                        None
-                    }
+                find_image_key(&|k| {
+                    k.eq_ignore_ascii_case(id) || k.ends_with(id.as_str()) || id.ends_with(k)
                 })
             })
             // 2. First image block in the first section
@@ -732,35 +894,11 @@ impl BookIR {
                 })
             })
             // 3. Any image resource with a key containing "cover"
-            .or_else(|| {
-                self.resources.iter().find_map(|(k, v)| {
-                    if v.mime_type.starts_with("image/") && k.to_lowercase().contains("cover") {
-                        Some(k.clone())
-                    } else {
-                        None
-                    }
-                })
-            })
+            .or_else(|| find_image_key(&|k| k.to_lowercase().contains("cover")))
             // 4. Any image resource with a key containing "thumb"
-            .or_else(|| {
-                self.resources.iter().find_map(|(k, v)| {
-                    if v.mime_type.starts_with("image/") && k.to_lowercase().contains("thumb") {
-                        Some(k.clone())
-                    } else {
-                        None
-                    }
-                })
-            })
+            .or_else(|| find_image_key(&|k| k.to_lowercase().contains("thumb")))
             // 5. Fallback: First image resource in the entire book
-            .or_else(|| {
-                self.resources.iter().find_map(|(k, v)| {
-                    if v.mime_type.starts_with("image/") {
-                        Some(k.clone())
-                    } else {
-                        None
-                    }
-                })
-            })
+            .or_else(|| find_image_key(&|_| true))
     }
 
     /// Normalizes the intermediate representation by fragmenting oversized sections
@@ -1783,5 +1921,192 @@ mod tests {
         assert_eq!(spans2[0].href.as_deref(), Some("sec_1_p2#anc_p2"));
         assert_eq!(spans2[1].href.as_deref(), Some("sec_2_p2#b_id"));
         assert_eq!(spans2[2].href.as_deref(), Some("sec_2_p1"));
+    }
+
+    #[test]
+    fn test_resolve_cover_resource_id_deterministic_across_insertion_orders() {
+        let keys_forward = [
+            "img_12.png",
+            "cover_z.jpg",
+            "cover_a.jpg",
+            "thumb_b.jpg",
+            "thumb_a.jpg",
+            "img_01.png",
+            "img_02.png",
+            "img_03.png",
+            "img_04.png",
+            "img_05.png",
+            "img_06.png",
+            "img_07.png",
+        ];
+
+        let build_book = |order: Vec<&str>, cover_id: Option<&str>| {
+            let mut book = BookIR::default();
+            book.metadata.cover_image_id = cover_id.map(str::to_string);
+            for k in order {
+                book.resources.insert(
+                    k.to_string(),
+                    ResourceAsset {
+                        id: k.to_string(),
+                        mime_type: "image/jpeg".to_string(),
+                        data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+                    },
+                );
+            }
+            book
+        };
+
+        let reversed: Vec<&str> = keys_forward.iter().copied().rev().collect();
+        let mut rotated: Vec<&str> = keys_forward.to_vec();
+        rotated.rotate_left(5);
+
+        // Tier 3 ("cover") determinism
+        assert_eq!(
+            build_book(keys_forward.to_vec(), None).resolve_cover_resource_id(),
+            Some("cover_a.jpg".to_string())
+        );
+        assert_eq!(
+            build_book(reversed.clone(), None).resolve_cover_resource_id(),
+            Some("cover_a.jpg".to_string())
+        );
+        assert_eq!(
+            build_book(rotated.clone(), None).resolve_cover_resource_id(),
+            Some("cover_a.jpg".to_string())
+        );
+
+        // Tier 1 fuzzy fallback determinism ("a.jpg" matches both cover_a.jpg and thumb_a.jpg)
+        assert_eq!(
+            build_book(keys_forward.to_vec(), Some("a.jpg")).resolve_cover_resource_id(),
+            Some("cover_a.jpg".to_string())
+        );
+        assert_eq!(
+            build_book(reversed, Some("a.jpg")).resolve_cover_resource_id(),
+            Some("cover_a.jpg".to_string())
+        );
+
+        // Tier 5 fallback determinism (only img_01..img_12)
+        let plain_keys: Vec<&str> = keys_forward
+            .iter()
+            .copied()
+            .filter(|k| k.starts_with("img_"))
+            .collect();
+        let plain_rev: Vec<&str> = plain_keys.iter().copied().rev().collect();
+        assert_eq!(
+            build_book(plain_keys, None).resolve_cover_resource_id(),
+            Some("img_01.png".to_string())
+        );
+        assert_eq!(
+            build_book(plain_rev, None).resolve_cover_resource_id(),
+            Some("img_01.png".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ir_deep_block_and_toc_iterative_clone_and_drop() {
+        // 1. 20,000-level deep Block::List including multi-item and empty-slot subtree at top
+        let mut deep_block = Block::Paragraph {
+            id: "leaf_p".to_string(),
+            spans: vec![TextSpan {
+                text: "deep_leaf".to_string(),
+                style: None,
+                anchor_id: Some("leaf_anc".to_string()),
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        };
+        for i in 0..20_000usize {
+            deep_block = Block::List {
+                id: format!("list_{}", i),
+                ordered: i % 2 == 0,
+                items: vec![vec![deep_block]],
+            };
+        }
+        deep_block = Block::List {
+            id: "outer_multi".to_string(),
+            ordered: true,
+            items: vec![
+                vec![Block::Paragraph {
+                    id: "first_item".to_string(),
+                    spans: vec![TextSpan {
+                        text: "head".to_string(),
+                        ..Default::default()
+                    }],
+                    style: None,
+                }],
+                Vec::new(),
+                vec![deep_block],
+            ],
+        };
+
+        let cloned_block = deep_block.clone();
+        assert_eq!(cloned_block.char_count(), deep_block.char_count());
+        assert_eq!(cloned_block.plain_text(), deep_block.plain_text());
+        if let Block::List { items, ordered, .. } = &cloned_block {
+            assert!(*ordered);
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0].len(), 1);
+            assert!(items[1].is_empty());
+            assert_eq!(items[2].len(), 1);
+        } else {
+            panic!("Expected cloned outer Block::List");
+        }
+        drop(cloned_block);
+        drop(deep_block);
+
+        // 2. 20,000-level deep TocItem with multi-child ordering check
+        let mut deep_toc = TocItem {
+            title: "Leaf TOC".to_string(),
+            target_section: "sec_leaf".to_string(),
+            target_anchor: Some("leaf_anc".to_string()),
+            children: Vec::new(),
+        };
+        for i in (0..19_999usize).rev() {
+            deep_toc = TocItem {
+                title: format!("TOC {}", i),
+                target_section: "sec_mid".to_string(),
+                target_anchor: None,
+                children: vec![deep_toc],
+            };
+        }
+        let root_toc = TocItem {
+            title: "Root".to_string(),
+            target_section: "sec_root".to_string(),
+            target_anchor: None,
+            children: vec![
+                TocItem {
+                    title: "Sibling First".to_string(),
+                    target_section: "sec_s1".to_string(),
+                    target_anchor: None,
+                    children: Vec::new(),
+                },
+                deep_toc,
+                TocItem {
+                    title: "Sibling Last".to_string(),
+                    target_section: "sec_s3".to_string(),
+                    target_anchor: None,
+                    children: Vec::new(),
+                },
+            ],
+        };
+
+        let cloned_toc = root_toc.clone();
+        assert_eq!(cloned_toc.children.len(), 3);
+        assert_eq!(cloned_toc.children[0].title, "Sibling First");
+        assert_eq!(cloned_toc.children[2].title, "Sibling Last");
+
+        let mut curr = &cloned_toc.children[1];
+        let mut depth = 1usize;
+        while let Some(next) = curr.children.first() {
+            curr = next;
+            depth += 1;
+        }
+        assert_eq!(depth, 20_000);
+        assert_eq!(curr.title, "Leaf TOC");
+        assert_eq!(curr.target_section, "sec_leaf");
+        assert_eq!(curr.target_anchor.as_deref(), Some("leaf_anc"));
+
+        drop(cloned_toc);
+        drop(root_toc);
     }
 }
