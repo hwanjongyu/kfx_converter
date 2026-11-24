@@ -1863,6 +1863,222 @@ fn test_packager_metadata_completeness_and_no_cover_omits_cover_landmark() {
 }
 
 #[test]
+fn test_extract_isbn_valid_ascii_and_multibyte_non_ascii_safety() {
+    // Valid ISBN-10: plain, hyphenated, spaced, lowercase 'x', and all supported prefixes
+    assert_eq!(
+        KfxPackager::extract_isbn("0306406152"),
+        Some(("0306406152".to_string(), false))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("0-306-40615-2"),
+        Some(("0306406152".to_string(), false))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("0 306 40615 2"),
+        Some(("0306406152".to_string(), false))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("030640615x"),
+        Some(("030640615X".to_string(), false))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("urn:isbn:0-306-40615-x"),
+        Some(("030640615X".to_string(), false))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("URN:ISBN: 0 306 40615 X"),
+        Some(("030640615X".to_string(), false))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("isbn: 030640615x "),
+        Some(("030640615X".to_string(), false))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("ISBN:0-306-40615-2"),
+        Some(("0306406152".to_string(), false))
+    );
+
+    // Valid ISBN-13: 978 / 979 prefixes with hyphens, spaces, and URN/ISBN prefixes
+    assert_eq!(
+        KfxPackager::extract_isbn("9780123456789"),
+        Some(("9780123456789".to_string(), true))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("urn:isbn:978-0-12-345678-9"),
+        Some(("9780123456789".to_string(), true))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("ISBN:979-10-90636-07-1"),
+        Some(("9791090636071".to_string(), true))
+    );
+    assert_eq!(
+        KfxPackager::extract_isbn("URN:ISBN: 979 10 90636 07 1"),
+        Some(("9791090636071".to_string(), true))
+    );
+
+    // Multi-byte UTF-8 inputs whose compacted byte length is 10 (straddling byte index 9),
+    // 11, 13, or mixed CJK + ASCII: must return None cleanly without panicking.
+    let non_ascii_cases = [
+        "12345678é",            // 10 bytes (8 + 2), 'é' spans bytes 8..10
+        "1234567한",            // 10 bytes (7 + 3), '한' spans bytes 7..10
+        "123456😀",             // 10 bytes (6 + 4), '😀' spans bytes 6..10
+        "urn:isbn:1234-5678-é", // prefix + hyphen stripping -> 10 bytes
+        "한글테스트X",          // multi-byte CJK with trailing ASCII 'X'
+        "한글테X",              // 10 bytes (3*3 + 1), CJK with trailing 'X'
+        "é12345678",            // 10 bytes (2 + 8), non-ASCII leading char
+        "123456789é",           // 11 bytes (9 + 2)
+        "97812345678é",         // 13 bytes (11 + 2), valid 978 prefix + non-ASCII
+        "9791234567한",         // 13 bytes (10 + 3), valid 979 prefix + non-ASCII
+    ];
+    for input in non_ascii_cases {
+        assert_eq!(
+            KfxPackager::extract_isbn(input),
+            None,
+            "Non-ASCII input {:?} must return None without panicking",
+            input
+        );
+    }
+
+    // Invalid lengths, prefixes, check characters, and non-ISBN URNs
+    let invalid_cases = [
+        "9771234567890", // invalid ISBN-13 prefix (977)
+        "978012345678X", // ISBN-13 does not allow trailing X
+        "030640615X1",   // 11 bytes
+        "123456789",     // 9 bytes
+        "",              // empty
+        "   ",           // whitespace only
+        "030640615A",    // invalid trailing character
+        "X306406152",    // 'X' in non-final position
+        "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+    ];
+    for input in invalid_cases {
+        assert_eq!(
+            KfxPackager::extract_isbn(input),
+            None,
+            "Invalid identifier {:?} must return None",
+            input
+        );
+    }
+}
+
+#[test]
+fn test_packager_handles_ten_byte_multibyte_identifier_without_panic() {
+    for raw_ident in ["12345678é", "1234567한", "123456😀"] {
+        assert_eq!(raw_ident.len(), 10);
+
+        let mut book = BookIR::default();
+        book.metadata.title = "Multibyte Identifier Regression".to_string();
+        book.metadata.creators = vec!["Test Author".to_string()];
+        book.metadata.language = "en".to_string();
+        book.metadata.identifier = raw_ident.to_string();
+        book.sections.push(Section {
+            id: "chap1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Chapter body".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let written = packager
+            .package(&mut buffer)
+            .expect("Packaging must succeed without panicking on 10-byte non-ASCII identifier");
+        assert!(written > 0);
+
+        let meta_ent = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == SYM_BOOK_METADATA)
+            .expect("$490 book_metadata entity missing");
+        let decoded = crate::ion::IonReader::new(&meta_ent.data)
+            .decode_all()
+            .expect("Decode $490 book_metadata");
+        let IonValue::Struct(root_fields) = &decoded[0] else {
+            panic!("Expected struct root in $490");
+        };
+        let Some((_, IonValue::List(categories))) = root_fields
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::CategorisedMetadata as u32)
+        else {
+            panic!("Expected categorised_metadata list in $490");
+        };
+
+        let title_meta_entries = categories
+            .iter()
+            .find_map(|cat| {
+                let IonValue::Struct(fields) = cat else {
+                    return None;
+                };
+                let is_title_cat = fields.iter().any(|(k, v)| {
+                    *k == KfxSymbol::Category as u32
+                        && matches!(v, IonValue::String(s) if s == "kindle_title_metadata")
+                });
+                if !is_title_cat {
+                    return None;
+                }
+                fields.iter().find_map(|(k, v)| {
+                    if *k == KfxSymbol::Metadata as u32
+                        && let IonValue::List(items) = v
+                    {
+                        Some(items)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .expect("kindle_title_metadata category missing from $490");
+
+        let kv_pairs: Vec<(String, &IonValue)> = title_meta_entries
+            .iter()
+            .filter_map(|entry| {
+                let IonValue::Struct(fields) = entry else {
+                    return None;
+                };
+                let key = fields.iter().find_map(|(k, v)| {
+                    if *k == KfxSymbol::Key as u32
+                        && let IonValue::String(s) = v
+                    {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })?;
+                let val = fields
+                    .iter()
+                    .find_map(|(k, v)| (*k == KfxSymbol::Value as u32).then_some(v))?;
+                Some((key, val))
+            })
+            .collect();
+
+        assert!(
+            kv_pairs
+                .iter()
+                .any(|(k, v)| k == "identifier" && **v == IonValue::String(raw_ident.to_string())),
+            "Expected fallback 'identifier' = {:?} in $490 metadata, got: {:?}",
+            raw_ident,
+            kv_pairs
+        );
+        assert!(
+            !kv_pairs
+                .iter()
+                .any(|(k, _)| matches!(k.as_str(), "ISBN" | "ISBN-10" | "ISBN-13")),
+            "Non-ISBN identifier {:?} must not emit ISBN metadata keys: {:?}",
+            raw_ident,
+            kv_pairs
+        );
+    }
+}
+
+#[test]
 fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
     use image::{ImageBuffer, Rgb};
 

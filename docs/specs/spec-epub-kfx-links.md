@@ -406,6 +406,8 @@ Inspection of `src/epub/xhtml.rs:93-197, 765-792, 966-1008, 1704-1755, 1791-1813
 
 ## 4. Stage 3 — Optional Extensions `[Explicit User Scope Decision Required]`
 
+> **Stage 3 Full Specification:** The complete Phase 1 technical specification covering Stage 3A (Table Links & Inline Spans), Stage 3B (Image Links), and Stage 3C (Visited/Unvisited Link Styles) is located in [spec-epub-kfx-links-stage3.md](spec-epub-kfx-links-stage3.md).
+
 The following three extensions introduce IR schema changes, KFX layout trade-offs, or CSS parser extensions beyond core links and footnote popups. Each requires an explicit user go/no-go decision before Phase 2 implementation.
 
 ### 4.1 Stage 3A — `Block::Table` Rich Links & Inline Spans (`src/ir.rs`, `src/epub/xhtml.rs`, `src/packager/storylines.rs`)

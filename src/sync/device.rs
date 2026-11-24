@@ -74,6 +74,53 @@ fn run_eject_command(label: &str, mut cmd: Command) -> Result<(), String> {
     }
 }
 
+/// Validates a macOS mount-point path and constructs the `diskutil unmount` command.
+///
+/// Apple's `diskutil` does not accept POSIX `--` option termination (`diskutil unmount -- <path>`
+/// fails unconditionally with `Unable to find disk for --`). Instead, argument-injection safety
+/// is enforced by requiring `root` to be a non-empty, NUL-free, POSIX-absolute path starting with
+/// `'/'` that contains at least one normal component and no `..` traversal segments, ensuring
+/// `diskutil` can never interpret the target argument as a flag (`-...`) or keyword (`force`).
+#[cfg(any(target_os = "macos", test))]
+fn build_macos_eject_command(root: &Path) -> Result<Command, SyncError> {
+    use std::path::Component;
+
+    let raw_bytes = root.as_os_str().as_encoded_bytes();
+    if raw_bytes.is_empty() {
+        return Err(SyncError::SecurityViolation(
+            "Refusing to eject empty macOS mount path".to_string(),
+        ));
+    }
+    if raw_bytes.contains(&b'\0') {
+        return Err(SyncError::SecurityViolation(format!(
+            "Refusing to eject macOS mount path containing NUL byte: {:?}",
+            root
+        )));
+    }
+    if !raw_bytes.starts_with(b"/") {
+        return Err(SyncError::SecurityViolation(format!(
+            "Refusing to eject non-absolute macOS mount path: {:?}",
+            root
+        )));
+    }
+    if root.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(SyncError::SecurityViolation(format!(
+            "Refusing to eject macOS mount path containing parent traversal ('..'): {:?}",
+            root
+        )));
+    }
+    if !root.components().any(|c| matches!(c, Component::Normal(_))) {
+        return Err(SyncError::SecurityViolation(format!(
+            "Refusing to eject POSIX root path: {:?}",
+            root
+        )));
+    }
+
+    let mut cmd = Command::new("diskutil");
+    cmd.arg("unmount").arg(root);
+    Ok(cmd)
+}
+
 /// Queries filesystem storage statistics (used_gb, total_gb).
 #[cfg(unix)]
 pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
@@ -810,6 +857,9 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
     {
         let _ = root;
 
+        #[cfg(target_os = "macos")]
+        let macos_eject_cmd = build_macos_eject_command(root)?;
+
         // 1. Flush file system write cache to prevent eMMC data loss.
         // On Linux, use syncfs on the device root file descriptor to flush only the Kindle
         // filesystem instead of forcing a global host-wide sync across all drives.
@@ -887,9 +937,7 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
         }
         #[cfg(target_os = "macos")]
         {
-            let mut cmd = Command::new("diskutil");
-            cmd.args(["unmount", "--"]).arg(root);
-            run_eject_command("diskutil unmount", cmd).map_err(|err| {
+            run_eject_command("diskutil unmount", macos_eject_cmd).map_err(|err| {
                 SyncError::GioFailed(format!(
                     "Failed to unmount Kindle device at {:?}: {}",
                     root, err
@@ -1391,5 +1439,98 @@ mod tests {
             KindleSync::resolve_model_name(root, "/Volumes/Kindle"),
             "Kindle Oasis"
         );
+    }
+
+    #[test]
+    fn test_build_macos_eject_command_constructs_valid_diskutil_argv_without_double_dash() {
+        use std::ffi::OsStr;
+
+        let valid_paths = [
+            "/Volumes/Kindle",
+            "/Volumes/My Kindle",
+            "/Volumes/Kindle Paperwhite",
+            "/Volumes/Kindle/",
+            "/Volumes/-rf",
+            "/var/folders/tmp/-rf",
+            "/var/folders/ab/cd/-rf",
+        ];
+
+        for raw in valid_paths {
+            let cmd = build_macos_eject_command(Path::new(raw)).unwrap_or_else(|e| {
+                panic!("Expected valid macOS mount path {:?}, got {:?}", raw, e)
+            });
+            assert_eq!(cmd.get_program(), OsStr::new("diskutil"));
+            let args: Vec<&OsStr> = cmd.get_args().collect();
+            assert_eq!(
+                args,
+                vec![OsStr::new("unmount"), OsStr::new(raw)],
+                "Unexpected diskutil argv for {:?}",
+                raw
+            );
+            assert!(
+                !args.contains(&OsStr::new("--")),
+                "diskutil unmount argv must NOT contain POSIX '--' for {:?}",
+                raw
+            );
+        }
+
+        // Preserve raw non-UTF-8 Unix mount paths without lossy conversion
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let non_utf8 = OsStr::from_bytes(b"/Volumes/Kindle_\xff_Vol");
+            let cmd = build_macos_eject_command(Path::new(non_utf8))
+                .expect("Anchored non-UTF-8 Unix path must be accepted");
+            assert_eq!(cmd.get_program(), OsStr::new("diskutil"));
+            let args: Vec<&OsStr> = cmd.get_args().collect();
+            assert_eq!(args, vec![OsStr::new("unmount"), non_utf8]);
+            assert!(!args.contains(&OsStr::new("--")));
+        }
+    }
+
+    #[test]
+    fn test_build_macos_eject_command_rejects_unsafe_paths() {
+        let unsafe_paths = [
+            "",
+            "Kindle",
+            "Volumes/Kindle",
+            "./Kindle",
+            "-rf",
+            "--",
+            "--help",
+            "force",
+            "/",
+            "///",
+            "/.",
+            "/Volumes/../etc",
+            "/Volumes/Kindle/..",
+            "/Volumes/Kindle/../Other",
+            "/Volumes/Kindle\0evil",
+        ];
+
+        for raw in unsafe_paths {
+            let res = build_macos_eject_command(Path::new(raw));
+            assert!(
+                matches!(res, Err(SyncError::SecurityViolation(_))),
+                "Expected SyncError::SecurityViolation for unsafe path {:?}, got {:?}",
+                raw,
+                res
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+
+            let nul_path = Path::new(OsStr::from_bytes(b"/Volumes/Kindle\0bad"));
+            let res = build_macos_eject_command(nul_path);
+            assert!(
+                matches!(res, Err(SyncError::SecurityViolation(_))),
+                "Expected SyncError::SecurityViolation for Unix NUL path, got {:?}",
+                res
+            );
+        }
     }
 }

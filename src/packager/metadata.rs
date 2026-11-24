@@ -316,7 +316,7 @@ impl<'a> KfxPackager<'a> {
         normalized.join("-")
     }
 
-    fn extract_isbn(identifier: &str) -> Option<(String, bool)> {
+    pub(crate) fn extract_isbn(identifier: &str) -> Option<(String, bool)> {
         let trimmed = identifier.trim();
         let stripped = trimmed
             .strip_prefix("urn:isbn:")
@@ -330,18 +330,16 @@ impl<'a> KfxPackager<'a> {
             .filter(|c| !matches!(c, '-' | ' '))
             .map(|c| c.to_ascii_uppercase())
             .collect();
-        if compact.len() == 10
-            && compact[..9].bytes().all(|b| b.is_ascii_digit())
-            && compact
-                .as_bytes()
-                .last()
-                .is_some_and(|b| b.is_ascii_digit() || *b == b'X')
+        let bytes = compact.as_bytes();
+        if bytes.len() == 10
+            && bytes[..9].iter().all(u8::is_ascii_digit)
+            && (bytes[9].is_ascii_digit() || bytes[9] == b'X')
         {
             return Some((compact, false));
         }
-        if compact.len() == 13
-            && (compact.starts_with("978") || compact.starts_with("979"))
-            && compact.bytes().all(|b| b.is_ascii_digit())
+        if bytes.len() == 13
+            && (bytes.starts_with(b"978") || bytes.starts_with(b"979"))
+            && bytes.iter().all(u8::is_ascii_digit)
         {
             return Some((compact, true));
         }
