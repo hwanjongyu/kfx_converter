@@ -186,7 +186,14 @@ fn main() {
                 }
                 if let Some(err) = &report.word_wise_error {
                     eprintln!("Warning: Word Wise generation failed: {err}");
-                } else if let Some(gloss_count) = report.word_wise_glosses {
+                }
+                if let Some(err) = &report.sdr_error {
+                    eprintln!("Warning: Companion .sdr sidecar deployment failed: {err}");
+                }
+                if report.word_wise_error.is_none()
+                    && report.sdr_error.is_none()
+                    && let Some(gloss_count) = report.word_wise_glosses
+                {
                     println!(
                         "  [ENHANCEMENT] Word Wise sidecar generated ({} glosses)",
                         gloss_count

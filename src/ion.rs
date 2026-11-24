@@ -742,9 +742,11 @@ impl<'a> IonReader<'a> {
                         )));
                     }
                     let mantissa_bytes = &self.buf[cur..payload_end];
-                    if mantissa_bytes.len() > 8 {
+                    if mantissa_bytes.len() > 9
+                        || (mantissa_bytes.len() == 9 && (mantissa_bytes[0] & 0x7F) != 0)
+                    {
                         return Err(IonError::MalformedIon(
-                            "Mantissa length exceeds 8 bytes".into(),
+                            "Mantissa length exceeds 64-bit signed integer range".into(),
                         ));
                     }
                     let mut mantissa: i64 = 0;
@@ -1472,5 +1474,62 @@ mod tests {
         assert_eq!(parse_decimal_exact("9223372036854775808"), None);
         assert_eq!(parse_decimal_exact("0.1e-2147483648"), None);
         assert_eq!(parse_decimal_exact("1.0e128"), None);
+    }
+
+    #[test]
+    fn test_ion_decimal_i64_min_roundtrip_and_9byte_bounds() {
+        // Exact i64::MIN with exponent 0 round-trips through IonWriter -> IonReader
+        let mut w_min = IonWriter::new();
+        w_min.write_decimal("-9223372036854775808");
+        let mut r_min = IonReader::new(w_min.to_bytes());
+        assert_eq!(
+            r_min.decode_value().unwrap(),
+            IonValue::Decimal("-9223372036854775808.0".to_string())
+        );
+
+        // Exact i64::MIN with negative exponent (-1) round-trips cleanly
+        let mut w_min_frac = IonWriter::new();
+        w_min_frac.write_decimal("-922337203685477580.8");
+        let mut r_min_frac = IonReader::new(w_min_frac.to_bytes());
+        assert_eq!(
+            r_min_frac.decode_value().unwrap(),
+            IonValue::Decimal("-922337203685477580.8".to_string())
+        );
+
+        // Crafted 9-byte positive +2^63 (exp=0 -> 0x80, mantissa=[0x00, 0x80, 0..0]) must be rejected
+        let pos_2_63 = [
+            0x5A, 0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert!(matches!(
+            IonReader::new(&pos_2_63).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        // Crafted 9-byte -(2^63 + 1) (exp=0 -> 0x80, mantissa=[0x80, 0x80, 0..1]) must be rejected
+        let neg_2_63_plus_1 = [
+            0x5A, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        ];
+        assert!(matches!(
+            IonReader::new(&neg_2_63_plus_1).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        // Crafted 9-byte mantissa with non-zero magnitude bits in leading byte ([0x81, 0..0]) must be rejected
+        let nonzero_lead_9b = [
+            0x5A, 0x80, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert!(matches!(
+            IonReader::new(&nonzero_lead_9b).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
+
+        // Crafted 10-byte mantissa (len 11 payload: 1 byte exp + 10 bytes mantissa) must be rejected
+        let mantissa_10b = [
+            0x5B, 0x80, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        ];
+        assert!(matches!(
+            IonReader::new(&mantissa_10b).decode_value(),
+            Err(IonError::MalformedIon(_))
+        ));
     }
 }

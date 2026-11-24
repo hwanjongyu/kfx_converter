@@ -53,25 +53,81 @@ pub(crate) fn find_mount_source_in_mounts(
 }
 
 #[cfg(unix)]
+const EJECT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[cfg(unix)]
 fn run_eject_command(label: &str, mut cmd: Command) -> Result<(), String> {
-    match cmd.output() {
-        Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            let detail = if stderr.is_empty() {
-                "no stderr output".to_string()
-            } else {
-                stderr
-            };
-            Err(format!(
-                "{} failed (exit {:?}): {}",
-                label,
-                out.status.code(),
-                detail
-            ))
-        }
-        Err(e) => Err(format!("{} failed to spawn: {}", label, e)),
+    let out = crate::storage::run_command_with_timeout(label, &mut cmd, EJECT_COMMAND_TIMEOUT)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "no stderr output".to_string()
+        } else {
+            stderr
+        };
+        Err(format!(
+            "{} failed (exit {:?}): {}",
+            label,
+            out.status.code(),
+            detail
+        ))
     }
+}
+
+/// Validates a Linux `/dev/...` block device path and constructs `udisksctl unmount --block-device=<dev>`.
+///
+/// GLib's `GOptionContext` treats `-b` / `--block-device` as an option taking a required argument,
+/// so passing `["unmount", "-b", "--", dev]` would bind `"--"` as the device path and fail.
+/// Using `--block-device=<dev>` after validating `/dev/...` prevents option injection while
+/// cleanly skipping non-block FUSE sources (e.g., `jmtpfs`, `gvfsd-fuse`).
+#[cfg(any(target_os = "linux", test))]
+fn build_linux_udisks_unmount_command(dev: &str) -> Result<Command, String> {
+    use std::ffi::OsString;
+    use std::path::Component;
+
+    if dev.is_empty() {
+        return Err("Refusing empty block device path for udisksctl".to_string());
+    }
+    if dev.as_bytes().contains(&b'\0') {
+        return Err(format!(
+            "Refusing NUL-containing block device path for udisksctl: {:?}",
+            dev
+        ));
+    }
+    if !dev.starts_with("/dev/") {
+        return Err(format!(
+            "Skipping udisksctl for non-/dev block source: {:?}",
+            dev
+        ));
+    }
+    let dev_path = Path::new(dev);
+    if dev_path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!(
+            "Refusing block device path containing parent traversal ('..'): {:?}",
+            dev
+        ));
+    }
+    let has_device_component = dev_path
+        .strip_prefix("/dev")
+        .ok()
+        .is_some_and(|rel| rel.components().any(|c| matches!(c, Component::Normal(_))));
+    if !has_device_component {
+        return Err(format!(
+            "Refusing incomplete /dev block device path for udisksctl: {:?}",
+            dev
+        ));
+    }
+
+    let mut arg = OsString::from("--block-device=");
+    arg.push(dev);
+    let mut cmd = Command::new("udisksctl");
+    cmd.arg("unmount").arg(arg);
+    Ok(cmd)
 }
 
 /// Validates a macOS mount-point path and constructs the `diskutil unmount` command.
@@ -121,6 +177,20 @@ fn build_macos_eject_command(root: &Path) -> Result<Command, SyncError> {
     Ok(cmd)
 }
 
+/// Computes `(used_gb, total_gb)` from `statvfs` block metrics using overflow-safe `u128` arithmetic.
+#[cfg(any(unix, test))]
+fn compute_storage_gb(block_size: u64, total_blocks: u64, avail_blocks: u64) -> (f32, f32) {
+    let bs = u128::from(block_size);
+    let total_bytes = u128::from(total_blocks).saturating_mul(bs);
+    let free_bytes = u128::from(avail_blocks).saturating_mul(bs);
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+    let gib = 1024.0_f64 * 1024.0_f64 * 1024.0_f64;
+    let total_gb = total_bytes as f64 / gib;
+    let used_gb = used_bytes as f64 / gib;
+    (used_gb as f32, total_gb as f32)
+}
+
 /// Queries filesystem storage statistics (used_gb, total_gb).
 #[cfg(unix)]
 pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
@@ -133,17 +203,15 @@ pub fn get_storage_stats(path: &Path) -> Option<(f32, f32)> {
     // SAFETY: `c_path` is a valid NUL-terminated `CString` and `stat` is a valid output buffer.
     if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
         let block_size = if stat.f_frsize > 0 {
-            stat.f_frsize
+            stat.f_frsize as u64
         } else {
-            stat.f_bsize
-        } as u64;
-        let total_bytes = stat.f_blocks as u64 * block_size;
-        let free_bytes = stat.f_bavail as u64 * block_size;
-        let used_bytes = total_bytes.saturating_sub(free_bytes);
-
-        let total_gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        let used_gb = used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        Some((used_gb as f32, total_gb as f32))
+            stat.f_bsize as u64
+        };
+        Some(compute_storage_gb(
+            block_size,
+            stat.f_blocks as u64,
+            stat.f_bavail as u64,
+        ))
     } else {
         None
     }
@@ -870,7 +938,18 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
                 // SAFETY: `file` is an open `File` whose raw fd remains valid for the `syncfs` call.
                 let ret = unsafe { libc::syncfs(file.as_raw_fd()) };
                 if ret != 0 {
-                    return Err(SyncError::Io(std::io::Error::last_os_error()));
+                    let err = std::io::Error::last_os_error();
+                    if matches!(
+                        err.raw_os_error(),
+                        Some(libc::EINVAL | libc::ENOTSUP | libc::ENOSYS)
+                    ) {
+                        eprintln!(
+                            "Warning: syncfs unsupported on {:?} ({}); continuing with unmount.",
+                            root, err
+                        );
+                    } else {
+                        return Err(SyncError::Io(err));
+                    }
                 }
             } else {
                 // SAFETY: `libc::sync` takes no arguments and flushes kernel buffers without pointer access.
@@ -887,7 +966,7 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
         #[cfg(target_os = "linux")]
         {
             let root_str = root.to_string_lossy();
-            if root_str.contains("/gvfs/mtp:") {
+            if crate::storage::is_mtp_path(root) {
                 let mtp_mount = if let Some(idx) = root_str.find("/Internal Storage") {
                     &root_str[..idx]
                 } else {
@@ -912,10 +991,10 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
                         .and_then(|mounts| find_mount_source_in_mounts(&mounts, root));
 
                     let mut unmounted = false;
-                    if let Some(dev) = block_dev {
-                        let mut udisks_cmd = Command::new("udisksctl");
-                        udisks_cmd.args(["unmount", "-b"]).arg(&dev);
-                        match run_eject_command("udisksctl unmount -b", udisks_cmd) {
+                    if let Some(dev) = block_dev
+                        && let Ok(udisks_cmd) = build_linux_udisks_unmount_command(&dev)
+                    {
+                        match run_eject_command("udisksctl unmount", udisks_cmd) {
                             Ok(()) => unmounted = true,
                             Err(e) => errors.push(e),
                         }
@@ -1532,5 +1611,53 @@ mod tests {
                 res
             );
         }
+    }
+
+    #[test]
+    fn test_build_linux_udisks_unmount_command_validates_block_device() {
+        use std::ffi::OsStr;
+
+        for valid in ["/dev/sdb1", "/dev/disk/by-id/usb-Amazon_Kindle-0:0"] {
+            let cmd = build_linux_udisks_unmount_command(valid)
+                .unwrap_or_else(|e| panic!("Expected valid block dev {:?}, got {}", valid, e));
+            assert_eq!(cmd.get_program(), OsStr::new("udisksctl"));
+            let args: Vec<&OsStr> = cmd.get_args().collect();
+            let expected_flag = format!("--block-device={}", valid);
+            assert_eq!(
+                args,
+                vec![OsStr::new("unmount"), OsStr::new(&expected_flag)]
+            );
+        }
+
+        for invalid in [
+            "",
+            "-f",
+            "--force",
+            "../dev/sda",
+            "/dev/../etc/passwd",
+            "/dev/",
+            "/dev/.",
+            "gvfsd-fuse",
+            "jmtpfs",
+            "/dev/sdb1\0bad",
+        ] {
+            assert!(
+                build_linux_udisks_unmount_command(invalid).is_err(),
+                "Expected invalid block device {:?} to be rejected",
+                invalid
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_storage_gb_handles_u64_overflow_without_panic() {
+        let (used_gb, total_gb) = compute_storage_gb(4096, u64::MAX, u64::MAX / 2);
+        assert!(total_gb.is_finite() && total_gb > 0.0);
+        assert!(used_gb.is_finite() && used_gb >= 0.0 && used_gb <= total_gb);
+
+        // avail > total saturates used_gb cleanly to 0.0
+        let (used_sat, total_sat) = compute_storage_gb(4096, 100, 200);
+        assert_eq!(used_sat, 0.0);
+        assert!(total_sat > 0.0);
     }
 }

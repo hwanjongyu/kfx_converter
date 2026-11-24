@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// Global mutual exclusion lock ensuring all write and deletion operations targeting
 /// Kindle storage (VFAT FAT table allocations, companion .sdr writes, and MTP commands)
 /// are strictly serialized to prevent filesystem corruption, USB FIFO stalls, and MTP deadlocks.
-pub(crate) static DEVICE_SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) use crate::storage::DEVICE_SYNC_LOCK;
 
 impl KindleSync {
     /// Sanitizes an e-book title to be completely safe for FAT32 / VFAT storage

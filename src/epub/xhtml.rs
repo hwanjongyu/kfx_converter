@@ -450,12 +450,34 @@ pub(crate) fn normalize_span_href(
             }
 
             let decoded_path = decode_percent(path_no_query);
+            let candidate = decoded_path.replace('\\', "/");
+            match classify_uri(&candidate) {
+                None => {
+                    return match link_ctx {
+                        None => frag_opt.map(|f| format!("#{}", f)),
+                        Some(ctx) => match frag_opt {
+                            Some(frag) => Some(format!("{}#{}", ctx.current_section_id, frag)),
+                            None if raw_frag.is_some() => Some(ctx.current_section_id.to_string()),
+                            None => None,
+                        },
+                    };
+                }
+                Some(UriKind::InternalOrRelative) => {}
+                Some(UriKind::Blocked) | Some(UriKind::External(_)) => return None,
+            }
+
+            let stripped_dot = candidate.trim().trim_start_matches("./");
+            if !stripped_dot.is_empty()
+                && !matches!(
+                    classify_uri(stripped_dot),
+                    Some(UriKind::InternalOrRelative)
+                )
+            {
+                return None;
+            }
+
             let Some(ctx) = link_ctx else {
-                let norm_path = decoded_path
-                    .replace('\\', "/")
-                    .trim()
-                    .trim_start_matches("./")
-                    .to_string();
+                let norm_path = stripped_dot.to_string();
                 if norm_path.is_empty() {
                     return frag_opt.map(|f| format!("#{}", f));
                 }
@@ -466,11 +488,7 @@ pub(crate) fn normalize_span_href(
             };
 
             let resolved = resolve_zip_path(ctx.current_chapter_dir, &decoded_path);
-            let clean_decoded = decoded_path.replace('\\', "/");
-            let clean_trimmed = clean_decoded
-                .trim()
-                .trim_start_matches("./")
-                .trim_start_matches('/');
+            let clean_trimmed = stripped_dot.trim_start_matches('/');
             let file_name = Path::new(clean_trimmed)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -2658,5 +2676,53 @@ mod tests {
             normalize_span_href("../Text/ch%202.xhtml?cache=bust#sec%201", Some(&ctx)).as_deref(),
             Some("section_2#sec 1")
         );
+    }
+
+    #[test]
+    fn test_normalize_span_href_rejects_encoded_schemes_and_backslash_protocol_relative() {
+        let mut href_to_section = HashMap::new();
+        href_to_section.insert("OEBPS/Text/ch1.xhtml".to_string(), "section_1".to_string());
+        // Even if a malicious/broken manifest ever mapped these keys, post-decode URI check rejects them
+        href_to_section.insert("javascript:alert(1)".to_string(), "section_1".to_string());
+        href_to_section.insert("file:///etc/passwd".to_string(), "section_1".to_string());
+        href_to_section.insert("data:text/html,hi".to_string(), "section_1".to_string());
+        let ctx = XhtmlLinkContext {
+            current_section_id: "section_1",
+            current_chapter_dir: "OEBPS/Text",
+            href_to_section: &href_to_section,
+            href_lc_to_section: None,
+        };
+
+        let blocked_cases = [
+            "javascript%3Aalert(1)",
+            "JAVASCRIPT%3aalert(1)",
+            "data%3Atext/html,hi",
+            "file%3A///etc/passwd",
+            r"\\attacker.example\share",
+            r"/\attacker.example/share",
+            r"\/attacker.example/share",
+            "./javascript%3Aalert(1)",
+            r"./\\evil.com\path",
+            "%2F%2Fevil.com/path",
+            "https%3A//evil.com/path",
+            "\u{0085}javascript:alert(1)",
+            "javascript\u{0085}:alert(1)",
+            "mailto:user @example.com",
+        ];
+
+        for bad in blocked_cases {
+            assert_eq!(
+                normalize_span_href(bad, None),
+                None,
+                "Expected None (link_ctx=None) for blocked href: {:?}",
+                bad
+            );
+            assert_eq!(
+                normalize_span_href(bad, Some(&ctx)),
+                None,
+                "Expected None (link_ctx=Some) for blocked href: {:?}",
+                bad
+            );
+        }
     }
 }

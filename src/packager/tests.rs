@@ -3941,3 +3941,649 @@ fn test_packager_native_table_storyline_emits_yj_table_content_features() {
     assert!(direct_keys.iter().any(|k| k == "yj_table"));
     assert!(direct_keys.iter().any(|k| k == "yj_table_viewer"));
 }
+
+#[test]
+fn test_packager_p1_5_empty_corrupt_gif_svg_and_font_resources() {
+    let mut gif89 = b"GIF89a".to_vec();
+    gif89.extend_from_slice(&48u16.to_le_bytes());
+    gif89.extend_from_slice(&32u16.to_le_bytes());
+    gif89.extend_from_slice(&[0x00, 0x00, 0x00, 0x3B]);
+
+    let mut book = BookIR::default();
+    book.metadata.title = "Mixed Assets Book".to_string();
+    book.metadata.cover_image_id = Some("empty_cover.jpg".to_string());
+
+    // 1. 0-byte JPEG cover -> must substitute 1x1 FALLBACK_PLACEHOLDER_JPEG
+    book.resources.insert(
+        "empty_cover.jpg".to_string(),
+        crate::ir::ResourceAsset {
+            id: "empty_cover.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            data: Vec::new(),
+        },
+    );
+    // 2. Corrupt non-magic JPEG content -> must substitute 1x1 FALLBACK_PLACEHOLDER_JPEG
+    book.resources.insert(
+        "corrupt.jpg".to_string(),
+        crate::ir::ResourceAsset {
+            id: "corrupt.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            data: b"<html>not an image</html>".to_vec(),
+        },
+    );
+    // 3. Valid GIF89a (48x32) -> must keep GIF magic & emit $422=48, $423=32
+    book.resources.insert(
+        "anim.gif".to_string(),
+        crate::ir::ResourceAsset {
+            id: "anim.gif".to_string(),
+            mime_type: "image/gif".to_string(),
+            data: gif89.clone(),
+        },
+    );
+    // 4. Font & SVG -> must be excluded from $164/$417/$419 and emit text fallback if referenced
+    book.resources.insert(
+        "book_font.ttf".to_string(),
+        crate::ir::ResourceAsset {
+            id: "book_font.ttf".to_string(),
+            mime_type: "font/ttf".to_string(),
+            data: b"\x00\x01\x00\x00FAKEFONT".to_vec(),
+        },
+    );
+    book.resources.insert(
+        "vector.svg".to_string(),
+        crate::ir::ResourceAsset {
+            id: "vector.svg".to_string(),
+            mime_type: "image/svg+xml".to_string(),
+            data: b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec(),
+        },
+    );
+
+    book.sections.push(Section {
+        id: "ch1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![
+            Block::Image {
+                id: "img_corrupt".to_string(),
+                resource_id: "corrupt.jpg".to_string(),
+                alt: Some("Corrupt".to_string()),
+                width: None,
+                height: None,
+            },
+            Block::Image {
+                id: "img_gif".to_string(),
+                resource_id: "anim.gif".to_string(),
+                alt: Some("Gif".to_string()),
+                width: None,
+                height: None,
+            },
+            Block::Image {
+                id: "img_svg".to_string(),
+                resource_id: "vector.svg".to_string(),
+                alt: Some("Vector Fallback".to_string()),
+                width: None,
+                height: None,
+            },
+        ],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("Mixed assets book must package & pass preflight validation");
+
+    // Exactly 3 raster resources ($164 and $417): empty_cover.jpg, corrupt.jpg, anim.gif
+    let ext_resources: Vec<&KfxEntity> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == KfxSymbol::ExternalResource as u32)
+        .collect();
+    let raw_media: Vec<&KfxEntity> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == KfxSymbol::Bcrawmedia as u32)
+        .collect();
+    assert_eq!(
+        ext_resources.len(),
+        3,
+        "Only raster images should emit $164"
+    );
+    assert_eq!(raw_media.len(), 3, "Only raster images should emit $417");
+
+    // Verify GIF $164 has 48x32 and format $286 (gif)
+    let sym_fmt = KfxSymbol::Format as u32;
+    let sym_gif = KfxSymbol::Gif as u32;
+    let sym_w = KfxSymbol::ResourceWidth as u32;
+    let sym_h = KfxSymbol::ResourceHeight as u32;
+    let mut saw_gif_48x32 = false;
+    let mut placeholder_1x1_count = 0usize;
+    for ent in &ext_resources {
+        let vals = crate::ion::IonReader::new(&ent.data).decode_all().unwrap();
+        if let IonValue::Struct(fields) = &vals[0] {
+            let fmt = fields.iter().find(|(k, _)| *k == sym_fmt).map(|(_, v)| v);
+            let w = fields.iter().find(|(k, _)| *k == sym_w).map(|(_, v)| v);
+            let h = fields.iter().find(|(k, _)| *k == sym_h).map(|(_, v)| v);
+            if fmt == Some(&IonValue::Symbol(sym_gif))
+                && w == Some(&IonValue::Int(48))
+                && h == Some(&IonValue::Int(32))
+            {
+                saw_gif_48x32 = true;
+            }
+            if w == Some(&IonValue::Int(1)) && h == Some(&IonValue::Int(1)) {
+                placeholder_1x1_count += 1;
+            }
+        }
+    }
+    assert!(saw_gif_48x32, "GIF89a must emit $422=48 and $423=32");
+    assert_eq!(
+        placeholder_1x1_count, 2,
+        "Empty cover & corrupt JPEG must both substitute 1x1 placeholder"
+    );
+
+    // SVG image block must have fallen back to text content "Vector Fallback"
+    let has_svg_fallback = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_CONTENT)
+        .any(|e| {
+            e.data
+                .windows(b"Vector Fallback".len())
+                .any(|w| w == b"Vector Fallback")
+        });
+    assert!(
+        has_svg_fallback,
+        "SVG image block must emit safe text fallback into $145 content"
+    );
+}
+
+#[test]
+fn test_packager_p1_6_colliding_resource_ids_remapped_cleanly() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Colliding IDs Book".to_string();
+    book.metadata.cover_image_id = Some("style_p".to_string());
+
+    let colliding_ids = [
+        "style_p",
+        "content_1",
+        "c_section_1",
+        "toc_nav",
+        "landmarks_nav",
+        "page_list_nav",
+        "a_1",
+        "note_1",
+        "resource/nested",
+    ];
+    for id in colliding_ids {
+        book.resources.insert(
+            id.to_string(),
+            crate::ir::ResourceAsset {
+                id: id.to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+            },
+        );
+    }
+
+    let mut blocks = vec![Block::Paragraph {
+        id: "p1".to_string(),
+        spans: vec![TextSpan {
+            text: "Jump ".to_string(),
+            style: None,
+            anchor_id: None,
+            href: Some("#fn1".to_string()),
+            ruby: None,
+        }],
+        style: None,
+    }];
+    for (idx, id) in colliding_ids.iter().enumerate() {
+        blocks.push(Block::Image {
+            id: format!("img_{}", idx),
+            resource_id: (*id).to_string(),
+            alt: Some(format!("Alt {}", idx)),
+            width: None,
+            height: None,
+        });
+    }
+
+    book.sections.push(Section {
+        id: "section_1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks,
+    });
+    book.toc.push(crate::ir::TocItem {
+        title: "Chapter 1".to_string(),
+        target_section: "section_1".to_string(),
+        target_anchor: None,
+        children: Vec::new(),
+    });
+    book.page_list.push(crate::ir::PageEntry {
+        page_number: "1".to_string(),
+        target_section: "section_1".to_string(),
+        target_anchor: None,
+    });
+    book.footnotes
+        .insert("fn1".to_string(), "Note body.".to_string());
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("Colliding resource IDs must package cleanly and pass validate_container()");
+
+    // Verify zero duplicate (chunk_type, entity_id) collisions across all emitted entities
+    let mut seen_entity_keys = std::collections::HashSet::new();
+    for ent in &packager.entities {
+        assert!(
+            seen_entity_keys.insert((ent.chunk_type, ent.entity_id)),
+            "Duplicate entity key ({}, {}) emitted!",
+            ent.chunk_type,
+            ent.entity_id
+        );
+    }
+    // Verify all colliding resource IDs were remapped away from reserved names with unique SIDs
+    let mut seen_res_sids = std::collections::HashSet::new();
+    let mut seen_raw_sids = std::collections::HashSet::new();
+    for id in colliding_ids {
+        let alloc = packager
+            .resource_symbols
+            .get(id)
+            .unwrap_or_else(|| panic!("Missing allocated symbol for {}", id));
+        assert_ne!(
+            alloc.res_sym_name, id,
+            "Colliding ID {} must be remapped",
+            id
+        );
+        assert!(
+            seen_res_sids.insert(alloc.res_sym_id),
+            "Duplicate $164 SID for {}",
+            id
+        );
+        assert!(
+            seen_raw_sids.insert(alloc.raw_sym_id),
+            "Duplicate $417 SID for {}",
+            id
+        );
+    }
+
+    // Verify cover_image metadata in $490 uses remapped symbol name (res_1), NOT "style_p"
+    let cover_alloc = packager
+        .resource_symbols
+        .get("style_p")
+        .expect("style_p resource must be allocated");
+    assert_ne!(cover_alloc.res_sym_name, "style_p");
+    assert!(cover_alloc.res_sym_name.starts_with("res_"));
+
+    let meta_ent = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_BOOK_METADATA)
+        .expect("$490 book_metadata");
+    assert!(
+        meta_ent
+            .data
+            .windows(cover_alloc.res_sym_name.len())
+            .any(|w| w == cover_alloc.res_sym_name.as_bytes()),
+        "$490 cover_image must reference remapped symbol name {}",
+        cover_alloc.res_sym_name
+    );
+    assert!(
+        !meta_ent
+            .data
+            .windows(b"style_p".len())
+            .any(|w| w == b"style_p"),
+        "$490 cover_image must NOT leak raw colliding 'style_p'"
+    );
+}
+
+#[test]
+fn test_packager_p1_7_non_bmp_utf16_offsets_in_style_events_and_anchors() {
+    let mut book = BookIR::default();
+    book.metadata.title = "UTF-16 Emoji Book".to_string();
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Ch 1".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p1".to_string(),
+            spans: vec![
+                TextSpan {
+                    text: "📖 ".to_string(), // UTF-16 len = 3 (📖=2, ' '=1)
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "𠮷bold".to_string(), // UTF-16 offset = 3, len = 6 (𠮷=2, "bold"=4)
+                    style: Some("bold".to_string()),
+                    anchor_id: Some("mid_anchor".to_string()),
+                    href: Some("#mid_anchor".to_string()),
+                    ruby: None,
+                },
+            ],
+            style: None,
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("UTF-16 non-BMP book must pass validate_container()");
+
+    // Check $142 style_events have offset=3, length=6 (UTF-16 code units, NOT 2/5 scalar chars)
+    let story = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .expect("$259 storyline");
+    let vals = crate::ion::IonReader::new(&story.data)
+        .decode_all()
+        .unwrap();
+    let sym_content_list = KfxSymbol::ContentList as u32;
+    let sym_style_events = KfxSymbol::StyleEvents as u32;
+    let sym_offset = KfxSymbol::Offset as u32;
+    let sym_length = KfxSymbol::Length as u32;
+
+    let mut event_ranges = Vec::new();
+    if let IonValue::Struct(root) = &vals[0]
+        && let Some((_, IonValue::List(elems))) = root.iter().find(|(k, _)| *k == sym_content_list)
+        && let IonValue::Struct(elem) = &elems[0]
+        && let Some((_, IonValue::List(events))) = elem.iter().find(|(k, _)| *k == sym_style_events)
+    {
+        for ev in events {
+            if let IonValue::Struct(ef) = ev {
+                let off = ef
+                    .iter()
+                    .find(|(k, _)| *k == sym_offset)
+                    .and_then(|(_, v)| match v {
+                        IonValue::Int(n) => Some(*n),
+                        _ => None,
+                    });
+                let len = ef
+                    .iter()
+                    .find(|(k, _)| *k == sym_length)
+                    .and_then(|(_, v)| match v {
+                        IonValue::Int(n) => Some(*n),
+                        _ => None,
+                    });
+                event_ranges.push((off, len));
+            }
+        }
+    }
+    assert_eq!(event_ranges, vec![(Some(3), Some(6)), (Some(3), Some(6))]);
+
+    // Check $266 anchor $183 position offset == 3 (UTF-16 code units)
+    let anchor = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_ANCHOR)
+        .expect("$266 anchor");
+    let avals = crate::ion::IonReader::new(&anchor.data)
+        .decode_all()
+        .unwrap();
+    let sym_pos = KfxSymbol::Position as u32;
+    let mut anchor_off = None;
+    if let IonValue::Struct(af) = &avals[0]
+        && let Some((_, IonValue::Struct(pf))) = af.iter().find(|(k, _)| *k == sym_pos)
+    {
+        anchor_off = pf
+            .iter()
+            .find(|(k, _)| *k == sym_offset)
+            .map(|(_, v)| v.clone());
+    }
+    assert_eq!(anchor_off, Some(IonValue::Int(3)));
+}
+
+#[test]
+fn test_packager_p1_10_style_events_sorted_and_no_cross_chapter_bare_footnote_leak() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Sorting & Footnote Scope".to_string();
+    book.sections.push(Section {
+        id: "ch1".to_string(),
+        title: "Ch 1".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "p1".to_string(),
+            spans: vec![
+                TextSpan {
+                    text: "Link".to_string(), // offset 0, len 4 (link added in Pass 2)
+                    style: None,
+                    anchor_id: None,
+                    href: Some("ch2#fn1".to_string()),
+                    ruby: None,
+                },
+                TextSpan {
+                    text: " and ".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                },
+                TextSpan {
+                    text: "bold".to_string(), // offset 9, len 4 (bold added in Pass 1)
+                    style: Some("bold".to_string()),
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                },
+            ],
+            style: None,
+        }],
+    });
+    book.sections.push(Section {
+        id: "ch2".to_string(),
+        title: "Ch 2".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "fn1".to_string(),
+            spans: vec![TextSpan {
+                text: "Ch2 target".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            }],
+            style: None,
+        }],
+    });
+    // Bare "fn1" footnote belongs to ch1 (NOT ch2#fn1!)
+    book.footnotes
+        .insert("fn1".to_string(), "Ch1 private footnote.".to_string());
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("Must package & validate cleanly");
+
+    // 1. Verify $142 style_events in ch1 are sorted monotonically by (offset, length): (0,4) before (9,4)
+    let sym_content_list = KfxSymbol::ContentList as u32;
+    let sym_style_events = KfxSymbol::StyleEvents as u32;
+    let sym_offset = KfxSymbol::Offset as u32;
+    let sym_length = KfxSymbol::Length as u32;
+    let ch1_story = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .expect("ch1 storyline");
+    let vals = crate::ion::IonReader::new(&ch1_story.data)
+        .decode_all()
+        .unwrap();
+    let mut pairs = Vec::new();
+    if let IonValue::Struct(root) = &vals[0]
+        && let Some((_, IonValue::List(elems))) = root.iter().find(|(k, _)| *k == sym_content_list)
+        && let IonValue::Struct(elem) = &elems[0]
+        && let Some((_, IonValue::List(events))) = elem.iter().find(|(k, _)| *k == sym_style_events)
+    {
+        for ev in events {
+            if let IonValue::Struct(ef) = ev {
+                let off = ef
+                    .iter()
+                    .find(|(k, _)| *k == sym_offset)
+                    .and_then(|(_, v)| match v {
+                        IonValue::Int(n) => Some(*n),
+                        _ => None,
+                    })
+                    .unwrap();
+                let len = ef
+                    .iter()
+                    .find(|(k, _)| *k == sym_length)
+                    .and_then(|(_, v)| match v {
+                        IonValue::Int(n) => Some(*n),
+                        _ => None,
+                    })
+                    .unwrap();
+                pairs.push((off, len));
+            }
+        }
+    }
+    assert_eq!(pairs, vec![(0, 4), (9, 4)]);
+
+    // 2. Verify cross-chapter link `ch2#fn1` did NOT leak bare `fn1` popup into $597 $617 yj.note
+    for ad in packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_AUXILIARY_DATA)
+    {
+        let ad_vals = crate::ion::IonReader::new(&ad.data).decode_all().unwrap();
+        if let IonValue::Struct(fields) = &ad_vals[0] {
+            assert!(
+                !fields.iter().any(|(k, _)| *k == SYM_YJ_NOTE),
+                "Cross-chapter link ch2#fn1 must NOT leak bare 'fn1' footnote popup!"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_packager_p1_11_list_nested_image_renders_271_and_matches_254() {
+    let mut book = BookIR::default();
+    book.metadata.title = "List Image Book".to_string();
+    book.resources.insert(
+        "list_fig".to_string(),
+        crate::ir::ResourceAsset {
+            id: "list_fig".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            data: crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+        },
+    );
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![Block::List {
+            id: "ul1".to_string(),
+            ordered: false,
+            items: vec![
+                vec![Block::Paragraph {
+                    id: "li1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Before image".to_string(),
+                        ..Default::default()
+                    }],
+                    style: None,
+                }],
+                vec![Block::Image {
+                    id: "li_img".to_string(),
+                    resource_id: "list_fig".to_string(),
+                    alt: Some("List diagram".to_string()),
+                    width: None,
+                    height: None,
+                }],
+                vec![Block::Paragraph {
+                    id: "li2".to_string(),
+                    spans: vec![TextSpan {
+                        text: "After image".to_string(),
+                        ..Default::default()
+                    }],
+                    style: None,
+                }],
+            ],
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("List-nested image must render as $271 image and pass validate_container()");
+
+    // Verify the chapter storyline ($259) contains a $271 image element referencing list_fig
+    let sym_content_list = KfxSymbol::ContentList as u32;
+    let sym_type = KfxSymbol::Type as u32;
+    let sym_image = KfxSymbol::Image as u32;
+    let sym_text = KfxSymbol::Text as u32;
+    let mut chapter_elem_types = Vec::new();
+    let storylines: Vec<&KfxEntity> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_STORYLINE)
+        .collect();
+    // Cover storyline is index 0, sec1 storyline is index 1
+    assert_eq!(storylines.len(), 2);
+    let vals = crate::ion::IonReader::new(&storylines[1].data)
+        .decode_all()
+        .unwrap();
+    if let IonValue::Struct(root) = &vals[0]
+        && let Some((_, IonValue::List(elems))) = root.iter().find(|(k, _)| *k == sym_content_list)
+    {
+        for elem in elems {
+            if let IonValue::Struct(ef) = elem
+                && let Some((_, IonValue::Symbol(t))) = ef.iter().find(|(k, _)| *k == sym_type)
+            {
+                chapter_elem_types.push(*t);
+            }
+        }
+    }
+    assert_eq!(
+        chapter_elem_types,
+        vec![sym_text, sym_image, sym_text],
+        "Block::List around nested Block::Image must emit [text, $271 image, text]"
+    );
+
+    // Explicitly verify $419 container_entity_map $254 mandatory_dependencies includes list_fig
+    let list_fig_sid = packager
+        .resource_symbols
+        .get("list_fig")
+        .expect("list_fig resource allocated")
+        .res_sym_id;
+    let cem = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == KfxSymbol::ContainerEntityMap as u32)
+        .expect("$419 container_entity_map");
+    let cem_vals = crate::ion::IonReader::new(&cem.data).decode_all().unwrap();
+    let cem_inner = match &cem_vals[0] {
+        IonValue::Annotated(_, inner) => inner.as_ref(),
+        other => other,
+    };
+    let sym_deps = KfxSymbol::EntityDependencies as u32;
+    let sym_mand = KfxSymbol::MandatoryDependencies as u32;
+    let sym_id = KfxSymbol::Id as u32;
+    let sec_eids: Vec<u32> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_SECTION)
+        .map(|e| e.entity_id)
+        .collect();
+    assert_eq!(sec_eids.len(), 2, "Expected cover + sec1 sections");
+    let chapter_sec_sid = sec_eids[1];
+    let mut found_in_254 = false;
+    if let IonValue::Struct(fields) = cem_inner
+        && let Some((_, IonValue::List(dep_entries))) = fields.iter().find(|(k, _)| *k == sym_deps)
+    {
+        for dep in dep_entries {
+            if let IonValue::Struct(df) = dep
+                && df
+                    .iter()
+                    .any(|(k, v)| *k == sym_id && *v == IonValue::Symbol(chapter_sec_sid))
+                && let Some((_, IonValue::List(mand))) = df.iter().find(|(k, _)| *k == sym_mand)
+                && mand.contains(&IonValue::Symbol(list_fig_sid))
+            {
+                found_in_254 = true;
+            }
+        }
+    }
+    assert!(
+        found_in_254,
+        "$419 $254 mandatory_dependencies for chapter section {} must include list_fig resource SID {}",
+        chapter_sec_sid, list_fig_sid
+    );
+}

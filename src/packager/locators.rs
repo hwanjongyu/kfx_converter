@@ -233,21 +233,20 @@ impl<'a> KfxPackager<'a> {
         let has_built_storylines = self.entities.iter().any(|e| e.chunk_type == SYM_STORYLINE);
         for (idx, sec_pack) in section_data.iter().enumerate() {
             let mut img_syms = Vec::new();
-            if let Some(sec) = self.sections.get(idx) {
+            if has_built_storylines {
+                img_syms.extend(sec_pack.used_resources.iter().copied());
+            } else if let Some(sec) = self.sections.get(idx) {
                 let mut res_ids = Vec::new();
                 collect_img_res(&sec.blocks, &mut res_ids);
 
                 for r_id in res_ids {
-                    let target_id = if has_built_storylines {
-                        self.resolve_resource_key(&r_id)
-                    } else {
-                        Some(r_id)
-                    };
-                    if let Some(resolved) = target_id {
-                        let res_sym = symbols.intern(&resolved);
-                        if !img_syms.contains(&res_sym) {
-                            img_syms.push(res_sym);
-                        }
+                    let res_sym = self
+                        .resource_symbols
+                        .get(&r_id)
+                        .map(|a| a.res_sym_id)
+                        .unwrap_or_else(|| symbols.intern(&r_id));
+                    if !img_syms.contains(&res_sym) {
+                        img_syms.push(res_sym);
                     }
                 }
             }
@@ -274,19 +273,39 @@ impl<'a> KfxPackager<'a> {
         }
 
         // 2. external_resource -> raw_media dependencies
-        let mut sorted_res_keys: Vec<_> = self.book.resources.keys().collect();
-        sorted_res_keys.sort();
-        for res_id in sorted_res_keys {
-            let res_sym_id = symbols.intern(res_id);
-            let raw_path = format!("resource/{}", res_id);
-            let raw_sym_id = symbols.intern(&raw_path);
-            entity_dependencies.push(IonValue::Struct(vec![
-                (sym_id, IonValue::Symbol(res_sym_id)),
-                (
-                    sym_mandatory_dependencies,
-                    IonValue::List(vec![IonValue::Symbol(raw_sym_id)]),
-                ),
-            ]));
+        if !self.resource_symbols.is_empty() {
+            let mut sorted_allocs: Vec<(&String, &super::types::AllocatedResourceSym)> =
+                self.resource_symbols.iter().collect();
+            sorted_allocs.sort_by_key(|(a, _)| *a);
+            for (_, alloc) in sorted_allocs {
+                entity_dependencies.push(IonValue::Struct(vec![
+                    (sym_id, IonValue::Symbol(alloc.res_sym_id)),
+                    (
+                        sym_mandatory_dependencies,
+                        IonValue::List(vec![IonValue::Symbol(alloc.raw_sym_id)]),
+                    ),
+                ]));
+            }
+        } else {
+            let mut sorted_res_keys: Vec<_> = self
+                .book
+                .resources
+                .iter()
+                .filter_map(|(k, v)| v.is_supported_raster_image().then_some(k))
+                .collect();
+            sorted_res_keys.sort();
+            for res_id in sorted_res_keys {
+                let res_sym_id = symbols.intern(res_id);
+                let raw_path = format!("resource/{}", res_id);
+                let raw_sym_id = symbols.intern(&raw_path);
+                entity_dependencies.push(IonValue::Struct(vec![
+                    (sym_id, IonValue::Symbol(res_sym_id)),
+                    (
+                        sym_mandatory_dependencies,
+                        IonValue::List(vec![IonValue::Symbol(raw_sym_id)]),
+                    ),
+                ]));
+            }
         }
 
         let mut cem_fields = vec![(
@@ -342,7 +361,7 @@ mod tests {
         // without triggering #[derive(Clone)] on a 20,000-level Block::List inside KfxPackager::new.
         let empty_book = BookIR::default();
         let mut packager = KfxPackager::new(&empty_book, "EBOK");
-        packager.sections.push(Section {
+        packager.sections.to_mut().push(Section {
             id: "sec1".to_string(),
             title: "Section 1".to_string(),
             blocks: vec![
@@ -373,6 +392,7 @@ mod tests {
             story_sym_id: symbols.intern("story_1"),
             block_info: vec![(1001, 1)],
             outbound_anchors: Vec::new(),
+            used_resources: Vec::new(),
         };
 
         packager.build_container_entity_map(&[sec_pack], &mut symbols);

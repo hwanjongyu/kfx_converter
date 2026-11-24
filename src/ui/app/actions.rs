@@ -17,6 +17,7 @@ use gpui::*;
 
 const MAX_BATCH_WORKERS: usize = 2;
 const MAX_DROP_WORKERS: usize = 4;
+const MAX_TOTAL_CONVERSION_WORKERS: usize = 4;
 
 pub(super) struct PreparedBatchRun {
     pub run_generation: u64,
@@ -64,12 +65,25 @@ impl KindleStudio {
                     && (bp.active_tasks > 0
                         || bp.completed_tasks + bp.failed_tasks < bp.total_tasks)
             });
-        uncancelled_token || active_uncancelled_progress
+        self.batch_active_workers > 0 || uncancelled_token || active_uncancelled_progress
+    }
+
+    fn drop_queue_len(&self) -> usize {
+        let guard = match self.drop_queue.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.len()
+    }
+
+    fn drop_queue_is_empty(&self) -> bool {
+        self.drop_queue_len() == 0
     }
 
     pub(super) fn has_active_tasks(&self) -> bool {
         self.batch_active_workers > 0
             || self.drop_active_workers > 0
+            || !self.drop_queue_is_empty()
             || self.delete_in_progress
             || self.tasks.iter().any(|t| {
                 matches!(
@@ -579,6 +593,11 @@ impl KindleStudio {
         if self.is_batch_active() {
             return Err("A batch conversion is already in progress.".into());
         }
+        if self.drop_active_workers > 0 || !self.drop_queue_is_empty() {
+            return Err(
+                "Cannot start batch conversion while drag-and-drop conversions are active.".into(),
+            );
+        }
         if sync_to_kindle && !self.device.connected {
             return Err("Cannot transfer to Kindle: no Kindle device connected.".into());
         }
@@ -663,10 +682,12 @@ impl KindleStudio {
 
         let device = self.device.clone();
 
-        // Bounded worker pool: max 2 concurrent conversion workers to safeguard memory
+        // Bounded worker pool: max 2 concurrent batch workers within global 4-worker ceiling
         let queue = Arc::new(Mutex::new(queued_tasks));
         self.batch_queue = Some(queue.clone());
-        let num_workers = MAX_BATCH_WORKERS.min(count);
+        let available_budget =
+            MAX_TOTAL_CONVERSION_WORKERS.saturating_sub(self.drop_active_workers);
+        let num_workers = MAX_BATCH_WORKERS.min(available_budget).min(count);
         self.batch_active_workers = num_workers;
 
         Ok(PreparedBatchRun {
@@ -819,6 +840,7 @@ impl KindleStudio {
                             this.batch_cancel_token = None;
                             this.batch_queue = None;
                         }
+                        this.maybe_wake_drop_workers(cx);
                         cx.notify();
                     }
                 });
@@ -983,10 +1005,34 @@ impl KindleStudio {
             guard.len()
         };
 
-        let target_workers = MAX_DROP_WORKERS.min(queue_len);
-        let to_spawn = target_workers.saturating_sub(self.drop_active_workers);
+        let to_spawn = self.compute_drop_workers_to_spawn(queue_len);
         self.drop_active_workers += to_spawn;
         Ok(to_spawn)
+    }
+
+    pub(super) fn compute_drop_workers_to_spawn(&self, queue_len: usize) -> usize {
+        if queue_len == 0 {
+            return 0;
+        }
+        let desired_drop = MAX_DROP_WORKERS.min(self.drop_active_workers.saturating_add(queue_len));
+        let budget_for_drop =
+            MAX_TOTAL_CONVERSION_WORKERS.saturating_sub(self.batch_active_workers);
+        let target_workers = desired_drop.min(budget_for_drop);
+        target_workers.saturating_sub(self.drop_active_workers)
+    }
+
+    pub(super) fn claim_pending_drop_workers_state(&mut self) -> usize {
+        let queue_len = self.drop_queue_len();
+        let to_spawn = self.compute_drop_workers_to_spawn(queue_len);
+        self.drop_active_workers += to_spawn;
+        to_spawn
+    }
+
+    fn maybe_wake_drop_workers(&mut self, cx: &mut Context<Self>) {
+        let to_spawn = self.claim_pending_drop_workers_state();
+        if to_spawn > 0 {
+            self.spawn_drop_workers(to_spawn, cx);
+        }
     }
 
     fn enqueue_drop_epub_jobs(
@@ -995,8 +1041,8 @@ impl KindleStudio {
         run_settings: ConversionSettings,
         cx: &mut Context<Self>,
     ) {
+        let had_items = !items.is_empty();
         let to_spawn = match self.enqueue_drop_jobs_state(items, run_settings) {
-            Ok(0) => return,
             Ok(n) => n,
             Err(msg) => {
                 self.status_message = Some((msg, true));
@@ -1004,9 +1050,17 @@ impl KindleStudio {
                 return;
             }
         };
-        cx.notify();
+        if had_items {
+            cx.notify();
+        }
+        if to_spawn == 0 {
+            return;
+        }
+        self.spawn_drop_workers(to_spawn, cx);
+    }
 
-        for _ in 0..to_spawn {
+    fn spawn_drop_workers(&mut self, count: usize, cx: &mut Context<Self>) {
+        for _ in 0..count {
             let q = self.drop_queue.clone();
             cx.spawn(async move |this, cx| {
                 loop {
@@ -1084,6 +1138,7 @@ impl KindleStudio {
 
                 let _ = this.update(cx, |this, cx| {
                     this.drop_active_workers = this.drop_active_workers.saturating_sub(1);
+                    this.maybe_wake_drop_workers(cx);
                     cx.notify();
                 });
             })
@@ -1599,10 +1654,13 @@ mod tests {
             None,
             ConversionOutcome::Finished(ConversionResult {
                 output_path: PathBuf::from("/books/Zebra.kfx"),
+                total_bytes: 2048,
                 synced_to_device: false,
+                synced_device_path: None,
                 sync_error: None,
                 word_wise_glosses: None,
                 word_wise_error: None,
+                sdr_error: None,
             }),
         );
         assert!(studio.folder_data_epoch > epoch_before);
@@ -1708,10 +1766,13 @@ mod tests {
             None,
             ConversionOutcome::Finished(ConversionResult {
                 output_path: PathBuf::from("/books/Gamma.kfx"),
+                total_bytes: 3072,
                 synced_to_device: true,
+                synced_device_path: Some(PathBuf::from("/kindle/documents/Gamma.kfx")),
                 sync_error: None,
                 word_wise_glosses: Some(42),
                 word_wise_error: None,
+                sdr_error: None,
             }),
         );
         assert!(studio.files_data_epoch > prev_epoch);
@@ -1727,5 +1788,129 @@ mod tests {
                 mobi: 1,
             }
         );
+    }
+
+    #[test]
+    fn test_is_batch_active_blocks_while_cancelled_workers_draining() {
+        let mut studio = KindleStudio::new_for_test();
+        studio.folder_state.items = vec![
+            dummy_item(1, PathBuf::from("/books/One.epub"), true),
+            dummy_item(2, PathBuf::from("/books/Two.epub"), true),
+        ];
+
+        let prep = studio
+            .try_prepare_batch_run(false)
+            .expect("Batch should prepare");
+        assert_eq!(prep.num_workers, 2);
+        assert_eq!(studio.batch_active_workers, 2);
+        assert!(studio.is_batch_active());
+
+        // Cancel while workers are still draining: is_batch_active() must stay true
+        studio.cancel_batch_state();
+        assert!(studio.is_batch_active());
+        for item in &mut studio.folder_state.items {
+            item.is_selected = true;
+        }
+        assert!(
+            studio.try_prepare_batch_run(false).is_err(),
+            "Must reject new batch while cancelled workers are still draining"
+        );
+        assert!(
+            studio
+                .try_prepare_single_convert(Path::new("/books/One.epub"), false)
+                .is_err(),
+            "Must reject single convert while cancelled batch workers are still draining"
+        );
+
+        // Once draining workers finish, batch becomes inactive and a new batch can start
+        studio.batch_active_workers = 0;
+        studio.batch_cancel_token = None;
+        studio.batch_queue = None;
+        assert!(!studio.is_batch_active());
+        assert!(studio.try_prepare_batch_run(false).is_ok());
+    }
+
+    #[test]
+    fn test_drop_worker_scheduling_incremental_global_cap_and_wakeup() {
+        let mut studio = KindleStudio::new_for_test();
+        studio.folder_state.items = vec![dummy_item(1, PathBuf::from("/books/Batch.epub"), true)];
+
+        // 1. 1 active drop worker + 1 newly dropped book spawns 1 additional worker (not throttled to 0)
+        let first_spawn = studio
+            .enqueue_drop_jobs_state(
+                vec![(PathBuf::from("/books/Drop1.epub"), Some("1 KB".into()))],
+                ConversionSettings::default(),
+            )
+            .expect("Enqueue first drop job");
+        assert_eq!(first_spawn, 1);
+        assert_eq!(studio.drop_active_workers, 1);
+
+        // Simulate active worker popping Drop1 so queue is empty while 1 worker is busy
+        let popped = studio.drop_queue.lock().unwrap().pop_front();
+        assert!(popped.is_some());
+
+        let second_spawn = studio
+            .enqueue_drop_jobs_state(
+                vec![(PathBuf::from("/books/Drop2.epub"), Some("1 KB".into()))],
+                ConversionSettings::default(),
+            )
+            .expect("Enqueue second drop job");
+        assert_eq!(
+            second_spawn, 1,
+            "1 busy drop worker + 1 queued job must spawn 1 additional worker"
+        );
+        assert_eq!(studio.drop_active_workers, 2);
+
+        // 2. Starting a batch while drop conversions are active is rejected
+        assert!(
+            studio.try_prepare_batch_run(false).is_err(),
+            "Batch run must be rejected while drop workers/jobs are active"
+        );
+
+        // 3. Batch + drop obeys global MAX_TOTAL_CONVERSION_WORKERS (4)
+        studio.drop_queue.lock().unwrap().clear();
+        studio.drop_active_workers = 0;
+        studio.batch_active_workers = 2;
+        let under_batch_spawn = studio
+            .enqueue_drop_jobs_state(
+                vec![
+                    (PathBuf::from("/books/D1.epub"), Some("1 KB".into())),
+                    (PathBuf::from("/books/D2.epub"), Some("1 KB".into())),
+                    (PathBuf::from("/books/D3.epub"), Some("1 KB".into())),
+                ],
+                ConversionSettings::default(),
+            )
+            .expect("Enqueue drop jobs while batch active");
+        assert_eq!(under_batch_spawn, 2);
+        assert_eq!(
+            studio.batch_active_workers + studio.drop_active_workers,
+            4,
+            "Combined batch + drop active workers must never exceed 4"
+        );
+
+        // Additional drop job while saturated spawns 0 workers but still queues task
+        let tasks_before = studio.tasks.len();
+        let saturated_spawn = studio
+            .enqueue_drop_jobs_state(
+                vec![(PathBuf::from("/books/D4.epub"), Some("1 KB".into()))],
+                ConversionSettings::default(),
+            )
+            .expect("Enqueue while saturated");
+        assert_eq!(saturated_spawn, 0);
+        assert_eq!(studio.tasks.len(), tasks_before + 1);
+
+        // 4. Batch worker exit frees budget and wakes queued drop worker
+        studio.batch_active_workers = 1;
+        let woken_on_batch_exit = studio.claim_pending_drop_workers_state();
+        assert_eq!(woken_on_batch_exit, 1);
+        assert_eq!(studio.drop_active_workers, 3);
+        assert_eq!(studio.batch_active_workers + studio.drop_active_workers, 4);
+
+        // 5. Drop worker exit with remaining queued item wakes a replacement worker (zero stranding)
+        studio.batch_active_workers = 0;
+        studio.drop_active_workers = 0;
+        let woken_on_drop_exit = studio.claim_pending_drop_workers_state();
+        assert_eq!(woken_on_drop_exit, 4);
+        assert_eq!(studio.drop_active_workers, 4);
     }
 }

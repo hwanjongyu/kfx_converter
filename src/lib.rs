@@ -9,8 +9,10 @@ pub mod ion;
 pub mod ir;
 pub mod packager;
 pub mod pipeline;
+pub(crate) mod storage;
 pub mod symbols;
 pub mod sync;
+pub(crate) mod util;
 pub mod validator;
 
 pub use container::{ChunkEntry, ContainerError, ContainerHeader, KfxContainer, KfxEntity};

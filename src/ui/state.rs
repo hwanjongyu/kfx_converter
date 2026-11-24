@@ -547,6 +547,8 @@ pub fn apply_conversion_outcome_to_state(
         ConversionOutcome::Finished(res) => {
             if let Some(ref ww_err) = res.word_wise_error {
                 *status_message = Some((format_task_error("Word Wise", ww_err), true));
+            } else if let Some(ref sdr_err) = res.sdr_error {
+                *status_message = Some((format_task_error("Sidecar (.sdr)", sdr_err), true));
             } else if !res.synced_to_device
                 && let Some(ref sync_err) = res.sync_error
             {
@@ -575,17 +577,23 @@ pub fn apply_conversion_outcome_to_state(
             }
 
             if res.synced_to_device {
-                let kfx_name = res
+                let local_name = res
                     .output_path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let dev_path = device
-                    .path
-                    .as_ref()
-                    .map(|p| p.join(&kfx_name))
-                    .unwrap_or_else(|| res.output_path.clone());
+                let dev_path = res.synced_device_path.clone().unwrap_or_else(|| {
+                    device
+                        .path
+                        .as_ref()
+                        .map(|p| p.join(&local_name))
+                        .unwrap_or_else(|| res.output_path.clone())
+                });
+                let kfx_name = dev_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or(local_name);
                 let already_present = device_files.iter().any(|f| f.full_path == dev_path);
                 if !already_present {
                     let (item_title, item_author) =
@@ -605,18 +613,24 @@ pub fn apply_conversion_outcome_to_state(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
+                    let size_formatted = if res.total_bytes > 0 {
+                        format_file_size(res.total_bytes)
+                    } else {
+                        "Synced".into()
+                    };
                     device_files.push(KindleFile {
                         name: kfx_name,
                         title: item_title,
                         author: item_author,
                         format: "KFX".into(),
-                        size_formatted: "Synced".into(),
-                        size_bytes: 0,
+                        size_formatted,
+                        size_bytes: res.total_bytes,
                         modified: "Just now".into(),
                         modified_timestamp: now_ts,
                         full_path: dev_path,
                         has_word_wise: res.word_wise_glosses.is_some_and(|g| g > 0)
-                            && res.word_wise_error.is_none(),
+                            && res.word_wise_error.is_none()
+                            && res.sdr_error.is_none(),
                         has_sdr: true,
                     });
                 }
@@ -701,10 +715,39 @@ pub fn collect_incoming_epub_paths(path: &Path) -> Vec<(PathBuf, String)> {
 #[derive(Debug, Clone)]
 pub struct ConversionResult {
     pub output_path: PathBuf,
+    pub total_bytes: u64,
     pub synced_to_device: bool,
+    pub synced_device_path: Option<PathBuf>,
     pub sync_error: Option<String>,
     pub word_wise_glosses: Option<usize>,
     pub word_wise_error: Option<String>,
+    pub sdr_error: Option<String>,
+}
+
+pub(crate) fn build_conversion_options(
+    settings: &ConversionSettings,
+    device: &DeviceStatus,
+) -> kfx_converter::ConversionOptions {
+    let should_deploy = settings.auto_deploy && device.connected;
+    let device_root = if should_deploy {
+        device.root_path.clone().or_else(|| {
+            device
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .filter(|pp| !pp.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+        })
+    } else {
+        None
+    };
+
+    kfx_converter::ConversionOptions {
+        content_type: settings.content_type.clone(),
+        word_wise: settings.word_wise,
+        auto_deploy: should_deploy,
+        device_root,
+    }
 }
 
 /// Executes the complete EPUB to KFX conversion pipeline, including optional
@@ -718,22 +761,20 @@ pub fn convert_epub_file<F>(
 where
     F: Fn(f32, &str) + Send + Sync + 'static,
 {
-    let options = kfx_converter::ConversionOptions {
-        content_type: settings.content_type.clone(),
-        word_wise: settings.word_wise,
-        auto_deploy: settings.auto_deploy && device.connected,
-        device_root: None,
-    };
+    let options = build_conversion_options(settings, device);
 
     let report = kfx_converter::ConversionPipeline::run(input_path, None, &options, progress)
         .map_err(|e| e.to_string())?;
 
     Ok(ConversionResult {
         output_path: report.output_path,
+        total_bytes: report.total_bytes,
         synced_to_device: report.synced_to_device,
+        synced_device_path: report.synced_device_path,
         sync_error: report.sync_error,
         word_wise_glosses: report.word_wise_glosses,
         word_wise_error: report.word_wise_error,
+        sdr_error: report.sdr_error,
     })
 }
 
@@ -1509,10 +1550,13 @@ mod tests {
             &book_a,
             ConversionOutcome::Finished(ConversionResult {
                 output_path: PathBuf::from("/books/A.kfx"),
+                total_bytes: 4096,
                 synced_to_device: false,
+                synced_device_path: None,
                 sync_error: Some("MTP write timeout".into()),
                 word_wise_glosses: Some(0),
                 word_wise_error: Some("KLL failed".into()),
+                sdr_error: None,
             }),
         );
         assert!(matches!(tasks[0].status, TaskStatus::SyncFailed(_)));
@@ -1612,5 +1656,184 @@ mod tests {
             compare_authors_unknown_last("alice", "Bob"),
             std::cmp::Ordering::Less
         );
+    }
+
+    #[test]
+    fn test_build_conversion_options_wires_device_root() {
+        let settings_on = ConversionSettings {
+            content_type: "EBOK".into(),
+            word_wise: true,
+            auto_deploy: true,
+        };
+        let settings_off = ConversionSettings {
+            auto_deploy: false,
+            ..settings_on.clone()
+        };
+
+        // 1. Explicit root_path is wired directly when auto_deploy && connected
+        let dev_with_root = DeviceStatus {
+            connected: true,
+            model: "Kindle".into(),
+            path: Some(PathBuf::from("/mnt/kindle/documents")),
+            root_path: Some(PathBuf::from("/mnt/kindle")),
+            used_gb: 1.0,
+            total_gb: 16.0,
+        };
+        let opts = build_conversion_options(&settings_on, &dev_with_root);
+        assert!(opts.auto_deploy);
+        assert_eq!(opts.device_root, Some(PathBuf::from("/mnt/kindle")));
+
+        // 2. Missing root_path falls back to parent of device.path
+        let dev_path_only = DeviceStatus {
+            root_path: None,
+            ..dev_with_root.clone()
+        };
+        let opts_fallback = build_conversion_options(&settings_on, &dev_path_only);
+        assert!(opts_fallback.auto_deploy);
+        assert_eq!(
+            opts_fallback.device_root,
+            Some(PathBuf::from("/mnt/kindle"))
+        );
+
+        // 3. auto_deploy == false clears both auto_deploy and device_root
+        let opts_no_deploy = build_conversion_options(&settings_off, &dev_with_root);
+        assert!(!opts_no_deploy.auto_deploy);
+        assert!(opts_no_deploy.device_root.is_none());
+
+        // 4. Disconnected device clears both auto_deploy and device_root
+        let dev_disconnected = DeviceStatus {
+            connected: false,
+            ..dev_with_root
+        };
+        let opts_disconnected = build_conversion_options(&settings_on, &dev_disconnected);
+        assert!(!opts_disconnected.auto_deploy);
+        assert!(opts_disconnected.device_root.is_none());
+    }
+
+    #[test]
+    fn test_apply_conversion_outcome_uses_synced_device_path_total_bytes_and_sdr_error() {
+        let epub_con = PathBuf::from("/books/CON.epub");
+        let epub_sdr = PathBuf::from("/books/SdrWarn.epub");
+        let mut tasks = vec![
+            ConversionTask {
+                id: 1,
+                filename: "CON.epub".into(),
+                file_size_str: "10 KB".into(),
+                status: TaskStatus::Converting,
+                progress: 0.5,
+                word_wise: true,
+            },
+            ConversionTask {
+                id: 2,
+                filename: "SdrWarn.epub".into(),
+                file_size_str: "12 KB".into(),
+                status: TaskStatus::Converting,
+                progress: 0.5,
+                word_wise: true,
+            },
+        ];
+        let mut items = vec![
+            LocalEpubItem {
+                id: 1,
+                path: epub_con.clone(),
+                filename: "CON.epub".into(),
+                title: "CON".into(),
+                author: "Author".into(),
+                file_size_bytes: 10240,
+                file_size_str: "10 KB".into(),
+                modified_timestamp: 0,
+                modified_str: "Just now".into(),
+                is_selected: true,
+                status: LocalEpubStatus::Processing {
+                    stage: "Sync".into(),
+                    progress: 50,
+                },
+            },
+            LocalEpubItem {
+                id: 2,
+                path: epub_sdr.clone(),
+                filename: "SdrWarn.epub".into(),
+                title: "SdrWarn".into(),
+                author: "Author".into(),
+                file_size_bytes: 12288,
+                file_size_str: "12 KB".into(),
+                modified_timestamp: 0,
+                modified_str: "Just now".into(),
+                is_selected: true,
+                status: LocalEpubStatus::Processing {
+                    stage: "Sync".into(),
+                    progress: 50,
+                },
+            },
+        ];
+        let dev = DeviceStatus {
+            connected: true,
+            model: "Kindle".into(),
+            path: Some(PathBuf::from("/kindle/documents")),
+            root_path: Some(PathBuf::from("/kindle")),
+            used_gb: 1.0,
+            total_gb: 8.0,
+        };
+        let mut dev_files = Vec::new();
+        let mut status_msg = None;
+
+        // 1. Sanitized synced_device_path and non-zero total_bytes are preserved
+        let sanitized_dev_path = PathBuf::from("/kindle/documents/book_CON.kfx");
+        apply_conversion_outcome_to_state(
+            &mut tasks,
+            &mut items,
+            None,
+            &mut dev_files,
+            &dev,
+            &mut status_msg,
+            1,
+            &epub_con,
+            ConversionOutcome::Finished(ConversionResult {
+                output_path: PathBuf::from("/books/CON.kfx"),
+                total_bytes: 2048,
+                synced_to_device: true,
+                synced_device_path: Some(sanitized_dev_path.clone()),
+                sync_error: None,
+                word_wise_glosses: Some(25),
+                word_wise_error: None,
+                sdr_error: None,
+            }),
+        );
+        assert_eq!(dev_files.len(), 1);
+        assert_eq!(dev_files[0].full_path, sanitized_dev_path);
+        assert_eq!(dev_files[0].name, "book_CON.kfx");
+        assert_eq!(dev_files[0].size_bytes, 2048);
+        assert_eq!(dev_files[0].size_formatted, "2 KB");
+        assert!(dev_files[0].has_word_wise);
+        assert!(status_msg.is_none());
+
+        // 2. sdr_error surfaces cleanly and suppresses has_word_wise while 0 bytes falls back to "Synced"
+        apply_conversion_outcome_to_state(
+            &mut tasks,
+            &mut items,
+            None,
+            &mut dev_files,
+            &dev,
+            &mut status_msg,
+            2,
+            &epub_sdr,
+            ConversionOutcome::Finished(ConversionResult {
+                output_path: PathBuf::from("/books/SdrWarn.kfx"),
+                total_bytes: 0,
+                synced_to_device: true,
+                synced_device_path: Some(PathBuf::from("/kindle/documents/SdrWarn.kfx")),
+                sync_error: None,
+                word_wise_glosses: Some(25),
+                word_wise_error: None,
+                sdr_error: Some("read-only volume".into()),
+            }),
+        );
+        assert_eq!(dev_files.len(), 2);
+        assert_eq!(dev_files[1].size_bytes, 0);
+        assert_eq!(dev_files[1].size_formatted, "Synced");
+        assert!(!dev_files[1].has_word_wise);
+        assert!(status_msg.as_ref().is_some_and(|(m, is_err)| *is_err
+            && m.contains("Sidecar (.sdr):")
+            && m.contains("read-only volume")));
     }
 }

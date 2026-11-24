@@ -692,11 +692,12 @@ impl EpubReader {
         }
 
         // 6. Extract Table of Contents and Page List (NCX, NAV, or Section Headings Fallback)
-        let (toc, page_list) = nav::extract_navigation_with_budget(
+        let (toc, page_list) = nav::extract_navigation_with_budget_and_lc(
             archive,
             &opf_dir,
             &manifest,
             &href_to_section,
+            Some(&href_lc_to_section),
             &sections,
             &mut budget,
         )?;

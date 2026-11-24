@@ -4,9 +4,9 @@
 //! structures, including Word Wise SQLite database sidecars (`.kll`), 10-character canonical ASIN
 //! aliases, and multi-identifier lockscreen thumbnails across both local conversions and USB sync.
 
-use crate::sync::sanitize::{
-    collect_sidecar_stems, collect_thumbnail_stems, sanitize_asin, sanitize_cde_content_type,
-    sanitize_sidecar_stem,
+use crate::storage::{
+    collect_sidecar_stems, collect_thumbnail_stems, ensure_dir_exists_safe, sanitize_asin,
+    sanitize_cde_content_type, sanitize_sidecar_stem, write_bytes_with_mtp,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -40,12 +40,6 @@ impl<'a> SdrSidecarFiles<'a> {
 pub struct SdrDeployer;
 
 impl SdrDeployer {
-    /// Returns `true` when `path` targets a GVFS/MTP virtual filesystem mount or URI.
-    fn is_mtp_path(path: &Path) -> bool {
-        let s = path.to_string_lossy();
-        s.contains("/gvfs/mtp:") || s.starts_with("mtp://") || s.starts_with("gio://")
-    }
-
     /// Sanitizes an untrusted language tag into a safe filename token (`<= 32` ASCII bytes).
     fn sanitize_language_tag(lang: &str) -> String {
         let mut clean: String = lang
@@ -95,100 +89,21 @@ impl SdrDeployer {
         lang_tags
     }
 
-    /// Prepares a destination file path for overwriting, stripping read-only permissions if present.
-    fn prepare_for_overwrite(path: &Path) {
-        if let Ok(metadata) = std::fs::symlink_metadata(path)
-            && !metadata.file_type().is_symlink()
-            && metadata.permissions().readonly()
-        {
-            let mut perms = metadata.permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(path, perms);
-        }
-    }
-
-    fn run_gio_mkdir(dir: &Path) -> std::io::Result<()> {
-        let output = std::process::Command::new("gio")
-            .arg("mkdir")
-            .arg("-p")
-            .arg("--")
-            .arg(dir)
-            .output()?;
-        if output.status.success() || dir.is_dir() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(std::io::Error::other(format!(
-                "gio mkdir -p failed for {:?} (status {:?}): {}",
-                dir,
-                output.status.code(),
-                stderr.trim()
-            )))
-        }
-    }
-
-    /// Ensures a target directory exists, using `gio mkdir -p --` on GVFS/MTP paths
-    /// and `std::fs::create_dir_all` on local filesystems.
+    /// Ensures a target directory exists safely, using bounded `gio mkdir -p --` on GVFS/MTP paths
+    /// and symlink-rejecting directory creation on local filesystems.
     pub fn ensure_dir_exists(dir: &Path) -> std::io::Result<()> {
-        let s = dir.to_string_lossy();
-        if s.starts_with("gio://") || s.starts_with("mtp://") {
-            return Self::run_gio_mkdir(dir);
-        }
-        if dir.is_dir() {
-            return Ok(());
-        }
-        match std::fs::create_dir_all(dir) {
-            Ok(()) => Ok(()),
-            Err(_) if Self::is_mtp_path(dir) => Self::run_gio_mkdir(dir),
-            Err(err) => Err(err),
-        }
+        ensure_dir_exists_safe(dir)
     }
 
     /// Safely writes bytes to a file inside the `.sdr` directory, handling pre-existing read-only permissions
-    /// and performing atomic file persistence via a staged temporary file (or `gio copy` on GVFS MTP).
+    /// and performing atomic file persistence via a staged temporary file (or bounded `gio copy` on GVFS MTP).
     #[cfg_attr(not(test), allow(dead_code))]
     fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Self::write_file_with_mtp(path, bytes, true)
     }
 
     fn write_file_with_mtp(path: &Path, bytes: &[u8], lock_mtp: bool) -> std::io::Result<()> {
-        if Self::is_mtp_path(path) {
-            let res = if lock_mtp {
-                crate::sync::transfer::write_bytes(path, bytes)
-            } else {
-                crate::sync::transfer::write_bytes_unlocked(path, bytes)
-            };
-            return res.map_err(|e| match e {
-                crate::sync::SyncError::Io(io_err) => io_err,
-                other => std::io::Error::other(other.to_string()),
-            });
-        }
-
-        match std::fs::symlink_metadata(path) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("Refusing to overwrite symlink destination: {:?}", path),
-                ));
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-
-        let parent = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        let mut tmp_file = tempfile::Builder::new()
-            .prefix(".sdr_tmp.")
-            .tempfile_in(parent)?;
-        std::io::Write::write_all(&mut tmp_file, bytes)?;
-        std::io::Write::flush(&mut tmp_file)?;
-        Self::prepare_for_overwrite(path);
-        tmp_file.persist(path).map_err(|e| e.error)?;
-        Ok(())
+        write_bytes_with_mtp(path, bytes, lock_mtp)
     }
 
     /// Deploys all companion sidecar files into the target `.sdr` directory.
@@ -526,5 +441,40 @@ mod tests {
 
         assert!(dot_thumbs.is_dir());
         assert!(sys_thumbs.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sdr_ensure_dir_exists_and_deploy_reject_symlinked_sdr_dir() {
+        use std::io::ErrorKind;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside_dir = temp.path().join("outside_target");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let sdr_link = temp.path().join("Book.sdr");
+        symlink(&outside_dir, &sdr_link).unwrap();
+
+        let err_dir = SdrDeployer::ensure_dir_exists(&sdr_link).unwrap_err();
+        assert_eq!(err_dir.kind(), ErrorKind::PermissionDenied);
+
+        let err_nested = SdrDeployer::ensure_dir_exists(&sdr_link.join("nested")).unwrap_err();
+        assert_eq!(err_nested.kind(), ErrorKind::PermissionDenied);
+
+        let err_deploy = SdrDeployer::deploy(
+            &sdr_link,
+            "B00SYMLINKDIR",
+            None,
+            Some("EBOK"),
+            Some("en"),
+            Some(b"JPEG"),
+            Some(b"KLL"),
+        )
+        .unwrap_err();
+        assert_eq!(err_deploy.kind(), ErrorKind::PermissionDenied);
+        assert!(
+            std::fs::read_dir(&outside_dir).unwrap().next().is_none(),
+            "Outside directory targeted by symlinked .sdr must remain untouched"
+        );
     }
 }

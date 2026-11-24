@@ -155,7 +155,32 @@ fn allocate_unique_symbol(symbols: &mut LocalSymbols, prefix: &str, counter: &mu
     }
 }
 
+fn extract_event_offset_len(ev: &IonValue, sym_offset: u32, sym_length: u32) -> (i64, i64) {
+    if let IonValue::Struct(fields) = ev {
+        let off = fields
+            .iter()
+            .find(|(k, _)| *k == sym_offset)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(i64::MAX);
+        let len = fields
+            .iter()
+            .find(|(k, _)| *k == sym_length)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(i64::MAX);
+        (off, len)
+    } else {
+        (i64::MAX, i64::MAX)
+    }
+}
+
 /// Extracts plain text, inline style events, anchor offsets, and pending link spans starting at `base_offset`.
+/// All offsets and lengths are measured in UTF-16 code units (`str_utf16_len`).
 fn extract_style_events_with_base(
     spans: &[TextSpan],
     inherited: &str,
@@ -170,7 +195,7 @@ fn extract_style_events_with_base(
     let mut offset = base_offset;
 
     for span in spans {
-        let span_len = span.text.chars().count();
+        let span_len = crate::ir::str_utf16_len(&span.text);
         if let Some(ref anchor) = span.anchor_id {
             let clean_anchor = anchor.trim().trim_start_matches('#').to_string();
             if !clean_anchor.is_empty() {
@@ -261,7 +286,7 @@ fn extract_style_events_with_base(
                         .text
                         .chars()
                         .next()
-                        .is_some_and(crate::epub::is_opening_quote);
+                        .is_some_and(crate::util::is_opening_quote);
                 let is_two_char = has_token(st, "dropcap_2") || has_quote;
                 let is_l2 = has_token(st, "dropcap_l2");
                 let is_bold = span_bold_override.unwrap_or(false);
@@ -333,8 +358,9 @@ fn extract_style_events_with_base(
     }
 }
 
-/// Iteratively extracts text, style events, anchor offsets, and pending links from `Block::List`
-/// in O(1) call-stack space, matching `Block::plain_text()` character-for-character.
+/// Iteratively extracts text, style events, anchor offsets, and pending links from a
+/// `Block::List` containing no nested images in O(1) call-stack space, matching `Block::plain_text()`
+/// character-for-character and using UTF-16 code-unit offsets.
 fn extract_list_block(
     block: &Block,
     styles: &StyleSymMap,
@@ -390,7 +416,7 @@ fn extract_list_block(
                         syms,
                     );
                     full_text.push_str(&extracted.full_text);
-                    char_offset += extracted.full_text.chars().count();
+                    char_offset += crate::ir::str_utf16_len(&extracted.full_text);
                     style_events.extend(extracted.style_events);
                     anchors.extend(extracted.anchors);
                     pending_links.extend(extracted.pending_links);
@@ -401,7 +427,7 @@ fn extract_list_block(
                     }
                     if let Some(a) = alt {
                         full_text.push_str(a);
-                        char_offset += a.chars().count();
+                        char_offset += crate::ir::str_utf16_len(a);
                     }
                 }
                 Block::HorizontalRule => {
@@ -423,7 +449,7 @@ fn extract_list_block(
                                 char_offset += 1;
                             }
                             full_text.push_str(cell);
-                            char_offset += cell.chars().count();
+                            char_offset += crate::ir::str_utf16_len(cell);
                         }
                     }
                 }
@@ -438,6 +464,150 @@ fn extract_list_block(
         anchors,
         pending_links,
     }
+}
+
+enum ListSegment<'b> {
+    Text(ExtractedBlockRuns),
+    Image {
+        block: &'b Block,
+        leading_anchors: Vec<String>,
+    },
+}
+
+/// Iteratively segments a `Block::List` containing nested `Block::Image`s in O(1) call-stack space,
+/// flushing accumulated text runs around each image so images render as real `$271 image` elements
+/// while maintaining exact 1:1 PID parity with `WordWiseBuilder`.
+fn extract_list_segments<'b>(
+    block: &'b Block,
+    styles: &StyleSymMap,
+    syms: &StorylineSymIds,
+) -> (Vec<ListSegment<'b>>, Vec<String>) {
+    let mut stack = vec![block];
+    let mut segments: Vec<ListSegment<'b>> = Vec::new();
+
+    let mut full_text = String::new();
+    let mut char_offset = 0usize;
+    let mut style_events = Vec::new();
+    let mut anchors: Vec<(String, usize)> = Vec::new();
+    let mut pending_links = Vec::new();
+    let mut need_sep = false;
+
+    while let Some(current) = stack.pop() {
+        match current {
+            Block::List { id, items, .. } => {
+                if !id.is_empty() {
+                    anchors.push((id.clone(), char_offset));
+                }
+                for item in items.iter().rev() {
+                    for child in item.iter().rev() {
+                        stack.push(child);
+                    }
+                }
+            }
+            Block::Image { .. } => {
+                let leading_anchors = if !full_text.is_empty() {
+                    segments.push(ListSegment::Text(ExtractedBlockRuns {
+                        full_text: std::mem::take(&mut full_text),
+                        style_events: std::mem::take(&mut style_events),
+                        anchors: std::mem::take(&mut anchors),
+                        pending_links: std::mem::take(&mut pending_links),
+                    }));
+                    char_offset = 0;
+                    Vec::new()
+                } else {
+                    style_events.clear();
+                    pending_links.clear();
+                    char_offset = 0;
+                    std::mem::take(&mut anchors)
+                        .into_iter()
+                        .map(|(a, _)| a)
+                        .collect()
+                };
+                need_sep = false;
+                segments.push(ListSegment::Image {
+                    block: current,
+                    leading_anchors,
+                });
+            }
+            Block::Paragraph { id, spans, style }
+            | Block::Heading {
+                id, spans, style, ..
+            } => {
+                let has_text = spans.iter().any(|s| !s.text.is_empty());
+                if has_text && need_sep {
+                    full_text.push('\n');
+                    char_offset += 1;
+                }
+                if !id.is_empty() {
+                    anchors.push((id.clone(), char_offset));
+                }
+                let inherited = inherited_text_tokens(
+                    style.as_deref(),
+                    matches!(current, Block::Paragraph { .. }),
+                );
+                let extracted =
+                    extract_style_events_with_base(spans, &inherited, char_offset, styles, syms);
+                if !extracted.full_text.is_empty() {
+                    full_text.push_str(&extracted.full_text);
+                    char_offset += crate::ir::str_utf16_len(&extracted.full_text);
+                    need_sep = true;
+                }
+                style_events.extend(extracted.style_events);
+                anchors.extend(extracted.anchors);
+                pending_links.extend(extracted.pending_links);
+            }
+            Block::HorizontalRule => {
+                if need_sep {
+                    full_text.push('\n');
+                    char_offset += 1;
+                }
+                full_text.push_str("---");
+                char_offset += 3;
+                need_sep = true;
+            }
+            Block::Table { id, rows } => {
+                let piece = current.plain_text();
+                if !piece.is_empty() && need_sep {
+                    full_text.push('\n');
+                    char_offset += 1;
+                }
+                if !id.is_empty() {
+                    anchors.push((id.clone(), char_offset));
+                }
+                if !piece.is_empty() {
+                    for (r_idx, r) in rows.iter().enumerate() {
+                        if r_idx > 0 {
+                            full_text.push('\n');
+                            char_offset += 1;
+                        }
+                        for (c_idx, cell) in r.iter().enumerate() {
+                            if c_idx > 0 {
+                                full_text.push('\t');
+                                char_offset += 1;
+                            }
+                            full_text.push_str(cell);
+                            char_offset += crate::ir::str_utf16_len(cell);
+                        }
+                    }
+                    need_sep = true;
+                }
+            }
+        }
+    }
+
+    let trailing_anchors = if !full_text.is_empty() {
+        segments.push(ListSegment::Text(ExtractedBlockRuns {
+            full_text,
+            style_events,
+            anchors,
+            pending_links,
+        }));
+        Vec::new()
+    } else {
+        anchors.into_iter().map(|(a, _)| a).collect()
+    };
+
+    (segments, trailing_anchors)
 }
 
 impl<'a> KfxPackager<'a> {
@@ -468,7 +638,7 @@ impl<'a> KfxPackager<'a> {
         &self,
         source_raw_id: &str,
         raw_href: &str,
-        is_noteref: bool,
+        _is_noteref: bool,
     ) -> Option<(String, String)> {
         if !matches!(classify_uri(raw_href), Some(UriKind::InternalOrRelative)) {
             return None;
@@ -481,7 +651,7 @@ impl<'a> KfxPackager<'a> {
         let sec_part = sec_part_raw.trim();
         let frag = frag_raw_opt
             .map(|f| {
-                crate::epub::archive::decode_percent(f.trim().trim_start_matches('#'))
+                crate::util::decode_percent(f.trim().trim_start_matches('#'))
                     .trim()
                     .to_string()
             })
@@ -518,7 +688,12 @@ impl<'a> KfxPackager<'a> {
             }
         }
 
-        if (is_noteref || self.book.footnotes.contains_key(&frag))
+        let allow_bare_fallback = sec_part.is_empty()
+            || sec_part == source_raw_id
+            || super::navigation::strip_part_suffix(sec_part)
+                == super::navigation::strip_part_suffix(source_raw_id)
+            || sec_part == "endnotes";
+        if allow_bare_fallback
             && let Some(popup_text) = self.book.footnotes.get(&frag)
             && !popup_text.trim().is_empty()
         {
@@ -536,6 +711,8 @@ impl<'a> KfxPackager<'a> {
         style_events: Vec<IonValue>,
         pending_links: Vec<PendingLink>,
         symbols: &mut LocalSymbols,
+        content_chunk_syms: &mut HashMap<usize, u32>,
+        content_sym_counter: &mut usize,
         syms: &StorylineSymIds,
         text_acc: &mut TextAccumulator,
         used_styles: &mut HashSet<u32>,
@@ -544,9 +721,10 @@ impl<'a> KfxPackager<'a> {
         elements: &mut Vec<PendingStoryElement>,
     ) {
         let (chunk_num, chunk_idx) = text_acc.push(full_text);
-        let chunk_name = format!("content_{}", chunk_num);
-        let chunk_sym_id = symbols.intern(&chunk_name);
-        let pid_len = full_text.chars().count().max(1);
+        let chunk_sym_id = *content_chunk_syms
+            .entry(chunk_num)
+            .or_insert_with(|| allocate_unique_symbol(symbols, "content", content_sym_counter));
+        let pid_len = crate::ir::str_utf16_len(full_text).max(1);
         block_info.push((block_eid, pid_len));
         *running_pid += pid_len;
         used_styles.insert(base_style);
@@ -572,12 +750,131 @@ impl<'a> KfxPackager<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn stage_image_block(
+        &mut self,
+        block_eid: u32,
+        block_start_pid: usize,
+        block: &Block,
+        leading_anchors: &[String],
+        section_keys: (&str, &str, &str),
+        is_cover: bool,
+        symbols: &mut LocalSymbols,
+        content_chunk_syms: &mut HashMap<usize, u32>,
+        content_sym_counter: &mut usize,
+        styles: &StyleSymMap,
+        syms: &StorylineSymIds,
+        text_acc: &mut TextAccumulator,
+        used_styles: &mut HashSet<u32>,
+        used_resources: &mut Vec<u32>,
+        block_info: &mut Vec<(u32, usize)>,
+        running_pid: &mut usize,
+        elements: &mut Vec<PendingStoryElement>,
+    ) {
+        let Block::Image {
+            id,
+            resource_id,
+            alt,
+            ..
+        } = block
+        else {
+            return;
+        };
+
+        for anc in leading_anchors {
+            Self::register_anchor_target(
+                &mut self.anchor_targets,
+                &mut self.global_anchor_targets,
+                section_keys,
+                anc,
+                (block_eid, block_start_pid, 0),
+            );
+        }
+        if !id.is_empty() {
+            Self::register_anchor_target(
+                &mut self.anchor_targets,
+                &mut self.global_anchor_targets,
+                section_keys,
+                id,
+                (block_eid, block_start_pid, 0),
+            );
+        }
+
+        if let Some(resolved_res_id) = self.resolve_resource_key(resource_id) {
+            let alt_text = alt.clone().unwrap_or_default();
+            let pid_len = block.yellowjacket_pid_len(true);
+            block_info.push((block_eid, pid_len));
+            *running_pid += pid_len;
+            self.image_block_eids.insert(block_eid);
+
+            let res_sym_id = self
+                .resource_symbols
+                .get(&resolved_res_id)
+                .map(|a| a.res_sym_id)
+                .unwrap_or_else(|| symbols.intern(&resolved_res_id));
+            if !used_resources.contains(&res_sym_id) {
+                used_resources.push(res_sym_id);
+            }
+
+            let is_tiny_icon = self
+                .book
+                .resources
+                .get(&resolved_res_id)
+                .and_then(|a| crate::enhancements::CoverOptimizer::get_image_dimensions(&a.data))
+                .is_some_and(|(w, h)| w <= 64 && h <= 64);
+
+            let img_style = if is_cover || is_tiny_icon {
+                styles.cover_img
+            } else {
+                styles.img
+            };
+            used_styles.insert(img_style);
+
+            let mut img_fields = vec![
+                (syms.id, IonValue::Int(block_eid as i64)),
+                (syms.style, IonValue::Symbol(img_style)),
+                (syms.type_key, IonValue::Symbol(syms.type_image)),
+                (syms.resource_name, IonValue::Symbol(res_sym_id)),
+            ];
+            if !alt_text.is_empty() {
+                img_fields.push((syms.alt_text, IonValue::String(alt_text)));
+            }
+
+            elements.push(PendingStoryElement {
+                block_eid,
+                elem_fields: img_fields,
+                style_events: Vec::new(),
+                pending_links: Vec::new(),
+            });
+        } else {
+            let fallback_text = Block::image_fallback_text(alt.as_deref());
+            Self::stage_text_element(
+                block_eid,
+                styles.p,
+                fallback_text,
+                Vec::new(),
+                Vec::new(),
+                symbols,
+                content_chunk_syms,
+                content_sym_counter,
+                syms,
+                text_acc,
+                used_styles,
+                block_info,
+                running_pid,
+                elements,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn process_section_pass1(
         &mut self,
         idx: usize,
         sec: &Section,
         is_cover: bool,
         symbols: &mut LocalSymbols,
+        content_chunk_syms: &mut HashMap<usize, u32>,
+        content_sym_counter: &mut usize,
         styles: &StyleSymMap,
         syms: &StorylineSymIds,
         text_acc: &mut TextAccumulator,
@@ -616,6 +913,7 @@ impl<'a> KfxPackager<'a> {
 
         let mut block_info = Vec::new();
         let mut elements = Vec::new();
+        let mut used_resources = Vec::new();
         let norm_sec_path = Self::normalize_ir_path(&raw_name);
 
         for block in &sec.blocks {
@@ -676,6 +974,8 @@ impl<'a> KfxPackager<'a> {
                         extracted.style_events,
                         extracted.pending_links,
                         symbols,
+                        content_chunk_syms,
+                        content_sym_counter,
                         syms,
                         text_acc,
                         used_styles,
@@ -743,6 +1043,8 @@ impl<'a> KfxPackager<'a> {
                         extracted.style_events,
                         extracted.pending_links,
                         symbols,
+                        content_chunk_syms,
+                        content_sym_counter,
                         syms,
                         text_acc,
                         used_styles,
@@ -757,77 +1059,48 @@ impl<'a> KfxPackager<'a> {
                 // MUST include sym_style ($157) referencing styles.img to establish bounding box width and center alignment.
                 // If the referenced resource is absent from `self.book.resources`, emit a safe text fallback
                 // rather than a dangling `$175` reference.
-                Block::Image {
-                    id,
-                    resource_id,
-                    alt,
-                    ..
-                } => {
-                    if !id.is_empty() {
-                        Self::register_anchor_target(
-                            &mut self.anchor_targets,
-                            &mut self.global_anchor_targets,
-                            (&raw_name, &sec_name, &norm_sec_path),
-                            id,
-                            (block_eid, block_start_pid, 0),
-                        );
-                    }
-
-                    if let Some(resolved_res_id) = self.resolve_resource_key(resource_id) {
-                        let alt_text = alt.clone().unwrap_or_default();
-                        let pid_len = alt_text.chars().count().max(1);
-                        block_info.push((block_eid, pid_len));
-                        *running_pid += pid_len;
-                        self.image_block_eids.insert(block_eid);
-
-                        let res_sym_id = symbols.intern(&resolved_res_id);
-
-                        let is_tiny_icon = self
-                            .book
-                            .resources
-                            .get(&resolved_res_id)
-                            .and_then(|a| {
-                                crate::enhancements::CoverOptimizer::get_image_dimensions(&a.data)
-                            })
-                            .is_some_and(|(w, h)| w <= 64 && h <= 64);
-
-                        let img_style = if is_cover || is_tiny_icon {
-                            styles.cover_img
-                        } else {
-                            styles.img
-                        };
-                        used_styles.insert(img_style);
-
-                        let mut img_fields = vec![
-                            (syms.id, IonValue::Int(block_eid as i64)),
-                            (syms.style, IonValue::Symbol(img_style)),
-                            (syms.type_key, IonValue::Symbol(syms.type_image)),
-                            (syms.resource_name, IonValue::Symbol(res_sym_id)),
-                        ];
-                        if !alt_text.is_empty() {
-                            img_fields.push((syms.alt_text, IonValue::String(alt_text)));
+                Block::Image { .. } => {
+                    self.stage_image_block(
+                        block_eid,
+                        block_start_pid,
+                        block,
+                        &[],
+                        (&raw_name, &sec_name, &norm_sec_path),
+                        is_cover,
+                        symbols,
+                        content_chunk_syms,
+                        content_sym_counter,
+                        styles,
+                        syms,
+                        text_acc,
+                        used_styles,
+                        &mut used_resources,
+                        &mut block_info,
+                        running_pid,
+                        &mut elements,
+                    );
+                }
+                Block::List { .. } => {
+                    if !block.contains_image() {
+                        let extracted = extract_list_block(block, styles, syms);
+                        for (anc, anc_off) in extracted.anchors {
+                            Self::register_anchor_target(
+                                &mut self.anchor_targets,
+                                &mut self.global_anchor_targets,
+                                (&raw_name, &sec_name, &norm_sec_path),
+                                &anc,
+                                (block_eid, block_start_pid + anc_off, anc_off),
+                            );
                         }
-
-                        elements.push(PendingStoryElement {
-                            block_eid,
-                            elem_fields: img_fields,
-                            style_events: Vec::new(),
-                            pending_links: Vec::new(),
-                        });
-                    } else {
-                        let fallback_text = alt
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("[Image]")
-                            .to_string();
                         Self::stage_text_element(
                             block_eid,
                             styles.p,
-                            &fallback_text,
-                            Vec::new(),
-                            Vec::new(),
+                            &extracted.full_text,
+                            extracted.style_events,
+                            extracted.pending_links,
                             symbols,
+                            content_chunk_syms,
+                            content_sym_counter,
                             syms,
                             text_acc,
                             used_styles,
@@ -835,33 +1108,91 @@ impl<'a> KfxPackager<'a> {
                             running_pid,
                             &mut elements,
                         );
+                    } else {
+                        let (segments, trailing_anchors) =
+                            extract_list_segments(block, styles, syms);
+                        let mut last_seg_target: Option<(u32, usize, usize)> = None;
+                        for (seg_idx, seg) in segments.into_iter().enumerate() {
+                            let seg_eid = if seg_idx == 0 {
+                                block_eid
+                            } else {
+                                self.alloc_eid()
+                            };
+                            let seg_start_pid = *running_pid;
+                            match seg {
+                                ListSegment::Text(extracted) => {
+                                    for (anc, anc_off) in extracted.anchors {
+                                        Self::register_anchor_target(
+                                            &mut self.anchor_targets,
+                                            &mut self.global_anchor_targets,
+                                            (&raw_name, &sec_name, &norm_sec_path),
+                                            &anc,
+                                            (seg_eid, seg_start_pid + anc_off, anc_off),
+                                        );
+                                    }
+                                    let seg_utf16_len =
+                                        crate::ir::str_utf16_len(&extracted.full_text);
+                                    Self::stage_text_element(
+                                        seg_eid,
+                                        styles.p,
+                                        &extracted.full_text,
+                                        extracted.style_events,
+                                        extracted.pending_links,
+                                        symbols,
+                                        content_chunk_syms,
+                                        content_sym_counter,
+                                        syms,
+                                        text_acc,
+                                        used_styles,
+                                        &mut block_info,
+                                        running_pid,
+                                        &mut elements,
+                                    );
+                                    last_seg_target = Some((
+                                        seg_eid,
+                                        seg_start_pid + seg_utf16_len,
+                                        seg_utf16_len,
+                                    ));
+                                }
+                                ListSegment::Image {
+                                    block: img_block,
+                                    leading_anchors,
+                                } => {
+                                    self.stage_image_block(
+                                        seg_eid,
+                                        seg_start_pid,
+                                        img_block,
+                                        &leading_anchors,
+                                        (&raw_name, &sec_name, &norm_sec_path),
+                                        is_cover,
+                                        symbols,
+                                        content_chunk_syms,
+                                        content_sym_counter,
+                                        styles,
+                                        syms,
+                                        text_acc,
+                                        used_styles,
+                                        &mut used_resources,
+                                        &mut block_info,
+                                        running_pid,
+                                        &mut elements,
+                                    );
+                                    last_seg_target = Some((seg_eid, seg_start_pid, 0));
+                                }
+                            }
+                        }
+                        if let Some(target) = last_seg_target {
+                            for anc in trailing_anchors {
+                                Self::register_anchor_target(
+                                    &mut self.anchor_targets,
+                                    &mut self.global_anchor_targets,
+                                    (&raw_name, &sec_name, &norm_sec_path),
+                                    &anc,
+                                    target,
+                                );
+                            }
+                        }
                     }
-                }
-                Block::List { .. } => {
-                    let extracted = extract_list_block(block, styles, syms);
-                    for (anc, anc_off) in extracted.anchors {
-                        Self::register_anchor_target(
-                            &mut self.anchor_targets,
-                            &mut self.global_anchor_targets,
-                            (&raw_name, &sec_name, &norm_sec_path),
-                            &anc,
-                            (block_eid, block_start_pid + anc_off, anc_off),
-                        );
-                    }
-                    Self::stage_text_element(
-                        block_eid,
-                        styles.p,
-                        &extracted.full_text,
-                        extracted.style_events,
-                        extracted.pending_links,
-                        symbols,
-                        syms,
-                        text_acc,
-                        used_styles,
-                        &mut block_info,
-                        running_pid,
-                        &mut elements,
-                    );
                 }
                 Block::Table { .. } | Block::HorizontalRule => {
                     if let Block::Table { id, .. } = block
@@ -883,6 +1214,8 @@ impl<'a> KfxPackager<'a> {
                         Vec::new(),
                         Vec::new(),
                         symbols,
+                        content_chunk_syms,
+                        content_sym_counter,
                         syms,
                         text_acc,
                         used_styles,
@@ -903,6 +1236,8 @@ impl<'a> KfxPackager<'a> {
                 Vec::new(),
                 Vec::new(),
                 symbols,
+                content_chunk_syms,
+                content_sym_counter,
                 syms,
                 text_acc,
                 used_styles,
@@ -958,6 +1293,7 @@ impl<'a> KfxPackager<'a> {
             story_sym_id,
             block_info,
             outbound_anchors: Vec::new(),
+            used_resources,
         });
 
         pending_storylines.push(PendingStoryline {
@@ -978,31 +1314,26 @@ impl<'a> KfxPackager<'a> {
         styles: &StyleSymMap,
     ) -> (Vec<SectionPackData>, Vec<PendingStoryline>, HashSet<u32>) {
         let syms = StorylineSymIds::resolve();
-        let mut sections = std::mem::take(&mut self.sections);
+        let sections = std::mem::replace(&mut self.sections, std::borrow::Cow::Borrowed(&[]));
         let mut section_data = Vec::with_capacity(sections.len());
         let mut pending_storylines = Vec::with_capacity(sections.len());
         let mut text_acc = TextAccumulator::new();
+        let mut content_chunk_syms: HashMap<usize, u32> = HashMap::new();
+        let mut content_sym_counter: usize = 1;
         let mut used_styles = HashSet::new();
         used_styles.insert(styles.p);
         let mut used_sec_names = HashSet::new();
         let mut running_pid = 0usize;
 
         for (idx, sec) in sections.iter().enumerate() {
-            let is_cover = (idx == 0)
-                && (sec.id.to_lowercase().contains("cover")
-                    || (sec.blocks.iter().any(|b| matches!(b, Block::Image { .. }))
-                        && sec.blocks.iter().all(|b| match b {
-                            Block::Image { .. } => true,
-                            Block::Paragraph { spans, .. } => {
-                                spans.iter().all(|s| s.text.trim().is_empty())
-                            }
-                            _ => false,
-                        })));
+            let is_cover = sec.is_cover_section(idx);
             self.process_section_pass1(
                 idx,
                 sec,
                 is_cover,
                 symbols,
+                &mut content_chunk_syms,
+                &mut content_sym_counter,
                 styles,
                 &syms,
                 &mut text_acc,
@@ -1051,7 +1382,7 @@ impl<'a> KfxPackager<'a> {
             }
         }
 
-        if !missing_endnotes.is_empty() {
+        self.sections = if !missing_endnotes.is_empty() {
             let endnote_blocks = missing_endnotes
                 .into_iter()
                 .enumerate()
@@ -1072,13 +1403,16 @@ impl<'a> KfxPackager<'a> {
                 title: "Endnotes".to_string(),
                 blocks: endnote_blocks,
             };
-            let endnotes_idx = sections.len();
-            sections.push(endnotes_sec);
+            let mut owned = sections.into_owned();
+            let endnotes_idx = owned.len();
+            owned.push(endnotes_sec);
             self.process_section_pass1(
                 endnotes_idx,
-                &sections[endnotes_idx],
+                &owned[endnotes_idx],
                 false,
                 symbols,
+                &mut content_chunk_syms,
+                &mut content_sym_counter,
                 styles,
                 &syms,
                 &mut text_acc,
@@ -1088,13 +1422,17 @@ impl<'a> KfxPackager<'a> {
                 &mut section_data,
                 &mut pending_storylines,
             );
-        }
+            std::borrow::Cow::Owned(owned)
+        } else {
+            sections
+        };
 
         // Build book-global content entities ($145) from text accumulator (<= 8192 bytes per chunk)
         let chunks = text_acc.drain_chunks();
         for (chunk_num, segments) in chunks {
-            let chunk_name = format!("content_{}", chunk_num);
-            let chunk_sym_id = symbols.intern(&chunk_name);
+            let chunk_sym_id = *content_chunk_syms.entry(chunk_num).or_insert_with(|| {
+                allocate_unique_symbol(symbols, "content", &mut content_sym_counter)
+            });
             let content_val = IonValue::Struct(vec![
                 (syms.name, IonValue::Symbol(chunk_sym_id)),
                 (
@@ -1112,7 +1450,6 @@ impl<'a> KfxPackager<'a> {
             });
         }
 
-        self.sections = sections;
         (section_data, pending_storylines, used_styles)
     }
 
@@ -1252,6 +1589,8 @@ impl<'a> KfxPackager<'a> {
                 }
 
                 if !elem.style_events.is_empty() {
+                    elem.style_events
+                        .sort_by_key(|ev| extract_event_offset_len(ev, syms.offset, syms.length));
                     elem.elem_fields.push((
                         syms.style_events,
                         IonValue::List(std::mem::take(&mut elem.style_events)),

@@ -430,12 +430,14 @@ impl KfxContainer {
         let mut current_raw_offset: u64 = 0;
 
         for ent in entities {
-            // Yellowjacket spec requirement: non-singleton entity_id must be >= 852
-            // 348 is SINGLETON_ID ($null)
-            if ent.entity_id != 348 && ent.entity_id < 852 {
+            // Yellowjacket spec requirement: non-singleton entity_id must be >= FIRST_LOCAL_SYMBOL_ID (852)
+            if ent.entity_id != crate::symbols::SINGLETON_ID
+                && ent.entity_id < crate::symbols::FIRST_LOCAL_SYMBOL_ID
+            {
                 return Err(ContainerError::CorruptedHeader(format!(
-                    "Yellowjacket spec violation: non-singleton entity_id {} must be >= 852",
-                    ent.entity_id
+                    "Yellowjacket spec violation: non-singleton entity_id {} must be >= {}",
+                    ent.entity_id,
+                    crate::symbols::FIRST_LOCAL_SYMBOL_ID
                 )));
             }
 

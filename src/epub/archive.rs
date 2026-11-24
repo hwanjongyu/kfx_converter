@@ -6,6 +6,7 @@ use std::io::Read;
 use zip::ZipArchive;
 
 use crate::epub::EpubError;
+pub use crate::util::{collapse_zip_path, decode_percent, resolve_zip_path};
 
 pub const MAX_EPUB_FILES: usize = 10_000;
 pub const MAX_EPUB_UNCOMPRESSED_TOTAL: u64 = 1024 * 1024 * 1024; // 1 GB
@@ -106,32 +107,6 @@ pub fn read_entry_string(
         .map_err(|e| EpubError::Invalid(format!("Invalid UTF-8 in EPUB entry: {}", e)))
 }
 
-fn collapse_zip_path(path: &str) -> String {
-    let mut parts = Vec::new();
-    for seg in path.split('/') {
-        if seg.is_empty() || seg == "." {
-            continue;
-        } else if seg == ".." {
-            parts.pop();
-        } else {
-            parts.push(seg);
-        }
-    }
-    parts.join("/")
-}
-
-/// Resolves a relative or root-relative path against a base directory within a zip archive,
-/// preventing path traversal vulnerabilities (`..`).
-pub fn resolve_zip_path(base_dir: &str, relative_path: &str) -> String {
-    let normalized_rel = relative_path.replace('\\', "/");
-    let combined = if base_dir.is_empty() || normalized_rel.starts_with('/') {
-        normalized_rel
-    } else {
-        format!("{}/{}", base_dir.trim_matches('/'), normalized_rel)
-    };
-    collapse_zip_path(&combined)
-}
-
 fn resolve_zip_entry_index<R: Read + std::io::Seek>(
     archive: &ZipArchive<R>,
     raw_path: &str,
@@ -222,31 +197,6 @@ pub(crate) fn open_zip_entry<'a, R: Read + std::io::Seek>(
         Some(idx) => archive.by_index(idx),
         None => Err(zip::result::ZipError::FileNotFound),
     }
-}
-
-/// Decodes standard percent-encoded URI strings (e.g. `%20` -> space).
-pub fn decode_percent(s: &str) -> String {
-    let mut result = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && bytes[i + 1].is_ascii_hexdigit()
-            && bytes[i + 2].is_ascii_hexdigit()
-            && let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or_default(),
-                16,
-            )
-        {
-            result.push(byte);
-            i += 3;
-            continue;
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&result).to_string()
 }
 
 /// Locates the package OPF file by parsing `META-INF/container.xml` under a shared decompression budget.

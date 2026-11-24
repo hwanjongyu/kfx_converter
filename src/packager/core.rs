@@ -1,18 +1,20 @@
 //! Core packaging pipeline lifecycle coordinator.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{Seek, Write};
 use std::path::Path;
 
 use super::error::PackagerError;
 use super::symbols::*;
+use super::types::AllocatedResourceSym;
 use crate::container::{KfxContainer, KfxEntity};
 use crate::ir::{BookIR, Section};
 
 /// Packages a `BookIR` into an Amazon KFX container.
 pub struct KfxPackager<'a> {
     pub(crate) book: &'a BookIR,
-    pub(crate) sections: Vec<Section>,
+    pub(crate) sections: Cow<'a, [Section]>,
     pub(crate) toc: Vec<crate::ir::TocItem>,
     pub(crate) page_list: Vec<crate::ir::PageEntry>,
     pub(crate) content_type: &'a str,
@@ -26,6 +28,7 @@ pub struct KfxPackager<'a> {
     pub(crate) anchor_targets: HashMap<(String, String), (u32, usize, usize)>,
     pub(crate) global_anchor_targets: HashMap<String, (u32, usize, usize)>,
     pub(crate) section_pid_starts: HashMap<u32, usize>,
+    pub(crate) resource_symbols: HashMap<String, AllocatedResourceSym>,
 }
 
 impl<'a> KfxPackager<'a> {
@@ -47,37 +50,9 @@ impl<'a> KfxPackager<'a> {
 
         let book_id = generate_book_id(&seed);
 
-        let mut sections = book.sections.clone();
+        let sections = book.sections_with_cover();
         let toc = book.toc.clone();
         let page_list = book.page_list.clone();
-
-        // Ensure dedicated cover section at index 0 without cloning heavy resource maps
-        if let Some(cover_res_id) = book.resolve_cover_resource_id() {
-            let first_is_cover = sections
-                .first()
-                .map(|s| {
-                    s.blocks.iter().any(|b| match b {
-                        crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
-                        _ => false,
-                    })
-                })
-                .unwrap_or(false);
-
-            if !first_is_cover {
-                let cover_section = Section {
-                    id: "cover".to_string(),
-                    title: "Cover".to_string(),
-                    blocks: vec![crate::ir::Block::Image {
-                        id: "cover_img_block".to_string(),
-                        resource_id: cover_res_id,
-                        alt: Some("Cover".to_string()),
-                        width: None,
-                        height: None,
-                    }],
-                };
-                sections.insert(0, cover_section);
-            }
-        }
 
         Self {
             book,
@@ -95,52 +70,17 @@ impl<'a> KfxPackager<'a> {
             anchor_targets: HashMap::new(),
             global_anchor_targets: HashMap::new(),
             section_pid_starts: HashMap::new(),
+            resource_symbols: HashMap::new(),
         }
     }
 
     pub(crate) fn normalize_ir_path(raw: &str) -> String {
-        let decoded = crate::epub::archive::decode_percent(raw.trim());
-        crate::epub::archive::resolve_zip_path("", &decoded)
+        let decoded = crate::util::decode_percent(raw.trim());
+        crate::util::resolve_zip_path("", &decoded)
     }
 
     pub(crate) fn resolve_resource_key(&self, resource_id: &str) -> Option<String> {
-        if self.book.resources.contains_key(resource_id) {
-            return Some(resource_id.to_string());
-        }
-        let norm_target = Self::normalize_ir_path(resource_id);
-        if norm_target.is_empty() {
-            return None;
-        }
-        let mut keys: Vec<&String> = self.book.resources.keys().collect();
-        keys.sort();
-
-        for key in &keys {
-            if Self::normalize_ir_path(key) == norm_target {
-                return Some((*key).clone());
-            }
-        }
-        for key in &keys {
-            if Self::normalize_ir_path(key).eq_ignore_ascii_case(&norm_target) {
-                return Some((*key).clone());
-            }
-        }
-        let target_file = Path::new(&norm_target)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        if !target_file.is_empty() {
-            for key in &keys {
-                let norm_key = Self::normalize_ir_path(key);
-                let key_file = Path::new(&norm_key)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-                if !key_file.is_empty() && key_file.eq_ignore_ascii_case(target_file) {
-                    return Some((*key).clone());
-                }
-            }
-        }
-        None
+        self.book.resolve_resource_key(resource_id)
     }
 
     pub fn container_id(&self) -> &str {
@@ -174,11 +114,19 @@ impl<'a> KfxPackager<'a> {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
+        if parent != Path::new(".")
+            && !(cfg!(target_os = "macos")
+                && (parent == Path::new("/tmp") || parent == Path::new("/var")))
+        {
+            crate::storage::reject_symlink_path(parent)?;
+        }
+        crate::storage::reject_symlink_path(path)?;
         let mut tmp_file = tempfile::Builder::new()
             .prefix(".kfx_tmp.")
             .tempfile_in(parent)?;
         let total_size = self.package(&mut tmp_file)?;
         tmp_file.flush()?;
+        crate::storage::reject_symlink_path(path)?;
         tmp_file.persist(path).map_err(|e| e.error)?;
         Ok(total_size)
     }
@@ -191,21 +139,25 @@ impl<'a> KfxPackager<'a> {
         self.anchor_targets.clear();
         self.global_anchor_targets.clear();
         self.section_pid_starts.clear();
+        self.resource_symbols.clear();
         let mut symbols = LocalSymbols::new();
 
-        // 1. Build book metadata ($490)
-        self.build_book_metadata();
-
-        // 2. Build typography and text styles ($157) - MUST be first symbol-interning step (SIDs 852..=889)
+        // 1. Build typography and text styles ($157) - MUST be first symbol-interning step (SIDs 852..=890)
         let (styles, style_list) = self.build_styles(&mut symbols);
 
-        // 3. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
+        // 2. Pre-allocate collision-free local symbols for supported raster image resources
+        self.allocate_resource_symbols(&mut symbols);
+
+        // 3. Build book metadata ($490) using allocated cover resource symbol name
+        self.build_book_metadata();
+
+        // 4. Build section content ($145), storylines ($259), section templates ($260), and auxiliary_data ($597)
         let (section_data, used_styles) = self.build_storylines_and_sections(&mut symbols, &styles);
 
-        // 4. Emit only referenced style entities ($157) to prevent unreferenced fragment errors
+        // 5. Emit only referenced style entities ($157) to prevent unreferenced fragment errors
         self.emit_used_styles(style_list, &used_styles);
 
-        // 5. Build resource entities ($164 external_resource and $417 bcRawMedia) before content_features ($585)
+        // 6. Build resource entities ($164 external_resource and $417 bcRawMedia) before content_features ($585)
         self.build_resources(&mut symbols);
 
         // 6. Build content features ($585) with dynamic section size, table, & emitted image flags
@@ -338,5 +290,63 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(temp.path().join("bare_output.kfx").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_package_to_file_rejects_symlink_leaf_and_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_dir = temp.path().join("real_dir");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let link_dir = temp.path().join("link_dir");
+        symlink(&real_dir, &link_dir).unwrap();
+
+        let victim = temp.path().join("victim.kfx");
+        std::fs::write(&victim, b"SAFE_VICTIM").unwrap();
+        let leaf_link = real_dir.join("out.kfx");
+        symlink(&victim, &leaf_link).unwrap();
+
+        let book = BookIR {
+            metadata: BookMetadata {
+                title: "Symlink Test".to_string(),
+                identifier: "urn:uuid:symlink-test".to_string(),
+                language: "en".to_string(),
+                ..Default::default()
+            },
+            sections: vec![Section {
+                id: "sec1".to_string(),
+                title: "Chapter 1".to_string(),
+                blocks: vec![Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Hello.".to_string(),
+                        ..Default::default()
+                    }],
+                    style: None,
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let leaf_err = packager.package_to_file(&leaf_link).unwrap_err();
+        assert!(
+            matches!(leaf_err, PackagerError::Io(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "Expected PermissionDenied for symlink leaf, got {:?}",
+            leaf_err
+        );
+        assert_eq!(std::fs::read(&victim).unwrap(), b"SAFE_VICTIM");
+
+        let parent_err = packager
+            .package_to_file(link_dir.join("child.kfx"))
+            .unwrap_err();
+        assert!(
+            matches!(parent_err, PackagerError::Io(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "Expected PermissionDenied for symlink parent, got {:?}",
+            parent_err
+        );
+        assert!(!real_dir.join("child.kfx").exists());
     }
 }

@@ -17,6 +17,21 @@ pub(crate) fn strip_part_suffix(s: &str) -> &str {
     s
 }
 
+/// Allocates `base` if unoccupied in `symbols`, otherwise `"{base}_2"`, `"{base}_3"`, ...
+fn allocate_preferred_symbol(symbols: &mut LocalSymbols, base: &str) -> u32 {
+    if symbols.get_id(base).is_none() {
+        return symbols.intern(base);
+    }
+    let mut suffix = 2usize;
+    loop {
+        let cand = format!("{}_{}", base, suffix);
+        suffix += 1;
+        if symbols.get_id(&cand).is_none() {
+            break symbols.intern(&cand);
+        }
+    }
+}
+
 /// Resolution policy controlling fallback semantics for internal target resolution.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TargetResolveMode<'a> {
@@ -61,7 +76,7 @@ impl<'a> KfxPackager<'a> {
         };
         let sec_part = sec_part_raw.trim();
         let eff_anchor = raw_anchor.or(embedded_anchor).and_then(|a| {
-            let decoded = crate::epub::archive::decode_percent(a.trim().trim_start_matches('#'));
+            let decoded = crate::util::decode_percent(a.trim().trim_start_matches('#'));
             let trimmed = decoded.trim().to_string();
             if trimmed.is_empty() {
                 None
@@ -314,7 +329,7 @@ impl<'a> KfxPackager<'a> {
             );
 
             if !entries.is_empty() {
-                let container_sym = symbols.intern("toc_nav");
+                let container_sym = allocate_preferred_symbol(symbols, "toc_nav");
                 let container_val = IonValue::Struct(vec![
                     (sym_nav_type, IonValue::Symbol(sym_toc)),
                     (sym_nav_container_name, IonValue::Symbol(container_sym)),
@@ -391,7 +406,7 @@ impl<'a> KfxPackager<'a> {
         }
 
         if !landmark_entries.is_empty() {
-            let landmarks_sym = symbols.intern("landmarks_nav");
+            let landmarks_sym = allocate_preferred_symbol(symbols, "landmarks_nav");
             let landmarks_val = IonValue::Struct(vec![
                 (sym_nav_type, IonValue::Symbol(sym_landmarks)),
                 (sym_nav_container_name, IonValue::Symbol(landmarks_sym)),
@@ -444,7 +459,7 @@ impl<'a> KfxPackager<'a> {
             }
 
             if !page_entries.is_empty() {
-                let page_container_sym = symbols.intern("page_list_nav");
+                let page_container_sym = allocate_preferred_symbol(symbols, "page_list_nav");
                 let page_container_val = IonValue::Struct(vec![
                     (sym_nav_type, IonValue::Symbol(sym_page_list)),
                     (sym_nav_container_name, IonValue::Symbol(page_container_sym)),

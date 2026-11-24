@@ -61,6 +61,14 @@ pub const FALLBACK_PLACEHOLDER_JPEG: &[u8] = &[
     255, 217,
 ];
 
+/// Returns `true` iff `data` begins with known raster image magic bytes (JPEG, PNG, GIF87a, GIF89a).
+pub fn has_known_raster_magic(data: &[u8]) -> bool {
+    data.starts_with(b"\xFF\xD8\xFF")
+        || data.starts_with(b"\x89PNG\r\n\x1A\n")
+        || data.starts_with(b"GIF87a")
+        || data.starts_with(b"GIF89a")
+}
+
 /// Detects image format from magic bytes first, falling back to `ext_hint` (or JPEG if unknown).
 /// Returns `(kfx_ext, format_sid, mime_type)`.
 pub fn detect_image_format(data: &[u8], ext_hint: &str) -> (&'static str, u32, &'static str) {
@@ -130,12 +138,16 @@ impl CoverOptimizer {
         let is_progressive_jpeg = is_jpeg && data.windows(2).any(|w| w == [0xff, 0xc2]);
 
         // Fast-path: query header dimensions without full raster pixel decode
-        if let Some((w, h)) = Self::get_image_dimensions(data)
-            && w <= max_dim
-            && h <= max_dim
-            && !is_progressive_jpeg
-        {
-            return Ok(data.to_vec());
+        if let Some((w, h)) = Self::get_image_dimensions(data) {
+            if w > MAX_SAFE_IMAGE_DIMENSION
+                || h > MAX_SAFE_IMAGE_DIMENSION
+                || (w as u64) * (h as u64) > MAX_SAFE_IMAGE_PIXELS
+            {
+                return Err(CoverError::ImageTooLarge(w, h));
+            }
+            if w <= max_dim && h <= max_dim && !is_progressive_jpeg {
+                return Ok(data.to_vec());
+            }
         }
 
         let img = Self::decode_with_safety_limits(data)?;
@@ -207,6 +219,11 @@ impl CoverOptimizer {
     pub fn get_image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         if data.is_empty() {
             return None;
+        }
+        if data.len() >= 10 && (data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
+            let w = u16::from_le_bytes([data[6], data[7]]) as u32;
+            let h = u16::from_le_bytes([data[8], data[9]]) as u32;
+            return if w > 0 && h > 0 { Some((w, h)) } else { None };
         }
         image::ImageReader::new(Cursor::new(data))
             .with_guessed_format()
@@ -541,5 +558,51 @@ mod tests {
             "Expected blue region in opaque half, got {:?}",
             bot_px
         );
+    }
+
+    #[test]
+    fn test_gif_dimensions_and_known_raster_magic_and_safe_limit_fast_path() {
+        // GIF89a with 320x240 logical screen descriptor (LE u16)
+        let mut gif89 = b"GIF89a".to_vec();
+        gif89.extend_from_slice(&320u16.to_le_bytes());
+        gif89.extend_from_slice(&240u16.to_le_bytes());
+        gif89.extend_from_slice(&[0x00, 0x00, 0x00, 0x3B]);
+        assert_eq!(
+            CoverOptimizer::get_image_dimensions(&gif89),
+            Some((320, 240))
+        );
+        assert!(has_known_raster_magic(&gif89));
+        let opt_gif = CoverOptimizer::optimize_content_image(&gif89, 2560).unwrap();
+        assert_eq!(opt_gif, gif89);
+
+        // GIF87a with 16x32
+        let mut gif87 = b"GIF87a".to_vec();
+        gif87.extend_from_slice(&16u16.to_le_bytes());
+        gif87.extend_from_slice(&32u16.to_le_bytes());
+        assert_eq!(CoverOptimizer::get_image_dimensions(&gif87), Some((16, 32)));
+        assert!(has_known_raster_magic(&gif87));
+
+        // Zero-dimension or truncated GIF returns None
+        let gif_zero = b"GIF89a\x00\x00\x10\x00";
+        assert_eq!(CoverOptimizer::get_image_dimensions(gif_zero), None);
+        assert_eq!(CoverOptimizer::get_image_dimensions(b"GIF89a\x01"), None);
+
+        // Oversized GIF rejected even if caller passes max_dim > MAX_SAFE_IMAGE_DIMENSION
+        let mut huge_gif = b"GIF89a".to_vec();
+        huge_gif.extend_from_slice(&9000u16.to_le_bytes());
+        huge_gif.extend_from_slice(&100u16.to_le_bytes());
+        assert!(matches!(
+            CoverOptimizer::optimize_content_image(&huge_gif, 10_000),
+            Err(CoverError::ImageTooLarge(9000, 100))
+        ));
+
+        // Magic helper checks
+        assert!(has_known_raster_magic(b"\xFF\xD8\xFF\xE0"));
+        assert!(has_known_raster_magic(b"\x89PNG\r\n\x1A\n"));
+        assert!(!has_known_raster_magic(
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>"
+        ));
+        assert!(!has_known_raster_magic(b""));
+        assert!(!has_known_raster_magic(b"CORRUPT"));
     }
 }

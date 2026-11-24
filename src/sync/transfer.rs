@@ -10,8 +10,11 @@ use super::sanitize::{
     sanitize_sidecar_stem,
 };
 use super::types::SyncError;
+use crate::storage::{
+    ensure_dir_exists_safe, is_mtp_path, prepare_writable_non_symlink,
+    reject_symlink_ancestors_under, reject_symlink_path, set_readonly_non_symlink,
+};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 /// Synchronizes a converted KFX file, multi-identifier cover thumbnails, and optional sidecars to the Kindle.
@@ -30,7 +33,20 @@ pub fn sync_to_device(
     let _sync_lock = DEVICE_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let docs_dir = device_root.join("documents");
-    if !docs_dir.exists() {
+    let docs_meta = match std::fs::symlink_metadata(&docs_dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SyncError::DeviceNotFound(docs_dir));
+        }
+        Err(e) => return Err(SyncError::Io(e)),
+    };
+    if docs_meta.file_type().is_symlink() {
+        return Err(SyncError::SecurityViolation(format!(
+            "Refusing symlinked documents directory: {:?}",
+            docs_dir
+        )));
+    }
+    if !docs_meta.file_type().is_dir() {
         return Err(SyncError::DeviceNotFound(docs_dir));
     }
 
@@ -52,12 +68,10 @@ pub fn sync_to_device(
             }
         }
     }
-    if let Ok(metadata) = docs_dir.metadata()
-        && metadata.permissions().readonly()
-    {
+    if docs_meta.permissions().readonly() {
         return Err(SyncError::SecurityViolation(
-                "Kindle storage is mounted read-only (likely due to an unclean USB disconnect). Please reconnect the Kindle USB cable.".to_string(),
-            ));
+            "Kindle storage is mounted read-only (likely due to an unclean USB disconnect). Please reconnect the Kindle USB cable.".to_string(),
+        ));
     }
 
     let safe_title = kfx_source
@@ -72,12 +86,16 @@ pub fn sync_to_device(
     let kfx_filename = format!("{}.kfx", safe_title);
     let dest_kfx_path = docs_dir.join(&kfx_filename);
 
-    // Security assertion: Destination path must reside strictly within docs_dir
+    // Security assertion: Destination path must reside strictly within docs_dir with no symlink components
     if !dest_kfx_path.starts_with(&docs_dir) {
         return Err(SyncError::SecurityViolation(format!(
             "Path traversal detected in KFX target: {:?}",
             kfx_filename
         )));
+    }
+    if !is_mtp_path(&dest_kfx_path) {
+        reject_symlink_ancestors_under(device_root, &dest_kfx_path)
+            .map_err(|e| SyncError::SecurityViolation(e.to_string()))?;
     }
 
     // 1. Copy KFX file if source and destination differ
@@ -87,11 +105,15 @@ pub fn sync_to_device(
 
     // 2. Sync Cover Thumbnail across system/thumbnails, .system/thumbnails, and amazon-cover-bug
     if let Some(jpeg) = cover_jpeg {
+        let is_real_dir = |p: &Path| {
+            std::fs::symlink_metadata(p)
+                .is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+        };
         let mut thumb_dirs = Vec::new();
-        if device_root.join(".system").is_dir() {
+        if is_real_dir(&device_root.join(".system")) {
             thumb_dirs.push(device_root.join(".system").join("thumbnails"));
         }
-        if device_root.join("system").is_dir() || thumb_dirs.is_empty() {
+        if is_real_dir(&device_root.join("system")) || thumb_dirs.is_empty() {
             thumb_dirs.push(device_root.join("system").join("thumbnails"));
         }
         // Calibre-compatible amazon-cover-bug directory to survive WiFi sync
@@ -102,7 +124,12 @@ pub fn sync_to_device(
         let ids_to_sync = collect_thumbnail_stems(Some(&safe_asin), safe_cid.as_deref());
 
         for thumb_dir in thumb_dirs {
-            if crate::enhancements::SdrDeployer::ensure_dir_exists(&thumb_dir).is_err() {
+            if !is_mtp_path(&thumb_dir)
+                && reject_symlink_ancestors_under(device_root, &thumb_dir).is_err()
+            {
+                continue;
+            }
+            if ensure_dir_exists_safe(&thumb_dir).is_err() {
                 continue;
             }
             for id in &ids_to_sync {
@@ -115,12 +142,9 @@ pub fn sync_to_device(
                     let path = thumb_dir.join(name);
                     if path.starts_with(&thumb_dir)
                         && write_bytes_unlocked(&path, jpeg).is_ok()
-                        && let Ok(meta) = std::fs::symlink_metadata(&path)
-                        && !meta.file_type().is_symlink()
+                        && !is_mtp_path(&path)
                     {
-                        let mut perms = meta.permissions();
-                        perms.set_readonly(true);
-                        let _ = std::fs::set_permissions(&path, perms);
+                        let _ = set_readonly_non_symlink(&path, true);
                     }
                 }
             }
@@ -134,6 +158,10 @@ pub fn sync_to_device(
             "Path traversal detected in SDR directory: {:?}",
             safe_title
         )));
+    }
+    if !is_mtp_path(&sdr_dir) {
+        reject_symlink_ancestors_under(device_root, &sdr_dir)
+            .map_err(|e| SyncError::SecurityViolation(e.to_string()))?;
     }
     // 3. Deploy companion .sdr folder, Word Wise sidecars, and thumbnails
     crate::enhancements::SdrDeployer::deploy_unlocked(
@@ -177,28 +205,48 @@ pub fn sync_to_device(
 
 /// Rejects destinations that already exist as symbolic links (including dangling symlinks).
 fn reject_symlink_destination(dst: &Path) -> Result<(), SyncError> {
-    match std::fs::symlink_metadata(dst) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(SyncError::SecurityViolation(format!(
-            "Refusing to overwrite symlink destination: {:?}",
-            dst
-        ))),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    reject_symlink_path(dst).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            SyncError::SecurityViolation(e.to_string())
+        } else {
+            SyncError::Io(e)
+        }
+    })
+}
+
+fn reject_symlink_parent(parent: &Path) -> Result<(), SyncError> {
+    if parent == Path::new(".") {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if parent == Path::new("/tmp") || parent == Path::new("/var") || parent == Path::new("/etc")
+        {
+            return Ok(());
+        }
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_string_lossy();
+        let tmp_trimmed = Path::new(tmp_str.trim_end_matches('/'));
+        if parent == tmp || parent == tmp_trimmed {
+            return Ok(());
+        }
+    }
+    reject_symlink_destination(parent)
+}
+
+fn prepare_writable_sync(dst: &Path) -> Result<(), SyncError> {
+    match prepare_writable_non_symlink(dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(SyncError::SecurityViolation(e.to_string()))
+        }
         Err(e) => Err(SyncError::Io(e)),
     }
 }
 
-/// Clears the read-only attribute on an existing destination file so that atomic overwrites or renames succeed.
-#[allow(clippy::permissions_set_readonly_false)]
+/// Clears the read-only attribute on an existing non-symlink destination file so that atomic overwrites or renames succeed.
 pub fn prepare_destination_for_overwrite(dst: &Path) {
-    if let Ok(meta) = std::fs::symlink_metadata(dst)
-        && !meta.file_type().is_symlink()
-        && meta.permissions().readonly()
-    {
-        let mut perms = meta.permissions();
-        perms.set_readonly(false);
-        let _ = std::fs::set_permissions(dst, perms);
-    }
+    let _ = prepare_writable_non_symlink(dst);
 }
 
 /// Robust copy using `gio copy` for Linux GVFS MTP or streamed copy for standard mounts.
@@ -212,8 +260,7 @@ pub fn copy_file(src: &Path, dst: &Path) -> Result<(), SyncError> {
 
 /// Internal unlocked copy helper for callers already holding `DEVICE_SYNC_LOCK`.
 pub(crate) fn copy_file_unlocked(src: &Path, dst: &Path) -> Result<(), SyncError> {
-    let dst_str = dst.to_string_lossy();
-    if dst_str.contains("/gvfs/mtp:") {
+    if is_mtp_path(dst) {
         // Use gio copy with a 60-second watchdog timeout to circumvent MTP deadlocks
         execute_gio_copy_with_timeout(src, dst, Duration::from_secs(60))?;
     } else {
@@ -223,6 +270,7 @@ pub(crate) fn copy_file_unlocked(src: &Path, dst: &Path) -> Result<(), SyncError
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new("."),
         };
+        reject_symlink_parent(parent)?;
         let mut r = std::fs::File::open(src)?;
         let mut tmp = tempfile::Builder::new()
             .prefix(".kfx_tmp.")
@@ -239,7 +287,8 @@ pub(crate) fn copy_file_unlocked(src: &Path, dst: &Path) -> Result<(), SyncError
         }
         tmp.flush()?;
         drop(r);
-        prepare_destination_for_overwrite(dst);
+        prepare_writable_sync(dst)?;
+        reject_symlink_destination(dst)?;
         tmp.persist(dst).map_err(|e| SyncError::Io(e.error))?;
         // Settle delay to allow Kindle eMMC controller to buffer writes cleanly
         std::thread::sleep(Duration::from_millis(200));
@@ -254,53 +303,7 @@ pub fn execute_gio_copy_with_timeout(
     dst: &Path,
     timeout: Duration,
 ) -> Result<(), SyncError> {
-    let mut child = Command::new("gio")
-        .arg("copy")
-        .arg("--")
-        .arg(src)
-        .arg(dst)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    // Drain stderr concurrently in a background thread to prevent the 64KB OS kernel pipe
-    // buffer from filling up and deadlocking the child process on write() calls.
-    let stderr_thread = child.stderr.take().map(|mut stderr| {
-        std::thread::spawn(move || {
-            let mut err_msg = String::new();
-            use std::io::Read;
-            let _ = stderr.read_to_string(&mut err_msg);
-            err_msg
-        })
-    });
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait()? {
-            Some(status) => {
-                let err_msg = stderr_thread
-                    .and_then(|t| t.join().ok())
-                    .unwrap_or_default();
-                if status.success() {
-                    return Ok(());
-                } else {
-                    return Err(SyncError::GioFailed(err_msg));
-                }
-            }
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait(); // Reap zombie process
-                    let _ = stderr_thread.and_then(|t| t.join().ok());
-                    return Err(SyncError::GioFailed(format!(
-                        "gio copy timed out after {} seconds",
-                        timeout.as_secs()
-                    )));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
+    crate::storage::execute_gio_copy_with_timeout(src, dst, timeout).map_err(SyncError::GioFailed)
 }
 
 /// Writes raw bytes to device, using a temporary file and `gio copy` if on MTP.
@@ -311,13 +314,12 @@ pub fn write_bytes(dst: &Path, data: &[u8]) -> Result<(), SyncError> {
 
 /// Internal unlocked write helper for callers already holding `DEVICE_SYNC_LOCK`.
 pub(crate) fn write_bytes_unlocked(dst: &Path, data: &[u8]) -> Result<(), SyncError> {
-    let dst_str = dst.to_string_lossy();
-    if dst_str.contains("/gvfs/mtp:") {
+    if is_mtp_path(dst) {
         let mut tmp = tempfile::NamedTempFile::new()?;
         use std::io::Write;
         tmp.write_all(data)?;
         tmp.flush()?;
-        copy_file_unlocked(tmp.path(), dst)?;
+        execute_gio_copy_with_timeout(tmp.path(), dst, Duration::from_secs(60))?;
     } else {
         use std::io::Write;
         reject_symlink_destination(dst)?;
@@ -325,13 +327,15 @@ pub(crate) fn write_bytes_unlocked(dst: &Path, data: &[u8]) -> Result<(), SyncEr
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new("."),
         };
+        reject_symlink_parent(parent)?;
         let mut tmp = tempfile::Builder::new()
             .prefix(".kfx_tmp.")
             .suffix(".part")
             .tempfile_in(parent)?;
         tmp.write_all(data)?;
         tmp.flush()?;
-        prepare_destination_for_overwrite(dst);
+        prepare_writable_sync(dst)?;
+        reject_symlink_destination(dst)?;
         tmp.persist(dst).map_err(|e| SyncError::Io(e.error))?;
     }
     Ok(())
@@ -341,6 +345,7 @@ pub(crate) fn write_bytes_unlocked(dst: &Path, data: &[u8]) -> Result<(), SyncEr
 mod tests {
     use super::*;
     use crate::sync::KindleSync;
+    use std::process::Command;
 
     #[test]
     fn test_sync_to_device_traversal_rejection() {
@@ -786,5 +791,103 @@ mod tests {
         let extra_copy = temp.path().join("extra_copy.kfx");
         KindleSync::copy_file(&kfx_src, &extra_copy).unwrap();
         assert_eq!(std::fs::read(&extra_copy).unwrap(), b"KFX_SYNC_BYTES");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sync_to_device_rejects_symlinked_documents_system_and_sdr() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let src_kfx = temp.path().join("novel.kfx");
+        std::fs::write(&src_kfx, b"KFX_PAYLOAD").unwrap();
+        let fake_jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+
+        // 1. Symlinked documents/ directory must return SecurityViolation and leave outside untouched
+        let dev1 = temp.path().join("dev_sym_docs");
+        std::fs::create_dir_all(&dev1).unwrap();
+        symlink(&outside, dev1.join("documents")).unwrap();
+        let err_docs = KindleSync::sync_to_device(
+            &dev1,
+            &src_kfx,
+            "Novel",
+            "B00SYMDOCS",
+            None,
+            Some("EBOK"),
+            Some("en"),
+            Some(&fake_jpeg),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err_docs, SyncError::SecurityViolation(_)));
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+
+        // 2. Symlinked system/ and .system/ directories must NOT receive thumbnails outside device_root
+        let dev2 = temp.path().join("dev_sym_sys");
+        std::fs::create_dir_all(dev2.join("documents")).unwrap();
+        let outside_sys = temp.path().join("outside_sys");
+        std::fs::create_dir_all(&outside_sys).unwrap();
+        let outside_dotsys = temp.path().join("outside_dotsys");
+        std::fs::create_dir_all(&outside_dotsys).unwrap();
+        symlink(&outside_sys, dev2.join("system")).unwrap();
+        symlink(&outside_dotsys, dev2.join(".system")).unwrap();
+        KindleSync::sync_to_device(
+            &dev2,
+            &src_kfx,
+            "Novel",
+            "B00SYMSYS",
+            None,
+            Some("EBOK"),
+            Some("en"),
+            Some(&fake_jpeg),
+            None,
+        )
+        .expect(
+            "sync should skip symlinked system/.system thumbnail dirs without escaping device_root",
+        );
+        assert!(
+            std::fs::read_dir(&outside_sys).unwrap().next().is_none(),
+            "Outside directory targeted by symlinked system/ must remain untouched"
+        );
+        assert!(
+            std::fs::read_dir(&outside_dotsys).unwrap().next().is_none(),
+            "Outside directory targeted by symlinked .system/ must remain untouched"
+        );
+
+        // 3. Symlinked companion .sdr directory must return SecurityViolation and leave outside untouched
+        let dev3 = temp.path().join("dev_sym_sdr");
+        std::fs::create_dir_all(dev3.join("documents")).unwrap();
+        let outside_sdr = temp.path().join("outside_sdr");
+        std::fs::create_dir_all(&outside_sdr).unwrap();
+        symlink(&outside_sdr, dev3.join("documents").join("novel.sdr")).unwrap();
+        let err_sdr = KindleSync::sync_to_device(
+            &dev3,
+            &src_kfx,
+            "Novel",
+            "B00SYMSDR",
+            None,
+            Some("EBOK"),
+            Some("en"),
+            Some(&fake_jpeg),
+            Some(b"KLL"),
+        )
+        .unwrap_err();
+        assert!(matches!(err_sdr, SyncError::SecurityViolation(_)));
+        assert!(std::fs::read_dir(&outside_sdr).unwrap().next().is_none());
+
+        // 4. copy_file and write_bytes reject symlinked parent directories
+        let link_parent = temp.path().join("link_parent");
+        symlink(&outside, &link_parent).unwrap();
+        assert!(matches!(
+            KindleSync::write_bytes(&link_parent.join("out.bin"), b"EVIL"),
+            Err(SyncError::SecurityViolation(_))
+        ));
+        assert!(matches!(
+            KindleSync::copy_file(&src_kfx, &link_parent.join("out.kfx")),
+            Err(SyncError::SecurityViolation(_))
+        ));
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
     }
 }

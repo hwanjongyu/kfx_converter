@@ -255,47 +255,61 @@ impl WordWiseBuilder {
         selected.into_values().collect()
     }
 
+    fn scan_text_for_glosses(
+        text: &str,
+        pid: &mut usize,
+        dict: &super::dictionary::LemmaDictionary,
+        raw_candidates: &mut Vec<WordWiseGloss>,
+    ) {
+        let mut word_char_start = None;
+        let mut word_str = String::new();
+        let mut char_idx = 0usize;
+
+        for ch in text.chars() {
+            let is_word_char = ch.is_alphabetic()
+                || ((ch == '\'' || ch == '’' || ch == '-') && word_char_start.is_some());
+
+            if is_word_char {
+                if word_char_start.is_none() {
+                    word_char_start = Some(char_idx);
+                }
+                word_str.push(ch);
+            } else if let Some(start_c) = word_char_start.take() {
+                if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
+                    raw_candidates.push(WordWiseGloss {
+                        start: *pid + start_c,
+                        end: None,
+                        difficulty,
+                        sense_id,
+                        low_confidence: false,
+                    });
+                }
+                word_str.clear();
+            }
+            char_idx += ch.len_utf16();
+        }
+
+        if let Some(start_c) = word_char_start.take()
+            && let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3)
+        {
+            raw_candidates.push(WordWiseGloss {
+                start: *pid + start_c,
+                end: None,
+                difficulty,
+                sense_id,
+                low_confidence: false,
+            });
+        }
+
+        let block_len = char_idx.max(1);
+        *pid += block_len;
+    }
+
     /// Extracts tokens and populates Word Wise glosses directly from a BookIR document.
     pub fn generate_from_book(&mut self, book: &crate::ir::BookIR) -> usize {
         let dict = super::dictionary::LemmaDictionary::new();
         let initial_count = self.glosses.len();
-
-        let mut temp_sections;
-        let sections: &[crate::ir::Section] = if let Some(cover_res_id) =
-            book.resolve_cover_resource_id()
-        {
-            let first_is_cover = book
-                .sections
-                .first()
-                .map(|s| {
-                    s.blocks.iter().any(|b| match b {
-                        crate::ir::Block::Image { resource_id, .. } => resource_id == &cover_res_id,
-                        _ => false,
-                    })
-                })
-                .unwrap_or(false);
-
-            if !first_is_cover {
-                temp_sections = book.sections.clone();
-                let cover_section = crate::ir::Section {
-                    id: "cover".to_string(),
-                    title: "Cover".to_string(),
-                    blocks: vec![crate::ir::Block::Image {
-                        id: "cover_img_block".to_string(),
-                        resource_id: cover_res_id,
-                        alt: Some("Cover".to_string()),
-                        width: None,
-                        height: None,
-                    }],
-                };
-                temp_sections.insert(0, cover_section);
-                &temp_sections
-            } else {
-                &book.sections
-            }
-        } else {
-            &book.sections
-        };
+        let sections = book.sections_with_cover();
 
         let mut pid = 0usize;
         let mut raw_candidates = Vec::new();
@@ -304,19 +318,7 @@ impl WordWiseBuilder {
             // Section root element occupies 1 PID position in Yellowjacket position_id_map ($265)
             pid += 1;
 
-            let is_cover = (idx == 0)
-                && (section.id.to_lowercase().contains("cover")
-                    || (section
-                        .blocks
-                        .iter()
-                        .any(|b| matches!(b, crate::ir::Block::Image { .. }))
-                        && section.blocks.iter().all(|b| match b {
-                            crate::ir::Block::Image { .. } => true,
-                            crate::ir::Block::Paragraph { spans, .. } => {
-                                spans.iter().all(|s| s.text.trim().is_empty())
-                            }
-                            _ => false,
-                        })));
+            let is_cover = section.is_cover_section(idx);
 
             if section.blocks.is_empty() {
                 if !is_cover {
@@ -326,55 +328,64 @@ impl WordWiseBuilder {
             }
 
             for block in &section.blocks {
-                if let crate::ir::Block::Image { alt, .. } = block {
-                    let block_len = alt.as_deref().map_or(0, |a| a.chars().count()).max(1);
-                    pid += block_len;
-                    continue;
-                }
-
-                let text = block.plain_text();
-                let mut word_char_start = None;
-                let mut word_str = String::new();
-                let mut char_idx = 0usize;
-
-                for ch in text.chars() {
-                    let is_word_char = ch.is_alphabetic()
-                        || ((ch == '\'' || ch == '’' || ch == '-') && word_char_start.is_some());
-
-                    if is_word_char {
-                        if word_char_start.is_none() {
-                            word_char_start = Some(char_idx);
-                        }
-                        word_str.push(ch);
-                    } else if let Some(start_c) = word_char_start.take() {
-                        if let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3) {
-                            raw_candidates.push(WordWiseGloss {
-                                start: pid + start_c,
-                                end: None,
-                                difficulty,
-                                sense_id,
-                                low_confidence: false,
-                            });
-                        }
-                        word_str.clear();
+                match block {
+                    crate::ir::Block::Image { resource_id, .. } => {
+                        let has_res = book.resolve_resource_key(resource_id).is_some();
+                        pid += block.yellowjacket_pid_len(has_res);
                     }
-                    char_idx += 1;
+                    crate::ir::Block::List { .. } if block.contains_image() => {
+                        let mut stack = vec![block];
+                        let mut text_buf = String::new();
+                        let mut need_sep = false;
+                        while let Some(current) = stack.pop() {
+                            match current {
+                                crate::ir::Block::List { items, .. } => {
+                                    for item in items.iter().rev() {
+                                        for child in item.iter().rev() {
+                                            stack.push(child);
+                                        }
+                                    }
+                                }
+                                crate::ir::Block::Image { resource_id, .. } => {
+                                    if !text_buf.is_empty() {
+                                        Self::scan_text_for_glosses(
+                                            &text_buf,
+                                            &mut pid,
+                                            &dict,
+                                            &mut raw_candidates,
+                                        );
+                                        text_buf.clear();
+                                    }
+                                    need_sep = false;
+                                    let has_res = book.resolve_resource_key(resource_id).is_some();
+                                    pid += current.yellowjacket_pid_len(has_res);
+                                }
+                                other => {
+                                    let piece = other.plain_text();
+                                    if !piece.is_empty() {
+                                        if need_sep {
+                                            text_buf.push('\n');
+                                        }
+                                        text_buf.push_str(&piece);
+                                        need_sep = true;
+                                    }
+                                }
+                            }
+                        }
+                        if !text_buf.is_empty() {
+                            Self::scan_text_for_glosses(
+                                &text_buf,
+                                &mut pid,
+                                &dict,
+                                &mut raw_candidates,
+                            );
+                        }
+                    }
+                    _ => {
+                        let text = block.plain_text();
+                        Self::scan_text_for_glosses(&text, &mut pid, &dict, &mut raw_candidates);
+                    }
                 }
-
-                if let Some(start_c) = word_char_start.take()
-                    && let Some((difficulty, sense_id)) = dict.lookup(&word_str, 3)
-                {
-                    raw_candidates.push(WordWiseGloss {
-                        start: pid + start_c,
-                        end: None,
-                        difficulty,
-                        sense_id,
-                        low_confidence: false,
-                    });
-                }
-
-                let block_len = char_idx.max(1);
-                pid += block_len;
             }
         }
 
@@ -1005,43 +1016,75 @@ mod tests {
 
     #[test]
     fn test_word_wise_skips_image_alt_glosses_while_advancing_pid() {
-        use crate::ir::{Block, BookIR, BookMetadata, Section, TextSpan};
+        use crate::ir::{Block, BookIR, BookMetadata, ResourceAsset, Section, TextSpan};
+        use crate::packager::KfxPackager;
+        use std::io::Cursor;
 
-        let alt_text = "An abstruse and chimerical diagram"; // 34 chars
+        let alt_text = "An abstruse and chimerical diagram"; // 34 UTF-16 units
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "resolved.jpg".to_string(),
+            ResourceAsset {
+                id: "resolved.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: super::super::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+            },
+        );
+
         let ir = BookIR {
             metadata: BookMetadata::default(),
-            sections: vec![Section {
-                id: "sec1".to_string(),
-                title: "Chapter 1".to_string(),
-                blocks: vec![
-                    Block::Image {
-                        id: "img_alt".to_string(),
-                        resource_id: "diagram.png".to_string(),
-                        alt: Some(alt_text.to_string()),
+            sections: vec![
+                Section {
+                    id: "cover".to_string(),
+                    title: "Cover".to_string(),
+                    blocks: vec![Block::Image {
+                        id: "img_cover".to_string(),
+                        resource_id: "resolved.jpg".to_string(),
+                        alt: Some("Cover".to_string()),
                         width: None,
                         height: None,
-                    },
-                    Block::Image {
-                        id: "img_none".to_string(),
-                        resource_id: "spacer.png".to_string(),
-                        alt: None,
-                        width: None,
-                        height: None,
-                    },
-                    Block::Paragraph {
-                        id: "p1".to_string(),
-                        spans: vec![TextSpan {
-                            text: "To elucidate.".to_string(),
+                    }],
+                },
+                Section {
+                    id: "sec1".to_string(),
+                    title: "Chapter 1".to_string(),
+                    blocks: vec![
+                        Block::Image {
+                            id: "img_alt".to_string(),
+                            resource_id: "diagram.png".to_string(), // unresolved, alt present -> 34 PIDs
+                            alt: Some(alt_text.to_string()),
+                            width: None,
+                            height: None,
+                        },
+                        Block::Image {
+                            id: "img_none".to_string(),
+                            resource_id: "spacer.png".to_string(), // unresolved, alt None -> "[Image]" = 7 PIDs
+                            alt: None,
+                            width: None,
+                            height: None,
+                        },
+                        Block::Image {
+                            id: "img_resolved".to_string(),
+                            resource_id: "resolved.jpg".to_string(), // resolved, alt None -> 1 PID
+                            alt: None,
+                            width: None,
+                            height: None,
+                        },
+                        Block::Paragraph {
+                            id: "p1".to_string(),
+                            spans: vec![TextSpan {
+                                text: "To elucidate.".to_string(),
+                                style: None,
+                                anchor_id: None,
+                                href: None,
+                                ruby: None,
+                            }],
                             style: None,
-                            anchor_id: None,
-                            href: None,
-                            ruby: None,
-                        }],
-                        style: None,
-                    },
-                ],
-            }],
-            resources: std::collections::HashMap::new(),
+                        },
+                    ],
+                },
+            ],
+            resources,
             toc: Vec::new(),
             page_list: Vec::new(),
             footnotes: std::collections::HashMap::new(),
@@ -1066,8 +1109,209 @@ mod tests {
         );
         let gloss = builder.glosses.values().next().unwrap();
         assert_eq!(gloss.sense_id, 36391, "Expected gloss for 'elucidate'");
-        // Section root (1) + alt_text (34) + empty image alt (max(0, 1) = 1) + "To " (3) = 39
-        assert_eq!(gloss.start, 1 + alt_text.chars().count() + 1 + 3);
+        // Cover section: 1 (root) + 5 ("Cover") = 6
+        // Section 1: 1 (root) + 34 (unresolved alt) + 7 (unresolved "[Image]") + 1 (resolved alt None) + 3 ("To ") = 52
+        let expected_pid = 6 + 1 + crate::ir::str_utf16_len(alt_text) + 7 + 1 + 3;
+        assert_eq!(gloss.start, expected_pid);
+
+        // Cross-check against KfxPackager's emitted $265 position_id_map total PID length
+        let mut packager = KfxPackager::new(&ir, "EBOK");
+        let mut buf = Cursor::new(Vec::new());
+        packager.package(&mut buf).expect("package must succeed");
+        let pos_id_ent = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == crate::symbols::KfxSymbol::PositionIdMap as u32)
+            .expect("$265 position_id_map");
+        let vals = crate::ion::IonReader::new(&pos_id_ent.data)
+            .decode_all()
+            .unwrap();
+        let sym_contains = crate::symbols::KfxSymbol::Contains as u32;
+        let sym_pid = crate::symbols::KfxSymbol::Pid as u32;
+        let sym_len = crate::symbols::KfxSymbol::Length as u32;
+        let mut sec1_pid_and_len = None;
+        if let crate::ion::IonValue::Struct(fields) = &vals[0]
+            && let Some((_, crate::ion::IonValue::List(entries))) =
+                fields.iter().find(|(k, _)| *k == sym_contains)
+            && let Some(crate::ion::IonValue::Struct(s1)) = entries.get(1)
+        {
+            let p = s1
+                .iter()
+                .find(|(k, _)| *k == sym_pid)
+                .and_then(|(_, v)| match v {
+                    crate::ion::IonValue::Int(n) => Some(*n as usize),
+                    _ => None,
+                });
+            let l = s1
+                .iter()
+                .find(|(k, _)| *k == sym_len)
+                .and_then(|(_, v)| match v {
+                    crate::ion::IonValue::Int(n) => Some(*n as usize),
+                    _ => None,
+                });
+            sec1_pid_and_len = p.zip(l);
+        }
+        // Section 1 starts at PID 6 and has length: 1 (root) + 34 + 7 + 1 + 13 ("To elucidate.") = 56
+        assert_eq!(sec1_pid_and_len, Some((6, 1 + 34 + 7 + 1 + 13)));
+    }
+
+    #[test]
+    fn test_word_wise_non_bmp_utf16_and_list_image_pid_parity() {
+        use crate::ir::{Block, BookIR, BookMetadata, ResourceAsset, Section, TextSpan};
+        use crate::packager::KfxPackager;
+        use std::io::Cursor;
+
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "fig.jpg".to_string(),
+            ResourceAsset {
+                id: "fig.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: super::super::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+            },
+        );
+
+        let ir = BookIR {
+            metadata: BookMetadata::default(),
+            sections: vec![
+                Section {
+                    id: "cover".to_string(),
+                    title: "Cover".to_string(),
+                    blocks: vec![Block::Image {
+                        id: "c_img".to_string(),
+                        resource_id: "fig.jpg".to_string(),
+                        alt: Some("Cover".to_string()),
+                        width: None,
+                        height: None,
+                    }],
+                },
+                Section {
+                    id: "sec1".to_string(),
+                    title: "Chapter 1".to_string(),
+                    blocks: vec![
+                        Block::Paragraph {
+                            id: "p_emoji".to_string(),
+                            spans: vec![TextSpan {
+                                text: "📖 The abstruse theorem.".to_string(),
+                                style: None,
+                                anchor_id: None,
+                                href: None,
+                                ruby: None,
+                            }],
+                            style: None,
+                        },
+                        Block::List {
+                            id: "l1".to_string(),
+                            ordered: false,
+                            items: vec![
+                                vec![Block::Paragraph {
+                                    id: "lp1".to_string(),
+                                    spans: vec![TextSpan {
+                                        text: "Item 𠮷".to_string(),
+                                        style: None,
+                                        anchor_id: None,
+                                        href: None,
+                                        ruby: None,
+                                    }],
+                                    style: None,
+                                }],
+                                vec![Block::Image {
+                                    id: "limg".to_string(),
+                                    resource_id: "fig.jpg".to_string(),
+                                    alt: Some("An abstruse figure".to_string()), // 18 UTF-16 units, must NOT be glossed
+                                    width: None,
+                                    height: None,
+                                }],
+                                vec![Block::Paragraph {
+                                    id: "lp2".to_string(),
+                                    spans: vec![TextSpan {
+                                        text: "To elucidate.".to_string(),
+                                        style: None,
+                                        anchor_id: None,
+                                        href: None,
+                                        ruby: None,
+                                    }],
+                                    style: None,
+                                }],
+                            ],
+                        },
+                    ],
+                },
+            ],
+            resources,
+            toc: Vec::new(),
+            page_list: Vec::new(),
+            footnotes: std::collections::HashMap::new(),
+        };
+
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1").with_pacing(
+            WordWisePacingConfig {
+                max_difficulty_level: 5,
+                min_distance: 1,
+                max_glosses_per_window: 10,
+                window_size: 500,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 100,
+            },
+        );
+        let count = builder.generate_from_book(&ir);
+        assert!(count >= 2);
+
+        // Cover: 1 + 5 = 6.
+        // sec1 root: +1 = 7.
+        // p_emoji: "📖 The " -> 📖(2) + " "(1) + "The "(4) = 7 UTF-16 units -> "abstruse" at PID 7 + 7 = 14!
+        assert!(
+            builder.glosses.contains_key(&14),
+            "Expected 'abstruse' at UTF-16 PID 14 (📖 = 2 UTF-16 units), got {:?}",
+            builder.glosses
+        );
+
+        // p_emoji UTF-16 len = 2 + 22 = 24. Next block starts at 7 + 24 = 31.
+        // List text seg 1 ("Item 𠮷"): 5 + 2 = 7 UTF-16 units -> ends at 38.
+        // List image seg ("An abstruse figure"): 18 UTF-16 units -> ends at 56 (NOT glossed!).
+        // List text seg 2 ("To elucidate."): starts at 56 -> "To " = 3 -> "elucidate" at PID 59!
+        assert!(
+            builder.glosses.contains_key(&59),
+            "Expected 'elucidate' at PID 59 after list image, got {:?}",
+            builder.glosses
+        );
+        // Ensure no gloss was emitted inside the list image's alt text [38..56)
+        assert!(
+            !builder.glosses.keys().any(|&k| (38..56).contains(&k)),
+            "List-nested image alt text must NOT be glossed: {:?}",
+            builder.glosses
+        );
+
+        // Verify exact PID parity against KfxPackager's $265 position_id_map
+        let mut packager = KfxPackager::new(&ir, "EBOK");
+        let mut buf = Cursor::new(Vec::new());
+        packager.package(&mut buf).expect("package must succeed");
+        let pos_id_ent = packager
+            .entities
+            .iter()
+            .find(|e| e.chunk_type == crate::symbols::KfxSymbol::PositionIdMap as u32)
+            .expect("$265");
+        let vals = crate::ion::IonReader::new(&pos_id_ent.data)
+            .decode_all()
+            .unwrap();
+        let sym_contains = crate::symbols::KfxSymbol::Contains as u32;
+        let sym_len = crate::symbols::KfxSymbol::Length as u32;
+        let mut sec1_len = None;
+        if let crate::ion::IonValue::Struct(fields) = &vals[0]
+            && let Some((_, crate::ion::IonValue::List(entries))) =
+                fields.iter().find(|(k, _)| *k == sym_contains)
+            && let Some(crate::ion::IonValue::Struct(s1)) = entries.get(1)
+        {
+            sec1_len = s1
+                .iter()
+                .find(|(k, _)| *k == sym_len)
+                .and_then(|(_, v)| match v {
+                    crate::ion::IonValue::Int(n) => Some(*n as usize),
+                    _ => None,
+                });
+        }
+        // Expected sec1 length: 1 (root) + 24 (p_emoji) + 7 ("Item 𠮷") + 18 (list img) + 13 ("To elucidate.") = 63
+        assert_eq!(sec1_len, Some(63));
     }
 
     #[test]

@@ -431,7 +431,7 @@ fn test_cli_word_wise_error_emits_stderr_warning_and_no_success_line() {
     let target_kfx = temp.path().join("ww_warn.kfx");
 
     // Pre-create a regular file where `.sdr` directory would be deployed so SdrDeployer::deploy fails
-    // and populates `report.word_wise_error` while conversion itself still succeeds.
+    // and populates `report.sdr_error` while conversion itself still succeeds.
     std::fs::write(target_kfx.with_extension("sdr"), b"blocking-file").unwrap();
 
     let output = cli_cmd(temp.path())
@@ -443,17 +443,60 @@ fn test_cli_word_wise_error_emits_stderr_warning_and_no_success_line() {
 
     assert!(
         output.status.success(),
-        "Non-fatal Word Wise failure must still exit 0; stderr={}",
+        "Non-fatal SDR failure must still exit 0; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Warning: Word Wise generation failed:"),
-        "Expected stderr warning, got: {stderr}"
+        stderr.contains("Warning: Companion .sdr sidecar deployment failed:"),
+        "Expected companion SDR stderr warning, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Warning: Word Wise generation failed:"),
+        "Must NOT attribute SDR deploy failure to Word Wise generation; stderr={stderr}"
     );
     assert!(
         !stdout.contains("Word Wise sidecar generated"),
-        "Must NOT print Word Wise sidecar generated when word_wise_error is Some; stdout={stdout}"
+        "Must NOT print Word Wise sidecar generated when sdr_error is Some; stdout={stdout}"
+    );
+}
+
+#[test]
+fn test_cli_sdr_error_with_word_wise_disabled_reports_sdr_not_word_wise() {
+    let temp = common::temp_dir();
+    let epub_path =
+        common::create_minimal_epub(temp.path(), "sdr_noww.epub", "SDR NoWW Book", "en", false);
+    let target_kfx = temp.path().join("sdr_noww.kfx");
+
+    std::fs::write(target_kfx.with_extension("sdr"), b"blocking-file").unwrap();
+
+    let output = cli_cmd(temp.path())
+        .arg(&epub_path)
+        .arg("-o")
+        .arg(&target_kfx)
+        .arg("-w")
+        .arg("false")
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(
+        output.status.success(),
+        "Non-fatal SDR failure with -w false must still exit 0; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Warning: Companion .sdr sidecar deployment failed:"),
+        "Expected companion SDR stderr warning, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Word Wise"),
+        "Must NOT mention Word Wise in stderr when -w false; stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Word Wise sidecar generated"),
+        "Must NOT print Word Wise sidecar generated when -w false; stdout={stdout}"
     );
 }

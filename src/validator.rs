@@ -7,10 +7,56 @@
 
 use crate::container::KfxEntity;
 use crate::ion::{IonReader, IonValue};
-use crate::ir::is_allowlisted_external_uri;
-use crate::packager::{FIRST_LOCAL_SYMBOL_ID, LocalSymbols, SINGLETON_ID};
-use crate::symbols::symbol_name;
+use crate::ir::{is_allowlisted_external_uri, str_utf16_len};
+use crate::symbols::{
+    FIRST_LOCAL_SYMBOL_ID, KfxSymbol, LocalSymbols, SINGLETON_ID, SYM_ANCHOR, SYM_AUXILIARY_DATA,
+    SYM_BOOK_METADATA, SYM_CONTAINER_ENTITY_MAP, SYM_CONTENT, SYM_CONTENT_FEATURES,
+    SYM_DOCUMENT_DATA, SYM_FOOTNOTE, SYM_METADATA, SYM_POPUP, SYM_POPUP_TEXT, SYM_SECTION,
+    SYM_SECTION_POSITION_ID_MAP, SYM_STORYLINE, SYM_STYLE, SYM_YJ_LOCATION_PID_MAP, SYM_YJ_NOTE,
+    symbol_name,
+};
 use std::collections::{HashMap, HashSet};
+
+const SYM_NAME: u32 = KfxSymbol::Name as u32;
+const SYM_STYLE_EVENTS: u32 = KfxSymbol::StyleEvents as u32;
+const SYM_OFFSET: u32 = KfxSymbol::Offset as u32;
+const SYM_LENGTH: u32 = KfxSymbol::Length as u32;
+const SYM_CONTENT_LIST: u32 = KfxSymbol::ContentList as u32;
+const SYM_ID: u32 = KfxSymbol::Id as u32;
+const SYM_TYPE: u32 = KfxSymbol::Type as u32;
+const SYM_FORMAT: u32 = KfxSymbol::Format as u32;
+const SYM_EXTERNAL_RESOURCE: u32 = KfxSymbol::ExternalResource as u32;
+const SYM_LOCATION: u32 = KfxSymbol::Location as u32;
+const SYM_SECTIONS: u32 = KfxSymbol::Sections as u32;
+const SYM_SECTION_NAME: u32 = KfxSymbol::SectionName as u32;
+const SYM_RESOURCE_NAME: u32 = KfxSymbol::ResourceName as u32;
+const SYM_STORY_NAME: u32 = KfxSymbol::StoryName as u32;
+const SYM_LINK_TO: u32 = KfxSymbol::LinkTo as u32;
+const SYM_ANCHOR_NAME: u32 = KfxSymbol::AnchorName as u32;
+const SYM_CONTAINS: u32 = KfxSymbol::Contains as u32;
+const SYM_POSITION: u32 = KfxSymbol::Position as u32;
+const SYM_URI: u32 = KfxSymbol::Uri as u32;
+const SYM_ICON: u32 = KfxSymbol::Icon as u32;
+const SYM_TARGET_POSITION: u32 = KfxSymbol::TargetPosition as u32;
+const SYM_ENTITY_DEPENDENCIES: u32 = KfxSymbol::EntityDependencies as u32;
+const SYM_MANDATORY_DEPENDENCIES: u32 = KfxSymbol::MandatoryDependencies as u32;
+const SYM_OPTIONAL_DEPENDENCIES: u32 = KfxSymbol::OptionalDependencies as u32;
+const SYM_POSITION_MAP: u32 = KfxSymbol::PositionMap as u32;
+const SYM_POSITION_ID_MAP: u32 = KfxSymbol::PositionIdMap as u32;
+const SYM_PNG: u32 = KfxSymbol::Png as u32;
+const SYM_JPG: u32 = KfxSymbol::Jpg as u32;
+const SYM_GIF: u32 = KfxSymbol::Gif as u32;
+const SYM_BOOK_NAVIGATION: u32 = KfxSymbol::BookNavigation as u32;
+const SYM_NAV_CONTAINER: u32 = KfxSymbol::NavContainer as u32;
+const SYM_NAV_CONTAINERS: u32 = KfxSymbol::NavContainers as u32;
+const SYM_NAV_UNIT: u32 = KfxSymbol::NavUnit as u32;
+const SYM_INDEX: u32 = KfxSymbol::Index as u32;
+const SYM_BC_RAW_MEDIA: u32 = KfxSymbol::Bcrawmedia as u32;
+const SYM_RESOURCE_WIDTH: u32 = KfxSymbol::ResourceWidth as u32;
+const SYM_RESOURCE_HEIGHT: u32 = KfxSymbol::ResourceHeight as u32;
+const SYM_BACKDROP_STYLE: u32 = KfxSymbol::BackdropStyle as u32;
+const SYM_KEY: u32 = KfxSymbol::Key as u32;
+const SYM_LOCATION_MAP: u32 = KfxSymbol::LocationMap as u32;
 
 /// Validation errors indicating broken referential integrity in a KFX container.
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -129,7 +175,16 @@ impl<'a> KfxPreflightValidator<'a> {
     fn is_singleton_chunk_type(chunk_type: u32) -> bool {
         matches!(
             chunk_type,
-            258 | 389 | 419 | 490 | 538 | 585 | 264 | 265 | 550 | 621
+            SYM_METADATA
+                | SYM_BOOK_NAVIGATION
+                | SYM_CONTAINER_ENTITY_MAP
+                | SYM_BOOK_METADATA
+                | SYM_DOCUMENT_DATA
+                | SYM_CONTENT_FEATURES
+                | SYM_POSITION_MAP
+                | SYM_POSITION_ID_MAP
+                | SYM_LOCATION_MAP
+                | SYM_YJ_LOCATION_PID_MAP
         )
     }
 
@@ -145,10 +200,86 @@ impl<'a> KfxPreflightValidator<'a> {
                 }
                 IonValue::Struct(fields) => {
                     for (fid, fval) in fields {
-                        if *fid == 155
+                        if *fid == SYM_ID
                             && let IonValue::Int(eid) = fval
                         {
                             out.insert(*eid);
+                        }
+                        stack.push(fval);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn resolve_content_ref_utf16_len(
+        fields: &[(u32, IonValue)],
+        content_segment_utf16_lens: &HashMap<u32, Vec<usize>>,
+    ) -> Option<usize> {
+        let (_, IonValue::Struct(ref_fields)) = fields.iter().find(|(k, _)| *k == SYM_CONTENT)?
+        else {
+            return None;
+        };
+        let chunk_sym = match ref_fields.iter().find(|(k, _)| *k == SYM_NAME)?.1 {
+            IonValue::Symbol(s) if s != 0 => s,
+            _ => return None,
+        };
+        let idx = match ref_fields.iter().find(|(k, _)| *k == SYM_INDEX)?.1 {
+            IonValue::Int(i) if i >= 0 => i as usize,
+            _ => return None,
+        };
+        content_segment_utf16_lens
+            .get(&chunk_sym)
+            .and_then(|segs| segs.get(idx))
+            .copied()
+    }
+
+    fn collect_storyline_metadata(
+        values: &[IonValue],
+        content_segment_utf16_lens: &HashMap<u32, Vec<usize>>,
+        eid_text_utf16_lens: &mut HashMap<i64, usize>,
+        story_res_out: &mut HashSet<u32>,
+    ) {
+        let mut stack: Vec<&IonValue> = values.iter().collect();
+        while let Some(cur) = stack.pop() {
+            match cur {
+                IonValue::Annotated(_, inner) => stack.push(inner),
+                IonValue::List(items) => stack.extend(items.iter()),
+                IonValue::Struct(fields) => {
+                    if let Some((_, IonValue::Int(elem_eid))) =
+                        fields.iter().find(|(k, _)| *k == SYM_ID)
+                        && let Some(seg_len) =
+                            Self::resolve_content_ref_utf16_len(fields, content_segment_utf16_lens)
+                    {
+                        eid_text_utf16_lens.insert(*elem_eid, seg_len);
+                    }
+                    for (fid, fval) in fields {
+                        if *fid == SYM_RESOURCE_NAME
+                            && let IonValue::Symbol(res_sym) = fval
+                        {
+                            story_res_out.insert(*res_sym);
+                        }
+                        stack.push(fval);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_section_story_names(values: &[IonValue], out: &mut Vec<u32>) {
+        let mut stack: Vec<&IonValue> = values.iter().collect();
+        while let Some(cur) = stack.pop() {
+            match cur {
+                IonValue::Annotated(_, inner) => stack.push(inner),
+                IonValue::List(items) => stack.extend(items.iter()),
+                IonValue::Struct(fields) => {
+                    for (fid, fval) in fields {
+                        if *fid == SYM_STORY_NAME
+                            && let IonValue::Symbol(story_sym) = fval
+                        {
+                            out.push(*story_sym);
                         }
                         stack.push(fval);
                     }
@@ -233,12 +364,12 @@ impl<'a> KfxPreflightValidator<'a> {
         // 3. Decode Ion entities, validate $145 content chunks, and collect internal element IDs
         let mut decoded_entities: Vec<(&KfxEntity, Vec<IonValue>)> =
             Vec::with_capacity(self.entities.len());
-        let mut content_lens: HashMap<u32, usize> = HashMap::new();
+        let mut content_segment_utf16_lens: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut internal_eids: HashSet<i64> = HashSet::new();
 
         for ent in self.entities {
-            // Raw media entities (417) are binary payloads, not Ion
-            if ent.chunk_type == 417 {
+            // Raw media entities ($417) are binary payloads, not Ion
+            if ent.chunk_type == SYM_BC_RAW_MEDIA {
                 continue;
             }
 
@@ -257,7 +388,7 @@ impl<'a> KfxPreflightValidator<'a> {
                 });
             }
 
-            if ent.chunk_type == 145 {
+            if ent.chunk_type == SYM_CONTENT {
                 let root_struct = match &root_values[0] {
                     IonValue::Struct(fields) => Some(fields),
                     IonValue::Annotated(_, inner) => match inner.as_ref() {
@@ -267,20 +398,20 @@ impl<'a> KfxPreflightValidator<'a> {
                     _ => None,
                 };
                 let fields = root_struct.ok_or_else(|| ValidationError::IllegalField {
-                    chunk_type: 145,
+                    chunk_type: SYM_CONTENT,
                     eid: ent.entity_id,
                     field_id: 0,
                     field_name: "content".to_string(),
                     reason: "Content entity ($145) must be an Ion struct".to_string(),
                 })?;
 
-                if let Some((_, name_val)) = fields.iter().find(|(k, _)| *k == 4)
+                if let Some((_, name_val)) = fields.iter().find(|(k, _)| *k == SYM_NAME)
                     && *name_val != IonValue::Symbol(ent.entity_id)
                 {
                     return Err(ValidationError::IllegalField {
-                        chunk_type: 145,
+                        chunk_type: SYM_CONTENT,
                         eid: ent.entity_id,
-                        field_id: 4,
+                        field_id: SYM_NAME,
                         field_name: "name".to_string(),
                         reason: format!(
                             "Content entity ($145) 'name' ($4) must match entity_id {}, found {:?}",
@@ -291,38 +422,42 @@ impl<'a> KfxPreflightValidator<'a> {
 
                 let list_val = fields
                     .iter()
-                    .find(|(k, _)| *k == 146)
+                    .find(|(k, _)| *k == SYM_CONTENT_LIST)
                     .map(|(_, v)| v)
                     .ok_or_else(|| ValidationError::IllegalField {
-                        chunk_type: 145,
+                        chunk_type: SYM_CONTENT,
                         eid: ent.entity_id,
-                        field_id: 146,
+                        field_id: SYM_CONTENT_LIST,
                         field_name: "content_list".to_string(),
                         reason: "Content entity ($145) missing content_list ($146)".to_string(),
                     })?;
                 let IonValue::List(items) = list_val else {
                     return Err(ValidationError::IllegalField {
-                        chunk_type: 145,
+                        chunk_type: SYM_CONTENT,
                         eid: ent.entity_id,
-                        field_id: 146,
+                        field_id: SYM_CONTENT_LIST,
                         field_name: "content_list".to_string(),
                         reason: "content_list ($146) in content ($145) must be a List".to_string(),
                     });
                 };
-                if items.iter().any(|it| !matches!(it, IonValue::String(_))) {
-                    return Err(ValidationError::IllegalField {
-                        chunk_type: 145,
-                        eid: ent.entity_id,
-                        field_id: 146,
-                        field_name: "content_list".to_string(),
-                        reason: "content_list ($146) items in content ($145) must be strings"
-                            .to_string(),
-                    });
+                let mut seg_lens = Vec::with_capacity(items.len());
+                for it in items {
+                    let IonValue::String(s) = it else {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: SYM_CONTENT,
+                            eid: ent.entity_id,
+                            field_id: SYM_CONTENT_LIST,
+                            field_name: "content_list".to_string(),
+                            reason: "content_list ($146) items in content ($145) must be strings"
+                                .to_string(),
+                        });
+                    };
+                    seg_lens.push(str_utf16_len(s));
                 }
-                content_lens.insert(ent.entity_id, items.len());
+                content_segment_utf16_lens.insert(ent.entity_id, seg_lens);
             }
 
-            if ent.chunk_type == 259 || ent.chunk_type == 260 {
+            if ent.chunk_type == SYM_STORYLINE || ent.chunk_type == SYM_SECTION {
                 for val in &root_values {
                     Self::collect_internal_eids(val, &mut internal_eids);
                 }
@@ -331,23 +466,76 @@ impl<'a> KfxPreflightValidator<'a> {
             decoded_entities.push((ent, root_values));
         }
 
+        // 4. Pre-scan $259 storylines and $260 sections for per-EID UTF-16 lengths and image resource refs
+        let mut eid_text_utf16_lens: HashMap<i64, usize> = HashMap::new();
+        let mut story_to_resources: HashMap<u32, HashSet<u32>> = HashMap::new();
+        for (ent, root_values) in &decoded_entities {
+            if ent.chunk_type == SYM_STORYLINE {
+                let mut res_set = HashSet::new();
+                Self::collect_storyline_metadata(
+                    root_values,
+                    &content_segment_utf16_lens,
+                    &mut eid_text_utf16_lens,
+                    &mut res_set,
+                );
+                story_to_resources.insert(ent.entity_id, res_set);
+            }
+        }
+        let mut section_storyline_resource_refs: HashMap<u32, HashSet<u32>> = HashMap::new();
+        for (ent, root_values) in &decoded_entities {
+            if ent.chunk_type == SYM_SECTION {
+                let mut story_syms = Vec::new();
+                Self::collect_section_story_names(root_values, &mut story_syms);
+                for story_sym in story_syms {
+                    if let Some(res_set) = story_to_resources.get(&story_sym) {
+                        section_storyline_resource_refs
+                            .entry(ent.entity_id)
+                            .or_default()
+                            .extend(res_set.iter().copied());
+                    }
+                }
+            }
+        }
+
         let mut ref_count = 0;
 
         for (ent, root_values) in &decoded_entities {
-            if ent.chunk_type == 266 {
-                Self::validate_anchor_entity(ent, &root_values[0], &defined_eids, &internal_eids)?;
+            if ent.chunk_type == SYM_ANCHOR {
+                Self::validate_anchor_entity(
+                    ent,
+                    &root_values[0],
+                    &internal_eids,
+                    &eid_text_utf16_lens,
+                )?;
             }
+            if ent.chunk_type == SYM_EXTERNAL_RESOURCE {
+                self.validate_external_resource_entity(ent, &root_values[0], &entity_map)?;
+            }
+            let mut saw_contains = false;
             for val in root_values {
                 self.walk_value(
                     val,
                     ent,
                     &entity_map,
                     &defined_eids,
-                    &content_lens,
+                    &content_segment_utf16_lens,
                     &internal_eids,
+                    &eid_text_utf16_lens,
+                    &section_storyline_resource_refs,
+                    &mut saw_contains,
                     &mut ref_count,
                     0,
                 )?;
+            }
+            if ent.chunk_type == SYM_CONTAINER_ENTITY_MAP && !saw_contains {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: SYM_CONTAINER_ENTITY_MAP,
+                    eid: ent.entity_id,
+                    field_id: SYM_CONTAINS,
+                    field_name: "contains".to_string(),
+                    reason: "container_entity_map ($419) must include 'contains' ($181)"
+                        .to_string(),
+                });
             }
         }
 
@@ -361,8 +549,8 @@ impl<'a> KfxPreflightValidator<'a> {
         })
     }
 
-    /// Validates a full packaged KFX container, ensuring non-empty entities and all required
-    /// core Yellowjacket singleton fragments (`$419`, `$490`, `$258`, `$538`, `$585`) exist
+    /// Validates a full packaged KFX container, ensuring non-empty entities, all 9 required
+    /// core Yellowjacket singleton fragments, and section/storyline/`$609` consistency
     /// in addition to full referential integrity checks.
     pub fn validate_container(&self) -> Result<ValidationReport, ValidationError> {
         let report = self.validate()?;
@@ -372,12 +560,16 @@ impl<'a> KfxPreflightValidator<'a> {
                 name: "container (empty)".to_string(),
             });
         }
-        const REQUIRED_SINGLETONS: [(u32, &str); 5] = [
-            (419, "container_entity_map"),
-            (490, "book_metadata"),
-            (258, "metadata"),
-            (538, "document_data"),
-            (585, "content_features"),
+        const REQUIRED_SINGLETONS: [(u32, &str); 9] = [
+            (SYM_CONTAINER_ENTITY_MAP, "container_entity_map"),
+            (SYM_BOOK_METADATA, "book_metadata"),
+            (SYM_METADATA, "metadata"),
+            (SYM_DOCUMENT_DATA, "document_data"),
+            (SYM_CONTENT_FEATURES, "content_features"),
+            (SYM_POSITION_MAP, "position_map"),
+            (SYM_POSITION_ID_MAP, "position_id_map"),
+            (SYM_LOCATION_MAP, "location_map"),
+            (SYM_YJ_LOCATION_PID_MAP, "yj.location_pid_map"),
         ];
         for (chunk_type, name) in REQUIRED_SINGLETONS {
             if !self
@@ -391,7 +583,190 @@ impl<'a> KfxPreflightValidator<'a> {
                 });
             }
         }
+
+        let section_ids: Vec<u32> = self
+            .entities
+            .iter()
+            .filter(|e| e.chunk_type == SYM_SECTION)
+            .map(|e| e.entity_id)
+            .collect();
+        let has_storyline = self.entities.iter().any(|e| e.chunk_type == SYM_STORYLINE);
+
+        if !section_ids.is_empty() {
+            if !has_storyline {
+                return Err(ValidationError::MissingRequiredEntity {
+                    chunk_type: SYM_STORYLINE,
+                    name: "storyline".to_string(),
+                });
+            }
+            for sec_id in section_ids {
+                if !self
+                    .entities
+                    .iter()
+                    .any(|e| e.chunk_type == SYM_SECTION_POSITION_ID_MAP && e.entity_id == sec_id)
+                {
+                    return Err(ValidationError::MissingRequiredEntity {
+                        chunk_type: SYM_SECTION_POSITION_ID_MAP,
+                        name: format!(
+                            "section_position_id_map ({})",
+                            self.resolve_symbol_name(sec_id)
+                        ),
+                    });
+                }
+            }
+        } else if has_storyline {
+            return Err(ValidationError::MissingRequiredEntity {
+                chunk_type: SYM_SECTION,
+                name: "section".to_string(),
+            });
+        }
+
         Ok(report)
+    }
+
+    /// Validates a `$164 external_resource` entity for dimension consistency (`$422`/`$423`)
+    /// and `$417 bcRawMedia` magic-byte & header-dimension parity when local symbols are available.
+    fn validate_external_resource_entity(
+        &self,
+        ent: &KfxEntity,
+        root_val: &IonValue,
+        entity_map: &HashMap<(u32, u32), &KfxEntity>,
+    ) -> Result<(), ValidationError> {
+        let root_struct = match root_val {
+            IonValue::Struct(fields) => Some(fields),
+            IonValue::Annotated(_, inner) => match inner.as_ref() {
+                IonValue::Struct(fields) => Some(fields),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(fields) = root_struct else {
+            return Ok(());
+        };
+
+        let w_val = fields
+            .iter()
+            .find(|(k, _)| *k == SYM_RESOURCE_WIDTH)
+            .map(|(_, v)| v);
+        let h_val = fields
+            .iter()
+            .find(|(k, _)| *k == SYM_RESOURCE_HEIGHT)
+            .map(|(_, v)| v);
+
+        let declared_dims: Option<(i64, i64)> = if w_val.is_some() || h_val.is_some() {
+            let w = match w_val {
+                Some(IonValue::Int(v)) if *v > 0 => *v,
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: SYM_EXTERNAL_RESOURCE,
+                        eid: ent.entity_id,
+                        field_id: SYM_RESOURCE_WIDTH,
+                        field_name: "resource_width".to_string(),
+                        reason: format!(
+                            "External resource ($164) requires positive Int 'resource_width' ($422), found {:?}",
+                            other
+                        ),
+                    });
+                }
+            };
+            let h = match h_val {
+                Some(IonValue::Int(v)) if *v > 0 => *v,
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: SYM_EXTERNAL_RESOURCE,
+                        eid: ent.entity_id,
+                        field_id: SYM_RESOURCE_HEIGHT,
+                        field_name: "resource_height".to_string(),
+                        reason: format!(
+                            "External resource ($164) requires positive Int 'resource_height' ($423), found {:?}",
+                            other
+                        ),
+                    });
+                }
+            };
+            Some((w, h))
+        } else {
+            None
+        };
+
+        if let Some(syms) = self.symbols
+            && let Some((_, IonValue::String(raw_path))) =
+                fields.iter().find(|(k, _)| *k == SYM_LOCATION)
+            && let Some(target_sym) = syms.get_id(raw_path)
+            && let Some(raw_417) = entity_map.get(&(SYM_BC_RAW_MEDIA, target_sym))
+            && let Some((_, IonValue::Symbol(fmt_sym))) =
+                fields.iter().find(|(k, _)| *k == SYM_FORMAT)
+            && matches!(*fmt_sym, SYM_JPG | SYM_PNG | SYM_GIF)
+        {
+            let magic_ok = match *fmt_sym {
+                SYM_JPG => raw_417.data.starts_with(b"\xFF\xD8\xFF"),
+                SYM_PNG => raw_417.data.starts_with(b"\x89PNG\r\n\x1A\n"),
+                SYM_GIF => {
+                    raw_417.data.starts_with(b"GIF87a") || raw_417.data.starts_with(b"GIF89a")
+                }
+                _ => true,
+            };
+            if !magic_ok {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: SYM_EXTERNAL_RESOURCE,
+                    eid: ent.entity_id,
+                    field_id: SYM_FORMAT,
+                    field_name: "format".to_string(),
+                    reason: format!(
+                        "External resource ($164) declares format '{}' (${}) but bcRawMedia ($417) magic bytes do not match",
+                        self.resolve_symbol_name(*fmt_sym),
+                        fmt_sym
+                    ),
+                });
+            }
+
+            if let Some((actual_w, actual_h)) =
+                crate::enhancements::CoverOptimizer::get_image_dimensions(&raw_417.data)
+            {
+                let (actual_w_i64, actual_h_i64) = (actual_w as i64, actual_h as i64);
+                match declared_dims {
+                    Some((dw, dh)) if dw == actual_w_i64 && dh == actual_h_i64 => {}
+                    Some((dw, _)) if dw != actual_w_i64 => {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: SYM_EXTERNAL_RESOURCE,
+                            eid: ent.entity_id,
+                            field_id: SYM_RESOURCE_WIDTH,
+                            field_name: "resource_width".to_string(),
+                            reason: format!(
+                                "External resource ($164) resource_width ($422) is {}, but bcRawMedia ($417) header reports {}",
+                                dw, actual_w_i64
+                            ),
+                        });
+                    }
+                    Some((_, dh)) => {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: SYM_EXTERNAL_RESOURCE,
+                            eid: ent.entity_id,
+                            field_id: SYM_RESOURCE_HEIGHT,
+                            field_name: "resource_height".to_string(),
+                            reason: format!(
+                                "External resource ($164) resource_height ($423) is {}, but bcRawMedia ($417) header reports {}",
+                                dh, actual_h_i64
+                            ),
+                        });
+                    }
+                    None => {
+                        return Err(ValidationError::IllegalField {
+                            chunk_type: SYM_EXTERNAL_RESOURCE,
+                            eid: ent.entity_id,
+                            field_id: SYM_RESOURCE_WIDTH,
+                            field_name: "resource_width".to_string(),
+                            reason: format!(
+                                "External resource ($164) missing resource_width/resource_height ($422/$423) for {}x{} bcRawMedia ($417)",
+                                actual_w_i64, actual_h_i64
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Validates a `$266 anchor` entity payload (`$180 anchor_name` matching `ent.entity_id`,
@@ -399,8 +774,8 @@ impl<'a> KfxPreflightValidator<'a> {
     fn validate_anchor_entity(
         ent: &KfxEntity,
         root_val: &IonValue,
-        defined_eids: &HashSet<u32>,
         internal_eids: &HashSet<i64>,
+        eid_text_utf16_lens: &HashMap<i64, usize>,
     ) -> Result<(), ValidationError> {
         let root_struct = match root_val {
             IonValue::Struct(fields) => Some(fields),
@@ -411,20 +786,24 @@ impl<'a> KfxPreflightValidator<'a> {
             _ => None,
         };
         let fields = root_struct.ok_or_else(|| ValidationError::IllegalField {
-            chunk_type: 266,
+            chunk_type: SYM_ANCHOR,
             eid: ent.entity_id,
             field_id: 0,
             field_name: "anchor".to_string(),
             reason: "Anchor entity ($266) must be an Ion struct".to_string(),
         })?;
 
-        match fields.iter().find(|(k, _)| *k == 180).map(|(_, v)| v) {
+        match fields
+            .iter()
+            .find(|(k, _)| *k == SYM_ANCHOR_NAME)
+            .map(|(_, v)| v)
+        {
             Some(IonValue::Symbol(sym)) if *sym == ent.entity_id => {}
             other => {
                 return Err(ValidationError::IllegalField {
-                    chunk_type: 266,
+                    chunk_type: SYM_ANCHOR,
                     eid: ent.entity_id,
-                    field_id: 180,
+                    field_id: SYM_ANCHOR_NAME,
                     field_name: "anchor_name".to_string(),
                     reason: format!(
                         "Anchor entity ($266) 'anchor_name' ($180) must equal Symbol({}), found {:?}",
@@ -434,13 +813,13 @@ impl<'a> KfxPreflightValidator<'a> {
             }
         }
 
-        let pos_count = fields.iter().filter(|(k, _)| *k == 183).count();
-        let uri_count = fields.iter().filter(|(k, _)| *k == 186).count();
+        let pos_count = fields.iter().filter(|(k, _)| *k == SYM_POSITION).count();
+        let uri_count = fields.iter().filter(|(k, _)| *k == SYM_URI).count();
         if pos_count + uri_count != 1 {
             return Err(ValidationError::IllegalField {
-                chunk_type: 266,
+                chunk_type: SYM_ANCHOR,
                 eid: ent.entity_id,
-                field_id: if uri_count > 0 { 186 } else { 183 },
+                field_id: if uri_count > 0 { SYM_URI } else { SYM_POSITION },
                 field_name: if uri_count > 0 {
                     "uri".to_string()
                 } else {
@@ -453,23 +832,27 @@ impl<'a> KfxPreflightValidator<'a> {
             });
         }
 
-        if let Some((_, pos_val)) = fields.iter().find(|(k, _)| *k == 183) {
+        if let Some((_, pos_val)) = fields.iter().find(|(k, _)| *k == SYM_POSITION) {
             let IonValue::Struct(pos_fields) = pos_val else {
                 return Err(ValidationError::IllegalField {
-                    chunk_type: 266,
+                    chunk_type: SYM_ANCHOR,
                     eid: ent.entity_id,
-                    field_id: 183,
+                    field_id: SYM_POSITION,
                     field_name: "position".to_string(),
                     reason: "Anchor position ($183) must be a Struct".to_string(),
                 });
             };
-            let target_eid = match pos_fields.iter().find(|(k, _)| *k == 155).map(|(_, v)| v) {
+            let target_eid = match pos_fields
+                .iter()
+                .find(|(k, _)| *k == SYM_ID)
+                .map(|(_, v)| v)
+            {
                 Some(IonValue::Int(v)) if *v >= i64::from(FIRST_LOCAL_SYMBOL_ID) => *v,
                 other => {
                     return Err(ValidationError::IllegalField {
-                        chunk_type: 266,
+                        chunk_type: SYM_ANCHOR,
                         eid: ent.entity_id,
-                        field_id: 183,
+                        field_id: SYM_POSITION,
                         field_name: "position".to_string(),
                         reason: format!(
                             "Anchor position ($183) requires Int 'id' ($155 >= {}), found {:?}",
@@ -478,26 +861,38 @@ impl<'a> KfxPreflightValidator<'a> {
                     });
                 }
             };
-            let in_defined = u32::try_from(target_eid)
-                .ok()
-                .is_some_and(|e| defined_eids.contains(&e));
-            if !internal_eids.contains(&target_eid) && !in_defined {
+            if !internal_eids.contains(&target_eid) {
                 return Err(ValidationError::IllegalField {
-                    chunk_type: 266,
+                    chunk_type: SYM_ANCHOR,
                     eid: ent.entity_id,
-                    field_id: 183,
+                    field_id: SYM_POSITION,
                     field_name: "position".to_string(),
                     reason: format!("Dangling anchor position ($183) target EID {}", target_eid),
                 });
             }
-            if let Some((_, off_val)) = pos_fields.iter().find(|(k, _)| *k == 143) {
+            if let Some((_, off_val)) = pos_fields.iter().find(|(k, _)| *k == SYM_OFFSET) {
                 match off_val {
-                    IonValue::Int(off) if *off >= 0 => {}
+                    IonValue::Int(off) if *off >= 0 => {
+                        if let Some(&max_len) = eid_text_utf16_lens.get(&target_eid)
+                            && (*off as usize) > max_len
+                        {
+                            return Err(ValidationError::IllegalField {
+                                chunk_type: SYM_ANCHOR,
+                                eid: ent.entity_id,
+                                field_id: SYM_OFFSET,
+                                field_name: "offset".to_string(),
+                                reason: format!(
+                                    "Anchor position offset ($143) {} exceeds target EID {} UTF-16 length {}",
+                                    off, target_eid, max_len
+                                ),
+                            });
+                        }
+                    }
                     other => {
                         return Err(ValidationError::IllegalField {
-                            chunk_type: 266,
+                            chunk_type: SYM_ANCHOR,
                             eid: ent.entity_id,
-                            field_id: 143,
+                            field_id: SYM_OFFSET,
                             field_name: "offset".to_string(),
                             reason: format!(
                                 "Anchor position offset ($143) must be non-negative Int, found {:?}",
@@ -507,14 +902,14 @@ impl<'a> KfxPreflightValidator<'a> {
                     }
                 }
             }
-        } else if let Some((_, uri_val)) = fields.iter().find(|(k, _)| *k == 186) {
+        } else if let Some((_, uri_val)) = fields.iter().find(|(k, _)| *k == SYM_URI) {
             match uri_val {
                 IonValue::String(u) if is_allowlisted_external_uri(u) => {}
                 other => {
                     return Err(ValidationError::IllegalField {
-                        chunk_type: 266,
+                        chunk_type: SYM_ANCHOR,
                         eid: ent.entity_id,
-                        field_id: 186,
+                        field_id: SYM_URI,
                         field_name: "uri".to_string(),
                         reason: format!(
                             "Anchor uri ($186) must be a valid http://, https://, or mailto: URI, found {:?}",
@@ -528,45 +923,76 @@ impl<'a> KfxPreflightValidator<'a> {
         Ok(())
     }
 
-    /// Validates `$142 style_events` entries containing `$179 link_to` (`offset >= 0`, `length > 0`).
-    fn validate_link_style_events(
+    /// Validates ALL `$142 style_events` entries (`offset >= 0`, `length > 0`, and UTF-16 bounds
+    /// against `text_utf16_len` when known).
+    fn validate_all_style_events(
         referrer: &KfxEntity,
         events: &[IonValue],
+        text_utf16_len: Option<usize>,
     ) -> Result<(), ValidationError> {
         for ev in events {
-            if let IonValue::Struct(ev_fields) = ev
-                && ev_fields.iter().any(|(k, _)| *k == 179)
+            let IonValue::Struct(ev_fields) = ev else {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: referrer.chunk_type,
+                    eid: referrer.entity_id,
+                    field_id: SYM_STYLE_EVENTS,
+                    field_name: "style_events".to_string(),
+                    reason: "Each style_event ($142) entry must be a Struct".to_string(),
+                });
+            };
+            let off = match ev_fields
+                .iter()
+                .find(|(k, _)| *k == SYM_OFFSET)
+                .map(|(_, v)| v)
             {
-                match ev_fields.iter().find(|(k, _)| *k == 143).map(|(_, v)| v) {
-                    Some(IonValue::Int(off)) if *off >= 0 => {}
-                    other => {
-                        return Err(ValidationError::IllegalField {
-                            chunk_type: referrer.chunk_type,
-                            eid: referrer.entity_id,
-                            field_id: 143,
-                            field_name: "offset".to_string(),
-                            reason: format!(
-                                "Link style_event ($142) requires non-negative Int 'offset' ($143), found {:?}",
-                                other
-                            ),
-                        });
-                    }
+                Some(IonValue::Int(off)) if *off >= 0 => *off as usize,
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: referrer.chunk_type,
+                        eid: referrer.entity_id,
+                        field_id: SYM_OFFSET,
+                        field_name: "offset".to_string(),
+                        reason: format!(
+                            "style_event ($142) requires non-negative Int 'offset' ($143), found {:?}",
+                            other
+                        ),
+                    });
                 }
-                match ev_fields.iter().find(|(k, _)| *k == 144).map(|(_, v)| v) {
-                    Some(IonValue::Int(len)) if *len > 0 => {}
-                    other => {
-                        return Err(ValidationError::IllegalField {
-                            chunk_type: referrer.chunk_type,
-                            eid: referrer.entity_id,
-                            field_id: 144,
-                            field_name: "length".to_string(),
-                            reason: format!(
-                                "Link style_event ($142) requires positive Int 'length' ($144 > 0), found {:?}",
-                                other
-                            ),
-                        });
-                    }
+            };
+            let len = match ev_fields
+                .iter()
+                .find(|(k, _)| *k == SYM_LENGTH)
+                .map(|(_, v)| v)
+            {
+                Some(IonValue::Int(len)) if *len > 0 => *len as usize,
+                other => {
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: referrer.chunk_type,
+                        eid: referrer.entity_id,
+                        field_id: SYM_LENGTH,
+                        field_name: "length".to_string(),
+                        reason: format!(
+                            "style_event ($142) requires positive Int 'length' ($144 > 0), found {:?}",
+                            other
+                        ),
+                    });
                 }
+            };
+            if let Some(max_len) = text_utf16_len
+                && off.checked_add(len).is_none_or(|end| end > max_len)
+            {
+                return Err(ValidationError::IllegalField {
+                    chunk_type: referrer.chunk_type,
+                    eid: referrer.entity_id,
+                    field_id: SYM_STYLE_EVENTS,
+                    field_name: "style_events".to_string(),
+                    reason: format!(
+                        "style_event ($142) range [{}..{}) exceeds content UTF-16 length {}",
+                        off,
+                        off.saturating_add(len),
+                        max_len
+                    ),
+                });
             }
         }
         Ok(())
@@ -578,7 +1004,7 @@ impl<'a> KfxPreflightValidator<'a> {
             return Err(ValidationError::IllegalField {
                 chunk_type: referrer.chunk_type,
                 eid: referrer.entity_id,
-                field_id: 617,
+                field_id: SYM_YJ_NOTE,
                 field_name: "yj.note".to_string(),
                 reason: "Field 'yj.note' ($617) in auxiliary_data ($597) must be a List"
                     .to_string(),
@@ -589,18 +1015,18 @@ impl<'a> KfxPreflightValidator<'a> {
                 return Err(ValidationError::IllegalField {
                     chunk_type: referrer.chunk_type,
                     eid: referrer.entity_id,
-                    field_id: 617,
+                    field_id: SYM_YJ_NOTE,
                     field_name: "yj.note".to_string(),
                     reason: "Each yj.note ($617) entry must be a Struct".to_string(),
                 });
             };
-            match n_fields.iter().find(|(k, _)| *k == 492).map(|(_, v)| v) {
+            match n_fields.iter().find(|(k, _)| *k == SYM_KEY).map(|(_, v)| v) {
                 Some(IonValue::String(k)) if !k.trim().is_empty() => {}
                 other => {
                     return Err(ValidationError::IllegalField {
                         chunk_type: referrer.chunk_type,
                         eid: referrer.entity_id,
-                        field_id: 492,
+                        field_id: SYM_KEY,
                         field_name: "key".to_string(),
                         reason: format!(
                             "yj.note ($617) requires non-empty String 'key' ($492), found {:?}",
@@ -609,13 +1035,17 @@ impl<'a> KfxPreflightValidator<'a> {
                     });
                 }
             }
-            match n_fields.iter().find(|(k, _)| *k == 159).map(|(_, v)| v) {
-                Some(IonValue::Symbol(281)) => {}
+            match n_fields
+                .iter()
+                .find(|(k, _)| *k == SYM_TYPE)
+                .map(|(_, v)| v)
+            {
+                Some(IonValue::Symbol(s)) if *s == SYM_FOOTNOTE => {}
                 other => {
                     return Err(ValidationError::IllegalField {
                         chunk_type: referrer.chunk_type,
                         eid: referrer.entity_id,
-                        field_id: 159,
+                        field_id: SYM_TYPE,
                         field_name: "type".to_string(),
                         reason: format!(
                             "yj.note ($617) requires 'type' ($159) == Symbol(281 /* footnote */), found {:?}",
@@ -624,13 +1054,17 @@ impl<'a> KfxPreflightValidator<'a> {
                     });
                 }
             }
-            let popup_enabled = match n_fields.iter().find(|(k, _)| *k == 440).map(|(_, v)| v) {
+            let popup_enabled = match n_fields
+                .iter()
+                .find(|(k, _)| *k == SYM_POPUP)
+                .map(|(_, v)| v)
+            {
                 Some(IonValue::Bool(b)) => *b,
                 other => {
                     return Err(ValidationError::IllegalField {
                         chunk_type: referrer.chunk_type,
                         eid: referrer.entity_id,
-                        field_id: 440,
+                        field_id: SYM_POPUP,
                         field_name: "popup".to_string(),
                         reason: format!(
                             "yj.note ($617) requires Bool 'popup' ($440), found {:?}",
@@ -640,13 +1074,17 @@ impl<'a> KfxPreflightValidator<'a> {
                 }
             };
             if popup_enabled {
-                match n_fields.iter().find(|(k, _)| *k == 444).map(|(_, v)| v) {
+                match n_fields
+                    .iter()
+                    .find(|(k, _)| *k == SYM_POPUP_TEXT)
+                    .map(|(_, v)| v)
+                {
                     Some(IonValue::String(txt)) if !txt.trim().is_empty() => {}
                     other => {
                         return Err(ValidationError::IllegalField {
                             chunk_type: referrer.chunk_type,
                             eid: referrer.entity_id,
-                            field_id: 444,
+                            field_id: SYM_POPUP_TEXT,
                             field_name: "popup_text".to_string(),
                             reason: format!(
                                 "yj.note ($617) with popup=true requires non-empty String 'popup_text' ($444), found {:?}",
@@ -667,8 +1105,11 @@ impl<'a> KfxPreflightValidator<'a> {
         referrer: &KfxEntity,
         entity_map: &HashMap<(u32, u32), &KfxEntity>,
         defined_eids: &HashSet<u32>,
-        content_lens: &HashMap<u32, usize>,
+        content_segment_utf16_lens: &HashMap<u32, Vec<usize>>,
         internal_eids: &HashSet<i64>,
+        eid_text_utf16_lens: &HashMap<i64, usize>,
+        section_storyline_resource_refs: &HashMap<u32, HashSet<u32>>,
+        saw_contains: &mut bool,
         ref_count: &mut usize,
         depth: usize,
     ) -> Result<(), ValidationError> {
@@ -686,8 +1127,11 @@ impl<'a> KfxPreflightValidator<'a> {
                     referrer,
                     entity_map,
                     defined_eids,
-                    content_lens,
+                    content_segment_utf16_lens,
                     internal_eids,
+                    eid_text_utf16_lens,
+                    section_storyline_resource_refs,
+                    saw_contains,
                     ref_count,
                     depth + 1,
                 )?;
@@ -699,8 +1143,11 @@ impl<'a> KfxPreflightValidator<'a> {
                         referrer,
                         entity_map,
                         defined_eids,
-                        content_lens,
+                        content_segment_utf16_lens,
                         internal_eids,
+                        eid_text_utf16_lens,
+                        section_storyline_resource_refs,
+                        saw_contains,
                         ref_count,
                         depth + 1,
                     )?;
@@ -708,9 +1155,9 @@ impl<'a> KfxPreflightValidator<'a> {
             }
             IonValue::Struct(fields) => {
                 // Check 1: In styles ($157), field $4 ('name') is illegal
-                if referrer.chunk_type == 157 {
+                if referrer.chunk_type == SYM_STYLE {
                     for (fid, fval) in fields {
-                        if *fid == 4 {
+                        if *fid == SYM_NAME {
                             let sym = match fval {
                                 IonValue::Symbol(s) => *s,
                                 _ => 0,
@@ -729,23 +1176,24 @@ impl<'a> KfxPreflightValidator<'a> {
                     *ref_count += 1;
                     match *fid {
                         // $392 = nav_containers -> must be a list of symbols referencing $391 entities
-                        392 => {
+                        SYM_NAV_CONTAINERS => {
                             if let IonValue::List(container_items) = fval {
                                 for item in container_items {
                                     match item {
                                         IonValue::Symbol(target_sym) => {
                                             if *target_sym == 0
-                                                || !entity_map.contains_key(&(391, *target_sym))
+                                                || !entity_map
+                                                    .contains_key(&(SYM_NAV_CONTAINER, *target_sym))
                                             {
                                                 return Err(ValidationError::MissingFragment {
                                                     referrer_chunk: referrer.chunk_type,
                                                     referrer_eid: referrer.entity_id,
-                                                    field_id: 392,
+                                                    field_id: SYM_NAV_CONTAINERS,
                                                     field_name: "nav_containers".to_string(),
                                                     target_sym: *target_sym,
                                                     target_name: self
                                                         .resolve_symbol_name(*target_sym),
-                                                    expected_chunk: 391,
+                                                    expected_chunk: SYM_NAV_CONTAINER,
                                                 });
                                             }
                                         }
@@ -762,21 +1210,22 @@ impl<'a> KfxPreflightValidator<'a> {
                         }
 
                         // $170 = sections -> must be a list of symbols referencing $260 (section)
-                        170 => {
+                        SYM_SECTIONS => {
                             if let IonValue::List(section_syms) = fval {
                                 for item in section_syms {
                                     if let IonValue::Symbol(target_sym) = item
                                         && (*target_sym == 0
-                                            || !entity_map.contains_key(&(260, *target_sym)))
+                                            || !entity_map
+                                                .contains_key(&(SYM_SECTION, *target_sym)))
                                     {
                                         return Err(ValidationError::MissingFragment {
                                             referrer_chunk: referrer.chunk_type,
                                             referrer_eid: referrer.entity_id,
-                                            field_id: 170,
+                                            field_id: SYM_SECTIONS,
                                             field_name: "sections".to_string(),
                                             target_sym: *target_sym,
                                             target_name: self.resolve_symbol_name(*target_sym),
-                                            expected_chunk: 260,
+                                            expected_chunk: SYM_SECTION,
                                         });
                                     }
                                 }
@@ -784,82 +1233,83 @@ impl<'a> KfxPreflightValidator<'a> {
                         }
 
                         // $174 = section_name -> symbol referencing $260 (section)
-                        174 => {
+                        SYM_SECTION_NAME => {
                             if let IonValue::Symbol(target_sym) = fval
                                 && (*target_sym == 0
-                                    || !entity_map.contains_key(&(260, *target_sym)))
+                                    || !entity_map.contains_key(&(SYM_SECTION, *target_sym)))
                             {
                                 return Err(ValidationError::MissingFragment {
                                     referrer_chunk: referrer.chunk_type,
                                     referrer_eid: referrer.entity_id,
-                                    field_id: 174,
+                                    field_id: SYM_SECTION_NAME,
                                     field_name: "section_name".to_string(),
                                     target_sym: *target_sym,
                                     target_name: self.resolve_symbol_name(*target_sym),
-                                    expected_chunk: 260,
+                                    expected_chunk: SYM_SECTION,
                                 });
                             }
                         }
 
                         // $176 = story_name -> symbol referencing $259 (storyline)
-                        176 => {
+                        SYM_STORY_NAME => {
                             if let IonValue::Symbol(target_sym) = fval
                                 && (*target_sym == 0
-                                    || !entity_map.contains_key(&(259, *target_sym)))
+                                    || !entity_map.contains_key(&(SYM_STORYLINE, *target_sym)))
                             {
                                 return Err(ValidationError::MissingFragment {
                                     referrer_chunk: referrer.chunk_type,
                                     referrer_eid: referrer.entity_id,
-                                    field_id: 176,
+                                    field_id: SYM_STORY_NAME,
                                     field_name: "story_name".to_string(),
                                     target_sym: *target_sym,
                                     target_name: self.resolve_symbol_name(*target_sym),
-                                    expected_chunk: 259,
+                                    expected_chunk: SYM_STORYLINE,
                                 });
                             }
                         }
 
                         // $175 = resource_name -> symbol referencing $164 (external_resource)
-                        175 => {
+                        SYM_RESOURCE_NAME => {
                             if let IonValue::Symbol(target_sym) = fval
                                 && (*target_sym == 0
-                                    || !entity_map.contains_key(&(164, *target_sym)))
+                                    || !entity_map
+                                        .contains_key(&(SYM_EXTERNAL_RESOURCE, *target_sym)))
                             {
                                 return Err(ValidationError::MissingFragment {
                                     referrer_chunk: referrer.chunk_type,
                                     referrer_eid: referrer.entity_id,
-                                    field_id: 175,
+                                    field_id: SYM_RESOURCE_NAME,
                                     field_name: "resource_name".to_string(),
                                     target_sym: *target_sym,
                                     target_name: self.resolve_symbol_name(*target_sym),
-                                    expected_chunk: 164,
+                                    expected_chunk: SYM_EXTERNAL_RESOURCE,
                                 });
                             }
                         }
 
                         // $145 = content reference inside storyline ($259) -> { name: $4 (145 sym), index: $403 (int) }
-                        145 => {
-                            if referrer.chunk_type == 259 {
+                        SYM_CONTENT => {
+                            if referrer.chunk_type == SYM_STORYLINE {
                                 let IonValue::Struct(ref_fields) = fval else {
                                     return Err(ValidationError::IllegalField {
-                                        chunk_type: 259,
+                                        chunk_type: SYM_STORYLINE,
                                         eid: referrer.entity_id,
-                                        field_id: 145,
+                                        field_id: SYM_CONTENT,
                                         field_name: "content".to_string(),
                                         reason: "Field 'content' ($145) in storyline ($259) must be a Struct".to_string(),
                                     });
                                 };
                                 let chunk_sym = match ref_fields
                                     .iter()
-                                    .find(|(k, _)| *k == 4)
+                                    .find(|(k, _)| *k == SYM_NAME)
                                     .map(|(_, v)| v)
                                 {
                                     Some(IonValue::Symbol(s)) if *s != 0 => *s,
                                     other => {
                                         return Err(ValidationError::IllegalField {
-                                            chunk_type: 259,
+                                            chunk_type: SYM_STORYLINE,
                                             eid: referrer.entity_id,
-                                            field_id: 4,
+                                            field_id: SYM_NAME,
                                             field_name: "name".to_string(),
                                             reason: format!(
                                                 "Storyline content reference ($145) requires non-zero Symbol 'name' ($4), found {:?}",
@@ -868,25 +1318,30 @@ impl<'a> KfxPreflightValidator<'a> {
                                         });
                                     }
                                 };
-                                let Some(&len) = content_lens.get(&chunk_sym) else {
+                                let Some(segs) = content_segment_utf16_lens.get(&chunk_sym) else {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
-                                        field_id: 145,
+                                        field_id: SYM_CONTENT,
                                         field_name: "content".to_string(),
                                         target_sym: chunk_sym,
                                         target_name: self.resolve_symbol_name(chunk_sym),
-                                        expected_chunk: 145,
+                                        expected_chunk: SYM_CONTENT,
                                     });
                                 };
-                                match ref_fields.iter().find(|(k, _)| *k == 403).map(|(_, v)| v) {
+                                let len = segs.len();
+                                match ref_fields
+                                    .iter()
+                                    .find(|(k, _)| *k == SYM_INDEX)
+                                    .map(|(_, v)| v)
+                                {
                                     Some(IonValue::Int(idx))
                                         if *idx >= 0 && (*idx as usize) < len => {}
                                     other => {
                                         return Err(ValidationError::IllegalField {
-                                            chunk_type: 259,
+                                            chunk_type: SYM_STORYLINE,
                                             eid: referrer.entity_id,
-                                            field_id: 403,
+                                            field_id: SYM_INDEX,
                                             field_name: "index".to_string(),
                                             reason: format!(
                                                 "Storyline content index ($403) out of bounds for content chunk {} (len {}), found {:?}",
@@ -899,24 +1354,24 @@ impl<'a> KfxPreflightValidator<'a> {
                         }
 
                         // $165 = location in $164 -> String URI referencing container path (e.g. "resource/{id}")
-                        165 => {
-                            if referrer.chunk_type == 164 {
+                        SYM_LOCATION => {
+                            if referrer.chunk_type == SYM_EXTERNAL_RESOURCE {
                                 match fval {
                                     IonValue::String(raw_path) => {
                                         let Some(syms) = self.symbols else {
                                             return Err(ValidationError::IllegalField {
-                                                chunk_type: 164,
+                                                chunk_type: SYM_EXTERNAL_RESOURCE,
                                                 eid: referrer.entity_id,
-                                                field_id: 165,
+                                                field_id: SYM_LOCATION,
                                                 field_name: "location".to_string(),
                                                 reason: "Cannot validate external_resource location ($165) without local symbol table".to_string(),
                                             });
                                         };
                                         let Some(target_sym) = syms.get_id(raw_path) else {
                                             return Err(ValidationError::IllegalField {
-                                                chunk_type: 164,
+                                                chunk_type: SYM_EXTERNAL_RESOURCE,
                                                 eid: referrer.entity_id,
-                                                field_id: 165,
+                                                field_id: SYM_LOCATION,
                                                 field_name: "location".to_string(),
                                                 reason: format!(
                                                     "External resource location '{}' is not interned in local symbol table",
@@ -924,23 +1379,24 @@ impl<'a> KfxPreflightValidator<'a> {
                                                 ),
                                             });
                                         };
-                                        if !entity_map.contains_key(&(417, target_sym)) {
+                                        if !entity_map.contains_key(&(SYM_BC_RAW_MEDIA, target_sym))
+                                        {
                                             return Err(ValidationError::MissingFragment {
                                                 referrer_chunk: referrer.chunk_type,
                                                 referrer_eid: referrer.entity_id,
-                                                field_id: 165,
+                                                field_id: SYM_LOCATION,
                                                 field_name: "location".to_string(),
                                                 target_sym,
                                                 target_name: self.resolve_symbol_name(target_sym),
-                                                expected_chunk: 417,
+                                                expected_chunk: SYM_BC_RAW_MEDIA,
                                             });
                                         }
                                     }
                                     _ => {
                                         return Err(ValidationError::IllegalField {
-                                            chunk_type: 164,
+                                            chunk_type: SYM_EXTERNAL_RESOURCE,
                                             eid: referrer.entity_id,
-                                            field_id: 165,
+                                            field_id: SYM_LOCATION,
                                             field_name: "location".to_string(),
                                             reason: format!(
                                                 "Field 'location' ($165) in external_resource ($164) must be a String URI path ('resource/...'), found {:?}",
@@ -953,10 +1409,10 @@ impl<'a> KfxPreflightValidator<'a> {
                         }
 
                         // $157 = style reference in storylines / elements, $429 = backdrop_style -> symbol referencing $157 (style)
-                        157 | 429 => {
+                        SYM_STYLE | SYM_BACKDROP_STYLE => {
                             if let IonValue::Symbol(target_sym) = fval
                                 && (*target_sym == 0
-                                    || !entity_map.contains_key(&(157, *target_sym)))
+                                    || !entity_map.contains_key(&(SYM_STYLE, *target_sym)))
                             {
                                 return Err(ValidationError::MissingFragment {
                                     referrer_chunk: referrer.chunk_type,
@@ -965,36 +1421,38 @@ impl<'a> KfxPreflightValidator<'a> {
                                     field_name: "style".to_string(),
                                     target_sym: *target_sym,
                                     target_name: self.resolve_symbol_name(*target_sym),
-                                    expected_chunk: 157,
+                                    expected_chunk: SYM_STYLE,
                                 });
                             }
                         }
 
                         // $245 = icon in representation -> symbol referencing $164 (external_resource)
-                        245 => {
+                        SYM_ICON => {
                             if let IonValue::Symbol(target_sym) = fval
                                 && (*target_sym == 0
-                                    || !entity_map.contains_key(&(164, *target_sym)))
+                                    || !entity_map
+                                        .contains_key(&(SYM_EXTERNAL_RESOURCE, *target_sym)))
                             {
                                 return Err(ValidationError::MissingFragment {
                                     referrer_chunk: referrer.chunk_type,
                                     referrer_eid: referrer.entity_id,
-                                    field_id: 245,
+                                    field_id: SYM_ICON,
                                     field_name: "icon".to_string(),
                                     target_sym: *target_sym,
                                     target_name: self.resolve_symbol_name(*target_sym),
-                                    expected_chunk: 164,
+                                    expected_chunk: SYM_EXTERNAL_RESOURCE,
                                 });
                             }
                         }
 
                         // $246 = target_position in navigation -> { id: $155 (int EID), offset: $143 }
-                        246 => {
-                            if matches!(referrer.chunk_type, 389 | 391 | 393)
-                                && !internal_eids.is_empty()
-                                && let IonValue::Struct(pos_fields) = fval
+                        SYM_TARGET_POSITION => {
+                            if matches!(
+                                referrer.chunk_type,
+                                SYM_BOOK_NAVIGATION | SYM_NAV_CONTAINER | SYM_NAV_UNIT
+                            ) && let IonValue::Struct(pos_fields) = fval
                                 && let Some((_, id_val)) =
-                                    pos_fields.iter().find(|(k, _)| *k == 155)
+                                    pos_fields.iter().find(|(k, _)| *k == SYM_ID)
                             {
                                 let target_eid = match id_val {
                                     IonValue::Int(v) if *v >= i64::from(FIRST_LOCAL_SYMBOL_ID) => {
@@ -1004,7 +1462,7 @@ impl<'a> KfxPreflightValidator<'a> {
                                         return Err(ValidationError::IllegalField {
                                             chunk_type: referrer.chunk_type,
                                             eid: referrer.entity_id,
-                                            field_id: 246,
+                                            field_id: SYM_TARGET_POSITION,
                                             field_name: "target_position".to_string(),
                                             reason: format!(
                                                 "Invalid target_position id ($155): {:?}",
@@ -1013,14 +1471,11 @@ impl<'a> KfxPreflightValidator<'a> {
                                         });
                                     }
                                 };
-                                let in_defined = u32::try_from(target_eid)
-                                    .ok()
-                                    .is_some_and(|e| defined_eids.contains(&e));
-                                if !internal_eids.contains(&target_eid) && !in_defined {
+                                if !internal_eids.contains(&target_eid) {
                                     return Err(ValidationError::IllegalField {
                                         chunk_type: referrer.chunk_type,
                                         eid: referrer.entity_id,
-                                        field_id: 246,
+                                        field_id: SYM_TARGET_POSITION,
                                         field_name: "target_position".to_string(),
                                         reason: format!(
                                             "Dangling navigation target_position EID {}",
@@ -1028,23 +1483,66 @@ impl<'a> KfxPreflightValidator<'a> {
                                         ),
                                     });
                                 }
+                                if let Some((_, off_val)) =
+                                    pos_fields.iter().find(|(k, _)| *k == SYM_OFFSET)
+                                {
+                                    match off_val {
+                                        IonValue::Int(off) if *off >= 0 => {
+                                            if let Some(&max_len) =
+                                                eid_text_utf16_lens.get(&target_eid)
+                                                && (*off as usize) > max_len
+                                            {
+                                                return Err(ValidationError::IllegalField {
+                                                    chunk_type: referrer.chunk_type,
+                                                    eid: referrer.entity_id,
+                                                    field_id: SYM_OFFSET,
+                                                    field_name: "offset".to_string(),
+                                                    reason: format!(
+                                                        "Navigation target_position offset ($143) {} exceeds target EID {} UTF-16 length {}",
+                                                        off, target_eid, max_len
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                        other => {
+                                            return Err(ValidationError::IllegalField {
+                                                chunk_type: referrer.chunk_type,
+                                                eid: referrer.entity_id,
+                                                field_id: SYM_OFFSET,
+                                                field_name: "offset".to_string(),
+                                                reason: format!(
+                                                    "Navigation target_position offset ($143) must be non-negative Int, found {:?}",
+                                                    other
+                                                ),
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         }
 
                         // $181 = contains in container_entity_map ($419)
-                        181 => {
-                            if referrer.chunk_type == 419
-                                && let IonValue::List(contains_syms) = fval
-                            {
+                        SYM_CONTAINS => {
+                            if referrer.chunk_type == SYM_CONTAINER_ENTITY_MAP {
+                                let IonValue::List(contains_syms) = fval else {
+                                    return Err(ValidationError::IllegalField {
+                                        chunk_type: SYM_CONTAINER_ENTITY_MAP,
+                                        eid: referrer.entity_id,
+                                        field_id: SYM_CONTAINS,
+                                        field_name: "contains".to_string(),
+                                        reason: "'contains' ($181) in container_entity_map ($419) must be a List".to_string(),
+                                    });
+                                };
+                                *saw_contains = true;
                                 let mut contains_set = HashSet::new();
                                 for item in contains_syms {
                                     match item {
                                         IonValue::Symbol(target_sym) => {
                                             if *target_sym == SINGLETON_ID {
                                                 return Err(ValidationError::IllegalField {
-                                                    chunk_type: 419,
+                                                    chunk_type: SYM_CONTAINER_ENTITY_MAP,
                                                     eid: referrer.entity_id,
-                                                    field_id: 181,
+                                                    field_id: SYM_CONTAINS,
                                                     field_name: "contains".to_string(),
                                                     reason: format!(
                                                         "Singleton ID ${} must not appear in 'contains' ($181)",
@@ -1066,9 +1564,9 @@ impl<'a> KfxPreflightValidator<'a> {
                                         }
                                         other => {
                                             return Err(ValidationError::IllegalField {
-                                                chunk_type: 419,
+                                                chunk_type: SYM_CONTAINER_ENTITY_MAP,
                                                 eid: referrer.entity_id,
-                                                field_id: 181,
+                                                field_id: SYM_CONTAINS,
                                                 field_name: "contains".to_string(),
                                                 reason: format!(
                                                     "'contains' ($181) items must be Symbols, found {:?}",
@@ -1095,38 +1593,173 @@ impl<'a> KfxPreflightValidator<'a> {
                         }
 
                         // $253 = entity_dependencies in container_entity_map ($419)
-                        253 => {
-                            if referrer.chunk_type == 419
+                        SYM_ENTITY_DEPENDENCIES => {
+                            if referrer.chunk_type == SYM_CONTAINER_ENTITY_MAP
                                 && let IonValue::List(dep_entries) = fval
                             {
                                 for entry in dep_entries {
                                     if let IonValue::Struct(dfields) = entry
                                         && let Some((_, id_val)) =
-                                            dfields.iter().find(|(k, _)| *k == 155)
+                                            dfields.iter().find(|(k, _)| *k == SYM_ID)
                                         && let IonValue::Symbol(src_sym) = id_val
-                                        && (*src_sym == SINGLETON_ID
-                                            || !defined_eids.contains(src_sym))
                                     {
-                                        return Err(ValidationError::MissingFragment {
-                                            referrer_chunk: referrer.chunk_type,
-                                            referrer_eid: referrer.entity_id,
-                                            field_id: 253,
-                                            field_name: "entity_dependencies".to_string(),
-                                            target_sym: *src_sym,
-                                            target_name: self.resolve_symbol_name(*src_sym),
-                                            expected_chunk: 0,
-                                        });
+                                        if *src_sym == SINGLETON_ID
+                                            || !defined_eids.contains(src_sym)
+                                        {
+                                            return Err(ValidationError::MissingFragment {
+                                                referrer_chunk: referrer.chunk_type,
+                                                referrer_eid: referrer.entity_id,
+                                                field_id: SYM_ENTITY_DEPENDENCIES,
+                                                field_name: "entity_dependencies".to_string(),
+                                                target_sym: *src_sym,
+                                                target_name: self.resolve_symbol_name(*src_sym),
+                                                expected_chunk: 0,
+                                            });
+                                        }
+
+                                        let is_section =
+                                            entity_map.contains_key(&(SYM_SECTION, *src_sym));
+                                        let is_ext_res = entity_map
+                                            .contains_key(&(SYM_EXTERNAL_RESOURCE, *src_sym));
+
+                                        if is_section
+                                            && let Some(story_res_set) =
+                                                section_storyline_resource_refs.get(src_sym)
+                                        {
+                                            if let Some((_, IonValue::List(mand_syms))) = dfields
+                                                .iter()
+                                                .find(|(k, _)| *k == SYM_MANDATORY_DEPENDENCIES)
+                                            {
+                                                for item in mand_syms {
+                                                    if let IonValue::Symbol(target_sym) = item
+                                                        && *target_sym != SINGLETON_ID
+                                                        && *target_sym != 0
+                                                        && defined_eids.contains(target_sym)
+                                                    {
+                                                        if !entity_map.contains_key(&(
+                                                            SYM_EXTERNAL_RESOURCE,
+                                                            *target_sym,
+                                                        )) {
+                                                            return Err(
+                                                                ValidationError::MissingFragment {
+                                                                    referrer_chunk: referrer
+                                                                        .chunk_type,
+                                                                    referrer_eid: referrer
+                                                                        .entity_id,
+                                                                    field_id:
+                                                                        SYM_MANDATORY_DEPENDENCIES,
+                                                                    field_name:
+                                                                        "mandatory_dependencies"
+                                                                            .to_string(),
+                                                                    target_sym: *target_sym,
+                                                                    target_name: self
+                                                                        .resolve_symbol_name(
+                                                                            *target_sym,
+                                                                        ),
+                                                                    expected_chunk:
+                                                                        SYM_EXTERNAL_RESOURCE,
+                                                                },
+                                                            );
+                                                        }
+                                                        if !story_res_set.contains(target_sym) {
+                                                            return Err(
+                                                                ValidationError::IllegalField {
+                                                                    chunk_type:
+                                                                        SYM_CONTAINER_ENTITY_MAP,
+                                                                    eid: referrer.entity_id,
+                                                                    field_id:
+                                                                        SYM_MANDATORY_DEPENDENCIES,
+                                                                    field_name:
+                                                                        "mandatory_dependencies"
+                                                                            .to_string(),
+                                                                    reason: format!(
+                                                                        "Section '{}' declares mandatory image dependency '{}' (${}) not referenced by its storyline",
+                                                                        self.resolve_symbol_name(
+                                                                            *src_sym
+                                                                        ),
+                                                                        self.resolve_symbol_name(
+                                                                            *target_sym
+                                                                        ),
+                                                                        target_sym
+                                                                    ),
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if let Some((_, IonValue::List(opt_syms))) = dfields
+                                                .iter()
+                                                .find(|(k, _)| *k == SYM_OPTIONAL_DEPENDENCIES)
+                                            {
+                                                for item in opt_syms {
+                                                    if let IonValue::Symbol(target_sym) = item
+                                                        && *target_sym != SINGLETON_ID
+                                                        && *target_sym != 0
+                                                        && defined_eids.contains(target_sym)
+                                                        && !entity_map.contains_key(&(
+                                                            SYM_ANCHOR,
+                                                            *target_sym,
+                                                        ))
+                                                    {
+                                                        return Err(
+                                                            ValidationError::MissingFragment {
+                                                                referrer_chunk: referrer.chunk_type,
+                                                                referrer_eid: referrer.entity_id,
+                                                                field_id: SYM_OPTIONAL_DEPENDENCIES,
+                                                                field_name: "optional_dependencies"
+                                                                    .to_string(),
+                                                                target_sym: *target_sym,
+                                                                target_name: self
+                                                                    .resolve_symbol_name(
+                                                                        *target_sym,
+                                                                    ),
+                                                                expected_chunk: SYM_ANCHOR,
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        } else if is_ext_res
+                                            && let Some((_, IonValue::List(mand_syms))) = dfields
+                                                .iter()
+                                                .find(|(k, _)| *k == SYM_MANDATORY_DEPENDENCIES)
+                                        {
+                                            for item in mand_syms {
+                                                if let IonValue::Symbol(target_sym) = item
+                                                    && *target_sym != SINGLETON_ID
+                                                    && *target_sym != 0
+                                                    && defined_eids.contains(target_sym)
+                                                    && !entity_map.contains_key(&(
+                                                        SYM_BC_RAW_MEDIA,
+                                                        *target_sym,
+                                                    ))
+                                                {
+                                                    return Err(ValidationError::MissingFragment {
+                                                        referrer_chunk: referrer.chunk_type,
+                                                        referrer_eid: referrer.entity_id,
+                                                        field_id: SYM_MANDATORY_DEPENDENCIES,
+                                                        field_name: "mandatory_dependencies"
+                                                            .to_string(),
+                                                        target_sym: *target_sym,
+                                                        target_name: self
+                                                            .resolve_symbol_name(*target_sym),
+                                                        expected_chunk: SYM_BC_RAW_MEDIA,
+                                                    });
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
 
                         // $254 = mandatory_dependencies, $255 = optional_dependencies in container_entity_map ($419)
-                        254 | 255 => {
-                            if referrer.chunk_type == 419
+                        SYM_MANDATORY_DEPENDENCIES | SYM_OPTIONAL_DEPENDENCIES => {
+                            if referrer.chunk_type == SYM_CONTAINER_ENTITY_MAP
                                 && let IonValue::List(dep_syms) = fval
                             {
-                                let fname = if *fid == 254 {
+                                let fname = if *fid == SYM_MANDATORY_DEPENDENCIES {
                                     "mandatory_dependencies"
                                 } else {
                                     "optional_dependencies"
@@ -1136,7 +1769,7 @@ impl<'a> KfxPreflightValidator<'a> {
                                         IonValue::Symbol(target_sym) => {
                                             if *target_sym == SINGLETON_ID {
                                                 return Err(ValidationError::IllegalField {
-                                                    chunk_type: 419,
+                                                    chunk_type: SYM_CONTAINER_ENTITY_MAP,
                                                     eid: referrer.entity_id,
                                                     field_id: *fid,
                                                     field_name: fname.to_string(),
@@ -1163,7 +1796,7 @@ impl<'a> KfxPreflightValidator<'a> {
                                         }
                                         other => {
                                             return Err(ValidationError::IllegalField {
-                                                chunk_type: 419,
+                                                chunk_type: SYM_CONTAINER_ENTITY_MAP,
                                                 eid: referrer.entity_id,
                                                 field_id: *fid,
                                                 field_name: fname.to_string(),
@@ -1179,18 +1812,19 @@ impl<'a> KfxPreflightValidator<'a> {
                         }
 
                         // $179 = link_to -> symbol referencing $266 (anchor)
-                        179 => match fval {
+                        SYM_LINK_TO => match fval {
                             IonValue::Symbol(target_sym) => {
-                                if *target_sym == 0 || !entity_map.contains_key(&(266, *target_sym))
+                                if *target_sym == 0
+                                    || !entity_map.contains_key(&(SYM_ANCHOR, *target_sym))
                                 {
                                     return Err(ValidationError::MissingFragment {
                                         referrer_chunk: referrer.chunk_type,
                                         referrer_eid: referrer.entity_id,
-                                        field_id: 179,
+                                        field_id: SYM_LINK_TO,
                                         field_name: "link_to".to_string(),
                                         target_sym: *target_sym,
                                         target_name: self.resolve_symbol_name(*target_sym),
-                                        expected_chunk: 266,
+                                        expected_chunk: SYM_ANCHOR,
                                     });
                                 }
                             }
@@ -1198,7 +1832,7 @@ impl<'a> KfxPreflightValidator<'a> {
                                 return Err(ValidationError::IllegalField {
                                     chunk_type: referrer.chunk_type,
                                     eid: referrer.entity_id,
-                                    field_id: 179,
+                                    field_id: SYM_LINK_TO,
                                     field_name: "link_to".to_string(),
                                     reason: format!(
                                         "Field 'link_to' ($179) must be a Symbol referencing an anchor ($266), found {:?}",
@@ -1208,15 +1842,30 @@ impl<'a> KfxPreflightValidator<'a> {
                             }
                         },
 
-                        // $142 = style_events -> verify link event offsets and positive lengths
-                        142 => {
+                        // $142 = style_events -> verify ALL style event offsets, positive lengths, and UTF-16 bounds
+                        SYM_STYLE_EVENTS => {
                             if let IonValue::List(events) = fval {
-                                Self::validate_link_style_events(referrer, events)?;
+                                let text_utf16_len = Self::resolve_content_ref_utf16_len(
+                                    fields,
+                                    content_segment_utf16_lens,
+                                )
+                                .or_else(|| {
+                                    fields
+                                        .iter()
+                                        .find(|(k, _)| *k == SYM_ID)
+                                        .and_then(|(_, v)| match v {
+                                            IonValue::Int(eid) => {
+                                                eid_text_utf16_lens.get(eid).copied()
+                                            }
+                                            _ => None,
+                                        })
+                                });
+                                Self::validate_all_style_events(referrer, events, text_utf16_len)?;
                             }
                         }
 
                         // $617 = yj.note in auxiliary_data ($597)
-                        617 if referrer.chunk_type == 597 => {
+                        SYM_YJ_NOTE if referrer.chunk_type == SYM_AUXILIARY_DATA => {
                             Self::validate_yj_note_list(referrer, fval)?;
                         }
 
@@ -1229,8 +1878,11 @@ impl<'a> KfxPreflightValidator<'a> {
                         referrer,
                         entity_map,
                         defined_eids,
-                        content_lens,
+                        content_segment_utf16_lens,
                         internal_eids,
+                        eid_text_utf16_lens,
+                        section_storyline_resource_refs,
+                        saw_contains,
                         ref_count,
                         depth + 1,
                     )?;
@@ -1247,7 +1899,6 @@ impl<'a> KfxPreflightValidator<'a> {
 mod tests {
     use super::*;
     use crate::ion::IonWriter;
-    use crate::packager::SINGLETON_ID;
 
     #[test]
     fn test_validator_passes_on_consistent_entities() {
@@ -1781,11 +2432,19 @@ mod tests {
         w_empty.write_value(&IonValue::Struct(vec![]));
         let empty_ion = w_empty.into_bytes();
 
+        let mut w_cem = IonWriter::new();
+        w_cem.write_bvm();
+        w_cem.write_value(&IonValue::Struct(vec![(
+            KfxSymbol::Contains as u32,
+            IonValue::List(vec![]),
+        )]));
+        let cem_ion = w_cem.into_bytes();
+
         let partial = vec![
             KfxEntity {
                 entity_id: SINGLETON_ID,
                 chunk_type: 419,
-                data: empty_ion.clone(),
+                data: cem_ion,
             },
             KfxEntity {
                 entity_id: SINGLETON_ID,
@@ -1800,7 +2459,7 @@ mod tests {
             KfxEntity {
                 entity_id: SINGLETON_ID,
                 chunk_type: 585,
-                data: empty_ion,
+                data: empty_ion.clone(),
             },
         ];
         assert!(matches!(
@@ -1816,7 +2475,7 @@ mod tests {
             KfxEntity {
                 entity_id: SINGLETON_ID,
                 chunk_type: 490,
-                data: partial[0].data.clone(),
+                data: empty_ion,
             },
             KfxEntity {
                 entity_id: SINGLETON_ID,
@@ -2552,6 +3211,534 @@ mod tests {
             Err(ValidationError::IllegalField {
                 chunk_type: 597,
                 field_id: 444,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_validator_p1_11_required_singletons_609_and_181_contains() {
+        fn encode(val: &IonValue) -> Vec<u8> {
+            let mut w = IonWriter::new();
+            w.write_bvm();
+            w.write_value(val);
+            w.into_bytes()
+        }
+
+        let empty_struct = encode(&IonValue::Struct(vec![]));
+        let cem_with_empty_contains = encode(&IonValue::Struct(vec![(
+            SYM_CONTAINS,
+            IonValue::List(vec![]),
+        )]));
+
+        // 1. $419 without $181 contains is rejected
+        let cem_missing_181 = KfxEntity {
+            entity_id: SINGLETON_ID,
+            chunk_type: SYM_CONTAINER_ENTITY_MAP,
+            data: empty_struct.clone(),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[cem_missing_181], None).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_CONTAINER_ENTITY_MAP,
+                field_id: SYM_CONTAINS,
+                ..
+            })
+        ));
+
+        // 2. All 9 singletons pass for a 0-section empty container; removing each of $264/$265/$550/$621 fails
+        let base_singletons = vec![
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_CONTAINER_ENTITY_MAP,
+                data: cem_with_empty_contains,
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_BOOK_METADATA,
+                data: empty_struct.clone(),
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_METADATA,
+                data: empty_struct.clone(),
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_DOCUMENT_DATA,
+                data: empty_struct.clone(),
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_CONTENT_FEATURES,
+                data: empty_struct.clone(),
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_POSITION_MAP,
+                data: empty_struct.clone(),
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_POSITION_ID_MAP,
+                data: empty_struct.clone(),
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_LOCATION_MAP,
+                data: empty_struct.clone(),
+            },
+            KfxEntity {
+                entity_id: SINGLETON_ID,
+                chunk_type: SYM_YJ_LOCATION_PID_MAP,
+                data: empty_struct.clone(),
+            },
+        ];
+        KfxPreflightValidator::new(&base_singletons, None)
+            .validate_container()
+            .expect("0-section container with all 9 singletons must pass");
+
+        for req_chunk in [
+            SYM_POSITION_MAP,
+            SYM_POSITION_ID_MAP,
+            SYM_LOCATION_MAP,
+            SYM_YJ_LOCATION_PID_MAP,
+        ] {
+            let trimmed: Vec<KfxEntity> = base_singletons
+                .iter()
+                .filter(|e| e.chunk_type != req_chunk)
+                .cloned()
+                .collect();
+            assert!(
+                matches!(
+                    KfxPreflightValidator::new(&trimmed, None).validate_container(),
+                    Err(ValidationError::MissingRequiredEntity { chunk_type, .. }) if chunk_type == req_chunk
+                ),
+                "Missing required singleton {} must be rejected",
+                req_chunk
+            );
+        }
+
+        // 3. Section ($260) + storyline ($259) without matching $609 section_position_id_map fails
+        let mut symbols = LocalSymbols::new();
+        let sec_sym = symbols.intern("c_sec_1");
+        let story_sym = symbols.intern("c_sec_1-story");
+        let mut with_sec = base_singletons;
+        with_sec[0].data = encode(&IonValue::Struct(vec![(
+            SYM_CONTAINS,
+            IonValue::List(vec![IonValue::Symbol(sec_sym), IonValue::Symbol(story_sym)]),
+        )]));
+        with_sec.push(KfxEntity {
+            entity_id: sec_sym,
+            chunk_type: SYM_SECTION,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_SECTION_NAME, IonValue::Symbol(sec_sym)),
+                (SYM_STORY_NAME, IonValue::Symbol(story_sym)),
+                (SYM_ID, IonValue::Int(900)),
+            ])),
+        });
+        with_sec.push(KfxEntity {
+            entity_id: story_sym,
+            chunk_type: SYM_STORYLINE,
+            data: encode(&IonValue::Struct(vec![(
+                SYM_STORY_NAME,
+                IonValue::Symbol(story_sym),
+            )])),
+        });
+        assert!(matches!(
+            KfxPreflightValidator::new(&with_sec, Some(&symbols)).validate_container(),
+            Err(ValidationError::MissingRequiredEntity {
+                chunk_type: SYM_SECTION_POSITION_ID_MAP,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_validator_p1_11_strict_eids_utf16_bounds_magic_dims_and_section_dep_parity() {
+        fn encode(val: &IonValue) -> Vec<u8> {
+            let mut w = IonWriter::new();
+            w.write_bvm();
+            w.write_value(val);
+            w.into_bytes()
+        }
+
+        let mut symbols = LocalSymbols::new();
+        let style_sym = symbols.intern("style_bold");
+        let sec_sym = symbols.intern("c_sec_1");
+        let story_sym = symbols.intern("c_sec_1-story");
+        let content_sym = symbols.intern("content_1");
+        let anchor_sym = symbols.intern("a_1");
+        let res_sym = symbols.intern("fig_1");
+        let raw_sym = symbols.intern("resource/fig_1");
+
+        let style_ent = KfxEntity {
+            entity_id: style_sym,
+            chunk_type: SYM_STYLE,
+            data: encode(&IonValue::Struct(vec![(
+                KfxSymbol::StyleName as u32,
+                IonValue::Symbol(style_sym),
+            )])),
+        };
+        let content_ent = KfxEntity {
+            entity_id: content_sym,
+            chunk_type: SYM_CONTENT,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_NAME, IonValue::Symbol(content_sym)),
+                // "📖hi" has 3 chars, 4 UTF-16 code units!
+                (
+                    SYM_CONTENT_LIST,
+                    IonValue::List(vec![IonValue::String("📖hi".to_string())]),
+                ),
+            ])),
+        };
+        let sec_ent = KfxEntity {
+            entity_id: sec_sym,
+            chunk_type: SYM_SECTION,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_SECTION_NAME, IonValue::Symbol(sec_sym)),
+                (SYM_STORY_NAME, IonValue::Symbol(story_sym)),
+                (SYM_ID, IonValue::Int(950)),
+            ])),
+        };
+        let story_ent = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: SYM_STORYLINE,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_STORY_NAME, IonValue::Symbol(story_sym)),
+                (
+                    SYM_CONTENT_LIST,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (SYM_ID, IonValue::Int(951)),
+                        (
+                            SYM_CONTENT,
+                            IonValue::Struct(vec![
+                                (SYM_NAME, IonValue::Symbol(content_sym)),
+                                (SYM_INDEX, IonValue::Int(0)),
+                            ]),
+                        ),
+                    ])]),
+                ),
+            ])),
+        };
+
+        // 1. $183 anchor targeting a $157 style entity_id (defined_eid, NOT internal_eid) rejected
+        let anchor_to_style = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: SYM_ANCHOR,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_ANCHOR_NAME, IonValue::Symbol(anchor_sym)),
+                (
+                    SYM_POSITION,
+                    IonValue::Struct(vec![
+                        (SYM_ID, IonValue::Int(style_sym as i64)),
+                        (SYM_OFFSET, IonValue::Int(0)),
+                    ]),
+                ),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[
+                    style_ent.clone(),
+                    content_ent.clone(),
+                    sec_ent.clone(),
+                    story_ent.clone(),
+                    anchor_to_style
+                ],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_ANCHOR,
+                field_id: SYM_POSITION,
+                ..
+            })
+        ));
+
+        // 2. $246 navigation target_position rejected when container has zero storylines/sections
+        let nav_no_story = KfxEntity {
+            entity_id: SINGLETON_ID,
+            chunk_type: SYM_BOOK_NAVIGATION,
+            data: encode(&IonValue::Struct(vec![(
+                SYM_TARGET_POSITION,
+                IonValue::Struct(vec![
+                    (SYM_ID, IonValue::Int(style_sym as i64)),
+                    (SYM_OFFSET, IonValue::Int(0)),
+                ]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[style_ent.clone(), nav_no_story], Some(&symbols))
+                .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_BOOK_NAVIGATION,
+                field_id: SYM_TARGET_POSITION,
+                ..
+            })
+        ));
+
+        // 3. Out-of-bounds non-link $142 style_event rejected ("📖hi" UTF-16 len = 4; [2..5) exceeds 4)
+        let story_oob_style = KfxEntity {
+            entity_id: story_sym,
+            chunk_type: SYM_STORYLINE,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_STORY_NAME, IonValue::Symbol(story_sym)),
+                (
+                    SYM_CONTENT_LIST,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (SYM_ID, IonValue::Int(951)),
+                        (
+                            SYM_CONTENT,
+                            IonValue::Struct(vec![
+                                (SYM_NAME, IonValue::Symbol(content_sym)),
+                                (SYM_INDEX, IonValue::Int(0)),
+                            ]),
+                        ),
+                        (
+                            SYM_STYLE_EVENTS,
+                            IonValue::List(vec![IonValue::Struct(vec![
+                                (SYM_OFFSET, IonValue::Int(2)),
+                                (SYM_LENGTH, IonValue::Int(3)),
+                                (SYM_STYLE, IonValue::Symbol(style_sym)),
+                            ])]),
+                        ),
+                    ])]),
+                ),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[style_ent.clone(), content_ent.clone(), story_oob_style],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_STORYLINE,
+                field_id: SYM_STYLE_EVENTS,
+                ..
+            })
+        ));
+
+        // 4. Out-of-bounds $183 anchor offset rejected (offset 5 > UTF-16 len 4; offset 4 passes)
+        let anchor_oob_off = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: SYM_ANCHOR,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_ANCHOR_NAME, IonValue::Symbol(anchor_sym)),
+                (
+                    SYM_POSITION,
+                    IonValue::Struct(vec![
+                        (SYM_ID, IonValue::Int(951)),
+                        (SYM_OFFSET, IonValue::Int(5)),
+                    ]),
+                ),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[content_ent.clone(), story_ent.clone(), anchor_oob_off],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_ANCHOR,
+                field_id: SYM_OFFSET,
+                ..
+            })
+        ));
+
+        // 4b. Trailing boundary offset == UTF-16 len 4 passes, while $183/$246 targeting $417/$266 fail
+        let anchor_exact_end = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: SYM_ANCHOR,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_ANCHOR_NAME, IonValue::Symbol(anchor_sym)),
+                (
+                    SYM_POSITION,
+                    IonValue::Struct(vec![
+                        (SYM_ID, IonValue::Int(951)),
+                        (SYM_OFFSET, IonValue::Int(4)),
+                    ]),
+                ),
+            ])),
+        };
+        KfxPreflightValidator::new(
+            &[
+                content_ent.clone(),
+                story_ent.clone(),
+                anchor_exact_end.clone(),
+            ],
+            Some(&symbols),
+        )
+        .validate()
+        .expect("Trailing boundary $183 offset == UTF-16 len must pass");
+
+        let raw_dummy = KfxEntity {
+            entity_id: raw_sym,
+            chunk_type: SYM_BC_RAW_MEDIA,
+            data: crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+        };
+        let nav_to_raw = KfxEntity {
+            entity_id: SINGLETON_ID,
+            chunk_type: SYM_BOOK_NAVIGATION,
+            data: encode(&IonValue::Struct(vec![(
+                SYM_TARGET_POSITION,
+                IonValue::Struct(vec![
+                    (SYM_ID, IonValue::Int(raw_sym as i64)),
+                    (SYM_OFFSET, IonValue::Int(0)),
+                ]),
+            )])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[
+                    content_ent.clone(),
+                    sec_ent.clone(),
+                    story_ent.clone(),
+                    raw_dummy,
+                    nav_to_raw
+                ],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_BOOK_NAVIGATION,
+                field_id: SYM_TARGET_POSITION,
+                ..
+            })
+        ));
+
+        let anchor_to_anchor = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: SYM_ANCHOR,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_ANCHOR_NAME, IonValue::Symbol(anchor_sym)),
+                (
+                    SYM_POSITION,
+                    IonValue::Struct(vec![
+                        (SYM_ID, IonValue::Int(anchor_sym as i64)),
+                        (SYM_OFFSET, IonValue::Int(0)),
+                    ]),
+                ),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[content_ent.clone(), story_ent.clone(), anchor_to_anchor],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_ANCHOR,
+                field_id: SYM_POSITION,
+                ..
+            })
+        ));
+
+        // 5. $417 magic mismatch with $164 format rejected
+        let raw_bad_magic = KfxEntity {
+            entity_id: raw_sym,
+            chunk_type: SYM_BC_RAW_MEDIA,
+            data: b"\x89PNG\r\n\x1A\nFAKEPNG".to_vec(),
+        };
+        let ext_claims_jpg = KfxEntity {
+            entity_id: res_sym,
+            chunk_type: SYM_EXTERNAL_RESOURCE,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_RESOURCE_NAME, IonValue::Symbol(res_sym)),
+                (SYM_LOCATION, IonValue::String("resource/fig_1".to_string())),
+                (SYM_FORMAT, IonValue::Symbol(SYM_JPG)),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[ext_claims_jpg, raw_bad_magic], Some(&symbols)).validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_EXTERNAL_RESOURCE,
+                field_id: SYM_FORMAT,
+                ..
+            })
+        ));
+
+        // 6. Real raster $417 (1x1 JPEG placeholder) missing $422/$423 on $164 rejected
+        let raw_real_jpg = KfxEntity {
+            entity_id: raw_sym,
+            chunk_type: SYM_BC_RAW_MEDIA,
+            data: crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+        };
+        let ext_missing_dims = KfxEntity {
+            entity_id: res_sym,
+            chunk_type: SYM_EXTERNAL_RESOURCE,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_RESOURCE_NAME, IonValue::Symbol(res_sym)),
+                (SYM_LOCATION, IonValue::String("resource/fig_1".to_string())),
+                (SYM_FORMAT, IonValue::Symbol(SYM_JPG)),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(&[ext_missing_dims, raw_real_jpg.clone()], Some(&symbols))
+                .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_EXTERNAL_RESOURCE,
+                field_id: SYM_RESOURCE_WIDTH,
+                ..
+            })
+        ));
+
+        // 7. Orphaned $254 section image dependency (not referenced by section's $259 storyline) rejected
+        let ext_valid = KfxEntity {
+            entity_id: res_sym,
+            chunk_type: SYM_EXTERNAL_RESOURCE,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_RESOURCE_NAME, IonValue::Symbol(res_sym)),
+                (SYM_LOCATION, IonValue::String("resource/fig_1".to_string())),
+                (SYM_FORMAT, IonValue::Symbol(SYM_JPG)),
+                (SYM_RESOURCE_WIDTH, IonValue::Int(1)),
+                (SYM_RESOURCE_HEIGHT, IonValue::Int(1)),
+            ])),
+        };
+        let cem_orphan_dep = KfxEntity {
+            entity_id: SINGLETON_ID,
+            chunk_type: SYM_CONTAINER_ENTITY_MAP,
+            data: encode(&IonValue::Struct(vec![
+                (
+                    SYM_CONTAINS,
+                    IonValue::List(vec![
+                        IonValue::Symbol(content_sym),
+                        IonValue::Symbol(sec_sym),
+                        IonValue::Symbol(story_sym),
+                        IonValue::Symbol(res_sym),
+                        IonValue::Symbol(raw_sym),
+                    ]),
+                ),
+                (
+                    SYM_ENTITY_DEPENDENCIES,
+                    IonValue::List(vec![IonValue::Struct(vec![
+                        (SYM_ID, IonValue::Symbol(sec_sym)),
+                        (
+                            SYM_MANDATORY_DEPENDENCIES,
+                            IonValue::List(vec![IonValue::Symbol(res_sym)]),
+                        ),
+                    ])]),
+                ),
+            ])),
+        };
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[
+                    content_ent,
+                    sec_ent,
+                    story_ent,
+                    ext_valid,
+                    raw_real_jpg,
+                    cem_orphan_dep,
+                ],
+                Some(&symbols)
+            )
+            .validate(),
+            Err(ValidationError::IllegalField {
+                chunk_type: SYM_CONTAINER_ENTITY_MAP,
+                field_id: SYM_MANDATORY_DEPENDENCIES,
                 ..
             })
         ));

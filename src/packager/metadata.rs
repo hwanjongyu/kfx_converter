@@ -270,7 +270,7 @@ impl<'a> KfxPackager<'a> {
             self.book
                 .resources
                 .get(&id)
-                .is_some_and(|r| r.mime_type.starts_with("image/"))
+                .is_some_and(crate::ir::ResourceAsset::is_supported_raster_image)
         })
     }
 
@@ -467,9 +467,14 @@ impl<'a> KfxPackager<'a> {
         if self.has_cover_resource()
             && let Some(cover_id) = self.resolve_cover_resource_id()
         {
+            let cover_sym_name = self
+                .resource_symbols
+                .get(&cover_id)
+                .map(|alloc| alloc.res_sym_name.clone())
+                .unwrap_or(cover_id);
             title_metadata.push(IonValue::Struct(vec![
                 (sym_key, IonValue::String("cover_image".to_string())),
-                (sym_val, IonValue::String(cover_id)),
+                (sym_val, IonValue::String(cover_sym_name)),
             ]));
         }
 

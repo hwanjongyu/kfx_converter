@@ -506,3 +506,300 @@ fn test_pipeline_end_to_end_with_links_lists_and_footnote_popups() {
         .validate_container()
         .expect("Packaged KFX container must pass preflight validation");
 }
+
+#[test]
+fn test_pipeline_p1_nov24_end_to_end_assets_collisions_utf16_list_images_and_nav() {
+    use kfx_converter::{IonReader, IonValue, KfxEntity, KfxPreflightValidator, symbol_id};
+    use std::io::{Cursor, Write};
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    let temp = common::temp_dir();
+    let epub_path = temp.path().join("p1_nov24_e2e.epub");
+    let kfx_path = temp.path().join("p1_nov24_e2e.kfx");
+
+    // Minimal valid GIF89a (64x48)
+    let mut gif89 = b"GIF89a".to_vec();
+    gif89.extend_from_slice(&64u16.to_le_bytes());
+    gif89.extend_from_slice(&48u16.to_le_bytes());
+    gif89.extend_from_slice(&[0x00, 0x00, 0x00, 0x3B]);
+
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default();
+        zip.start_file("mimetype", opts).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/content.opf", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>P1 End-to-End Verification Volume</dc:title>
+    <dc:language>en</dc:language>
+    <dc:creator>QA Suite</dc:creator>
+    <meta name="cover" content="style_p"/>
+  </metadata>
+  <manifest>
+    <item id="nav" href="Text/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="Part2/CH2.XHTML" media-type="application/xhtml+xml"/>
+    <item id="style_p" href="Images/empty_cover.jpg" media-type="image/jpeg"/>
+    <item id="content_1" href="Images/anim.gif" media-type="image/gif"/>
+    <item id="toc_nav" href="Images/vector.svg" media-type="image/svg+xml"/>
+    <item id="page_list_nav" href="Fonts/book.ttf" media-type="font/ttf"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+  </spine>
+</package>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/Text/nav.xhtml", opts).unwrap();
+        zip.write_all(
+            br##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+  <nav epub:type="toc">
+    <ol>
+      <li><a href="ch1.xhtml">Chapter One</a></li>
+      <li><a href="../Part2/ch2.xhtml?v=1#sec%202">Chapter Two</a></li>
+      <li><a href="javascript%3Aalert(1)">Blocked Nav</a></li>
+    </ol>
+  </nav>
+</body>
+</html>"##,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/Text/ch1.xhtml", opts).unwrap();
+        zip.write_all(
+            r##"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <h1>Chapter One</h1>
+  <p>😀 <a href="../Part2/ch2.xhtml#sec%202">Forward</a> and <b>abstruse</b> <a href="javascript%3Aalert(1)">blocked</a> <a href="\\evil.example\share">unc</a>.</p>
+  <ul>
+    <li><p>Before list figure</p></li>
+    <li><img src="../Images/anim.gif" alt="Animated diagram"/></li>
+    <li><img src="../Images/vector.svg" alt="SVG fallback"/></li>
+    <li><p>📖 To elucidate further.</p></li>
+  </ul>
+</body>
+</html>"##
+                .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file("OEBPS/Part2/CH2.XHTML", opts).unwrap();
+        zip.write_all(
+            br#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <h1 id="sec 2">Chapter Two</h1>
+  <p>An ephemeral conclusion.</p>
+</body>
+</html>"#,
+        )
+        .unwrap();
+        // 0-byte JPEG cover (P1-#5), valid GIF89a (P1-#5), SVG & TTF (must be excluded)
+        zip.start_file("OEBPS/Images/empty_cover.jpg", opts)
+            .unwrap();
+        zip.write_all(b"").unwrap();
+        zip.start_file("OEBPS/Images/anim.gif", opts).unwrap();
+        zip.write_all(&gif89).unwrap();
+        zip.start_file("OEBPS/Images/vector.svg", opts).unwrap();
+        zip.write_all(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+            .unwrap();
+        zip.start_file("OEBPS/Fonts/book.ttf", opts).unwrap();
+        zip.write_all(b"\x00\x01\x00\x00FAKEFONT").unwrap();
+        zip.finish().unwrap();
+    }
+    std::fs::write(&epub_path, buf.into_inner()).unwrap();
+
+    let options = ConversionOptions {
+        content_type: "EBOK".to_string(),
+        word_wise: true,
+        auto_deploy: false,
+        device_root: None,
+    };
+    let log_path = temp.path().join("p1_e2e.log");
+    let report = ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&kfx_path),
+        &options,
+        Some(&log_path),
+        None::<fn(f32, &str)>,
+    )
+    .expect("End-to-end P1 pipeline run must succeed");
+
+    assert!(report.total_bytes > 0);
+    assert!(report.sdr_error.is_none());
+    assert!(report.word_wise_error.is_none());
+    assert!(
+        report.word_wise_glosses.is_some_and(|g| g >= 2),
+        "Expected Word Wise glosses for abstruse/elucidate/ephemeral, got {:?}",
+        report.word_wise_glosses
+    );
+
+    let mut container = KfxContainer::open(&kfx_path).expect("Output KFX must open cleanly");
+    let sym_ext_res = symbol_id("external_resource").unwrap_or(164);
+    let sym_raw_media = symbol_id("bcRawMedia").unwrap_or(417);
+    let sym_storyline = symbol_id("storyline").unwrap_or(259);
+    let sym_content_list = symbol_id("content_list").unwrap_or(146);
+    let sym_style_events = symbol_id("style_events").unwrap_or(142);
+    let sym_offset = symbol_id("offset").unwrap_or(143);
+    let sym_length = symbol_id("length").unwrap_or(144);
+    let sym_type = symbol_id("type").unwrap_or(159);
+    let sym_image = symbol_id("image").unwrap_or(271);
+    let sym_format = symbol_id("format").unwrap_or(161);
+    let sym_gif = symbol_id("gif").unwrap_or(286);
+    let sym_w = symbol_id("resource_width").unwrap_or(422);
+    let sym_h = symbol_id("resource_height").unwrap_or(423);
+
+    let mut ext_res_count = 0usize;
+    let mut raw_media_count = 0usize;
+    let mut saw_gif_64x48 = false;
+    let mut saw_list_271_image = false;
+    let mut entities = Vec::with_capacity(container.chunks.len());
+
+    for chunk in container.chunks.clone() {
+        let data = container.read_chunk(&chunk).unwrap();
+        if chunk.chunk_type == sym_ext_res {
+            ext_res_count += 1;
+            let vals = IonReader::new(&data).decode_all().unwrap();
+            if let IonValue::Struct(fields) = &vals[0] {
+                let fmt = fields
+                    .iter()
+                    .find(|(k, _)| *k == sym_format)
+                    .map(|(_, v)| v);
+                let w = fields.iter().find(|(k, _)| *k == sym_w).map(|(_, v)| v);
+                let h = fields.iter().find(|(k, _)| *k == sym_h).map(|(_, v)| v);
+                if fmt == Some(&IonValue::Symbol(sym_gif))
+                    && w == Some(&IonValue::Int(64))
+                    && h == Some(&IonValue::Int(48))
+                {
+                    saw_gif_64x48 = true;
+                }
+            }
+        } else if chunk.chunk_type == sym_raw_media {
+            raw_media_count += 1;
+        } else if chunk.chunk_type == sym_storyline {
+            let vals = IonReader::new(&data).decode_all().unwrap();
+            if let IonValue::Struct(root) = &vals[0]
+                && let Some((_, IonValue::List(elems))) =
+                    root.iter().find(|(k, _)| *k == sym_content_list)
+            {
+                for elem in elems {
+                    if let IonValue::Struct(ef) = elem {
+                        if ef
+                            .iter()
+                            .any(|(k, v)| *k == sym_type && *v == IonValue::Symbol(sym_image))
+                        {
+                            saw_list_271_image = true;
+                        }
+                        if let Some((_, IonValue::List(events))) =
+                            ef.iter().find(|(k, _)| *k == sym_style_events)
+                        {
+                            let mut prev = (i64::MIN, i64::MIN);
+                            for ev in events {
+                                if let IonValue::Struct(sf) = ev {
+                                    let off = sf
+                                        .iter()
+                                        .find(|(k, _)| *k == sym_offset)
+                                        .and_then(|(_, v)| match v {
+                                            IonValue::Int(n) => Some(*n),
+                                            _ => None,
+                                        })
+                                        .unwrap_or(0);
+                                    let len = sf
+                                        .iter()
+                                        .find(|(k, _)| *k == sym_length)
+                                        .and_then(|(_, v)| match v {
+                                            IonValue::Int(n) => Some(*n),
+                                            _ => None,
+                                        })
+                                        .unwrap_or(0);
+                                    assert!(
+                                        (off, len) >= prev,
+                                        "$142 style_events must be sorted monotonically: {:?} < {:?}",
+                                        (off, len),
+                                        prev
+                                    );
+                                    prev = (off, len);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        entities.push(KfxEntity {
+            entity_id: chunk.entity_id,
+            chunk_type: chunk.chunk_type,
+            data,
+        });
+    }
+
+    assert_eq!(
+        ext_res_count, 2,
+        "Only 0-byte cover placeholder and GIF89a should emit $164 (SVG & TTF excluded)"
+    );
+    assert_eq!(raw_media_count, 2);
+    assert!(saw_gif_64x48, "GIF89a must emit $422=64, $423=48");
+    assert!(saw_list_271_image, "List-nested GIF must emit $271 image");
+
+    // Reconstruct LocalSymbols from the written KFX file's ContainerInfo -> doc_symbols ($ion_symbol_table)
+    let raw_kfx = std::fs::read(&kfx_path).expect("Read KFX bytes");
+    let ci_start = container.header.info_offset as usize;
+    let ci_end = ci_start + container.header.info_length as usize;
+    let ci_vals = IonReader::new(&raw_kfx[ci_start..ci_end])
+        .decode_all()
+        .expect("Decode ContainerInfo");
+    let sym_doc_off = kfx_converter::KfxSymbol::Bcdocsymboloffset as u32;
+    let sym_doc_len = kfx_converter::KfxSymbol::Bcdocsymbollength as u32;
+    let mut local_symbols = kfx_converter::symbols::LocalSymbols::new();
+    if let IonValue::Struct(ci_fields) = &ci_vals[0] {
+        let doc_off = ci_fields
+            .iter()
+            .find(|(k, _)| *k == sym_doc_off)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .expect("bcDocSymbolOffset present");
+        let doc_len = ci_fields
+            .iter()
+            .find(|(k, _)| *k == sym_doc_len)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .expect("bcDocSymbolLength present");
+        let doc_vals = IonReader::new(&raw_kfx[doc_off..doc_off + doc_len])
+            .decode_all()
+            .expect("Decode $ion_symbol_table");
+        let sym_table_struct = match &doc_vals[0] {
+            IonValue::Annotated(_, inner) => inner.as_ref(),
+            other => other,
+        };
+        if let IonValue::Struct(st_fields) = sym_table_struct
+            && let Some((_, IonValue::List(syms))) = st_fields.iter().find(|(k, _)| *k == 7)
+        {
+            for sym in syms {
+                if let IonValue::String(name) = sym {
+                    local_symbols.intern(name);
+                }
+            }
+        }
+    }
+
+    KfxPreflightValidator::new(&entities, Some(&local_symbols))
+        .validate_container()
+        .expect("End-to-end KFX container must pass full preflight validation");
+}

@@ -35,54 +35,217 @@ pub fn conversion_log_path() -> PathBuf {
             .join("conversion.log");
     }
 
-    std::env::temp_dir()
-        .join("kfx-converter")
-        .join("conversion.log")
+    #[cfg(unix)]
+    {
+        // SAFETY: libc::geteuid() takes no arguments and is always safe to call.
+        let uid = unsafe { libc::geteuid() };
+        std::env::temp_dir()
+            .join(format!("kfx-converter-{}", uid))
+            .join("conversion.log")
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir()
+            .join("kfx-converter")
+            .join("conversion.log")
+    }
 }
 
-/// Rotates `path` to `log.old` when it exceeds `max_bytes`, falling back to
-/// copy + truncate/remove if `rename` fails (e.g., locked or cross-filesystem targets).
-fn rotate_log_if_needed(path: &Path, max_bytes: u64) {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return;
+#[cfg(unix)]
+fn is_inside_temp_dir(path: &Path) -> bool {
+    let tmp = std::env::temp_dir();
+    if path.starts_with(&tmp) {
+        return true;
+    }
+    if let Ok(canon_tmp) = tmp.canonicalize()
+        && path.starts_with(&canon_tmp)
+    {
+        return true;
+    }
+    false
+}
+
+/// Verifies or creates the conversion log directory without following symlinks.
+/// On Unix, directories under the shared temp directory must be owned by the current UID
+/// and restricted to mode `0o700`.
+fn ensure_safe_log_dir(parent: &Path) -> Result<(), ()> {
+    if parent.as_os_str().is_empty() || parent == Path::new(".") {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    let verify_unix_temp_dir = |dir: &Path, meta: &std::fs::Metadata| -> Result<(), ()> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        if !is_inside_temp_dir(dir) {
+            return Ok(());
+        }
+        // SAFETY: libc::geteuid() takes no arguments and is always safe to call.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(());
+        }
+        if (meta.mode() & 0o777) != 0o700 {
+            let dir_file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+                .open(dir)
+                .map_err(|_| ())?;
+            let fd_meta = dir_file.metadata().map_err(|_| ())?;
+            if fd_meta.uid() != euid || !fd_meta.is_dir() {
+                return Err(());
+            }
+            dir_file
+                .set_permissions(std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| ())?;
+        }
+        Ok(())
     };
+
+    match std::fs::symlink_metadata(parent) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                return Err(());
+            }
+            #[cfg(unix)]
+            verify_unix_temp_dir(parent, &meta)?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(grandparent) = parent.parent()
+                && !grandparent.as_os_str().is_empty()
+            {
+                crate::storage::ensure_non_symlink_dir(grandparent).map_err(|_| ())?;
+            }
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(parent) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(()),
+            }
+            let meta = std::fs::symlink_metadata(parent).map_err(|_| ())?;
+            if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                return Err(());
+            }
+            #[cfg(unix)]
+            verify_unix_temp_dir(parent, &meta)?;
+            Ok(())
+        }
+        Err(_) => Err(()),
+    }
+}
+
+/// Rotates `path` to `log.old` when it exceeds `max_bytes`, rejecting symlink targets
+/// and falling back to `O_NOFOLLOW` copy + truncate/remove if `rename` fails.
+fn rotate_log_if_needed(path: &Path, max_bytes: u64) -> Result<(), ()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(()),
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return Err(());
+    }
     if meta.len() <= max_bytes {
-        return;
+        return Ok(());
     }
 
     let backup_path = path.with_extension("log.old");
-    if let Err(err) = std::fs::remove_file(&backup_path)
-        && err.kind() != std::io::ErrorKind::NotFound
-    {
-        // Best-effort: fall through to rename and copy+truncate fallback.
+    let mut backup_is_dir = false;
+    match std::fs::symlink_metadata(&backup_path) {
+        Ok(bm) if bm.file_type().is_symlink() => {
+            // Remove the symlink entry itself without following it; abort if removal fails.
+            if std::fs::remove_file(&backup_path).is_err() {
+                return Err(());
+            }
+        }
+        Ok(bm) if bm.file_type().is_file() => {
+            let _ = std::fs::remove_file(&backup_path);
+        }
+        Ok(bm) if bm.file_type().is_dir() => {
+            // Preserve blocking directory so rename fails into the truncation fallback cleanly.
+            backup_is_dir = true;
+        }
+        Ok(_) => return Err(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(()),
     }
 
-    if std::fs::rename(path, &backup_path).is_err() {
-        let _ = std::fs::copy(path, &backup_path);
-        if std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .is_err()
+    if !backup_is_dir && std::fs::rename(path, &backup_path).is_ok() {
+        return Ok(());
+    }
+
+    if !backup_is_dir
+        && !std::fs::symlink_metadata(&backup_path)
+            .is_ok_and(|bm| bm.file_type().is_symlink() || bm.file_type().is_dir())
+    {
+        let mut src_opts = std::fs::OpenOptions::new();
+        src_opts.read(true);
+        #[cfg(unix)]
         {
-            let _ = std::fs::remove_file(path);
+            use std::os::unix::fs::OpenOptionsExt;
+            src_opts.custom_flags(libc::O_NOFOLLOW);
+        }
+
+        let mut dst_opts = std::fs::OpenOptions::new();
+        dst_opts.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            dst_opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+        }
+
+        if let (Ok(mut src_file), Ok(mut dst_file)) =
+            (src_opts.open(path), dst_opts.open(&backup_path))
+        {
+            let _ = std::io::copy(&mut src_file, &mut dst_file);
         }
     }
+
+    let mut trunc_opts = std::fs::OpenOptions::new();
+    trunc_opts.write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        trunc_opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    if trunc_opts.open(path).is_err()
+        && std::fs::symlink_metadata(path)
+            .is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file())
+    {
+        let _ = std::fs::remove_file(path);
+    }
+
+    Ok(())
 }
 
-/// Appends a timestamped log line to `path` with non-fatal rotation.
+/// Appends a timestamped log line to `path` with symlink-safe, non-fatal rotation.
 fn append_conversion_log_at(path: &Path, message: &str) {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
+        && ensure_safe_log_dir(parent).is_err()
     {
-        let _ = std::fs::create_dir_all(parent);
+        return;
     }
-    rotate_log_if_needed(path, 2 * 1024 * 1024);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    if rotate_log_if_needed(path, 2 * 1024 * 1024).is_err() {
+        return;
+    }
+    if crate::storage::reject_symlink_path(path).is_err() {
+        return;
+    }
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.create(true).append(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    if let Ok(mut file) = open_opts.open(path) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -155,6 +318,7 @@ pub struct ConversionReport {
     pub cover_optimized: bool,
     pub word_wise_glosses: Option<usize>,
     pub word_wise_error: Option<String>,
+    pub sdr_error: Option<String>,
     pub synced_to_device: bool,
     pub synced_device_path: Option<PathBuf>,
     pub sync_error: Option<String>,
@@ -318,6 +482,7 @@ impl ConversionPipeline {
         }
 
         // 4b. Always deploy companion .sdr directory and sidecars alongside output_path
+        let mut sdr_error = None;
         let sdr_path = output_path.with_extension("sdr");
         if let Err(e) = crate::enhancements::SdrDeployer::deploy(
             &sdr_path,
@@ -330,9 +495,7 @@ impl ConversionPipeline {
         ) {
             let msg = format!("SDR sidecar deploy failed ({}): {}", sdr_path.display(), e);
             log_pipeline_event(log_path, &format!("ERROR {}", msg));
-            if word_wise_error.is_none() {
-                word_wise_error = Some(msg);
-            }
+            sdr_error = Some(msg);
         } else {
             log_pipeline_event(
                 log_path,
@@ -344,43 +507,40 @@ impl ConversionPipeline {
             );
         }
 
-        // 5. Automatic Device Sync if enabled or if destination is inside a Kindle drive
+        // 5. Automatic Device Sync when device_root is explicitly provided or auto_deploy is enabled
         let mut synced_to_device = false;
         let mut synced_device_path = None;
         let mut sync_error = None;
 
-        let target_root = options
-            .device_root
-            .clone()
-            .or_else(|| {
-                // Check if output_path is located inside a Kindle directory structure
-                let effective_output = if output_path.is_absolute() {
-                    output_path.clone()
-                } else {
-                    std::env::current_dir()
-                        .map(|cwd| cwd.join(&output_path))
-                        .unwrap_or_else(|_| output_path.clone())
-                };
-                let mut current = effective_output
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty());
-                while let Some(parent) = current {
-                    if parent.join("documents").is_dir()
-                        && (parent.join("system").is_dir() || parent.join(".system").is_dir())
-                    {
-                        return Some(parent.to_path_buf());
-                    }
-                    current = parent.parent().filter(|p| !p.as_os_str().is_empty());
+        let target_root = options.device_root.clone().or_else(|| {
+            if !options.auto_deploy {
+                return None;
+            }
+            // Check if output_path is located inside a Kindle directory structure
+            let effective_output = if output_path.is_absolute() {
+                output_path.clone()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&output_path))
+                    .unwrap_or_else(|_| output_path.clone())
+            };
+            let is_real_dir = |p: PathBuf| {
+                std::fs::symlink_metadata(&p)
+                    .is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_dir())
+            };
+            let mut current = effective_output
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty());
+            while let Some(parent) = current {
+                if is_real_dir(parent.join("documents"))
+                    && (is_real_dir(parent.join("system")) || is_real_dir(parent.join(".system")))
+                {
+                    return Some(parent.to_path_buf());
                 }
-                None
-            })
-            .or_else(|| {
-                if options.auto_deploy {
-                    KindleSync::detect_kindle_root()
-                } else {
-                    None
-                }
-            });
+                current = parent.parent().filter(|p| !p.as_os_str().is_empty());
+            }
+            KindleSync::detect_kindle_root()
+        });
 
         if let Some(device_root) = target_root {
             if let Some(ref cb) = progress {
@@ -397,17 +557,17 @@ impl ConversionPipeline {
                 cover_jpeg.as_deref(),
                 kll_bytes.as_deref(),
             ) {
-                Ok(sdr_path) => {
+                Ok(synced_kfx_path) => {
                     log_pipeline_event(
                         log_path,
                         &format!(
-                            "SYNC ok sdr_path=\"{}\" has_kll={}",
-                            sdr_path.display(),
+                            "SYNC ok synced_kfx_path=\"{}\" has_kll={}",
+                            synced_kfx_path.display(),
                             kll_bytes.is_some()
                         ),
                     );
                     synced_to_device = true;
-                    synced_device_path = Some(sdr_path);
+                    synced_device_path = Some(synced_kfx_path);
                 }
                 Err(e) => {
                     log_pipeline_event(log_path, &format!("ERROR SYNC failed: {}", e));
@@ -445,6 +605,7 @@ impl ConversionPipeline {
             cover_optimized,
             word_wise_glosses,
             word_wise_error,
+            sdr_error,
             synced_to_device,
             synced_device_path,
             sync_error,
@@ -676,26 +837,61 @@ mod tests {
     #[test]
     fn test_pipeline_relative_output_path_discovers_ancestor_kindle_root() {
         if std::env::var_os("KFX_PIPELINE_REL_CHILD").is_some() {
-            let options = ConversionOptions {
+            // Case 1: auto_deploy: false, device_root: None must NOT silently sync
+            let no_sync_options = ConversionOptions {
                 content_type: "EBOK".into(),
                 word_wise: false,
                 auto_deploy: false,
                 device_root: None,
             };
-            let report = ConversionPipeline::run_with_log_path(
+            let report_nosync = ConversionPipeline::run_with_log_path(
                 Path::new("input.epub"),
-                Some(Path::new("rel_book.kfx")),
-                &options,
-                Some(Path::new("../test_pipeline.log")),
+                Some(Path::new("rel_book_nosync.kfx")),
+                &no_sync_options,
+                Some(Path::new("../test_pipeline_nosync.log")),
                 None::<fn(f32, &str)>,
             )
-            .expect("Relative pipeline run inside Kindle documents/ must succeed");
+            .expect("Relative pipeline run with auto_deploy=false must succeed");
             assert!(
-                report.synced_to_device,
-                "Relative output inside Kindle documents/ must trigger ancestor Kindle root discovery"
+                !report_nosync.synced_to_device,
+                "auto_deploy=false must NOT trigger ancestor Kindle sync"
             );
-            assert!(Path::new("rel_book.kfx").is_file());
-            assert!(Path::new("rel_book.sdr").is_dir());
+            assert!(report_nosync.synced_device_path.is_none());
+            assert!(Path::new("rel_book_nosync.kfx").is_file());
+            assert!(Path::new("rel_book_nosync.sdr").is_dir());
+            assert!(
+                !Path::new("../amazon-cover-bug").exists(),
+                "amazon-cover-bug must not be created when auto_deploy=false"
+            );
+
+            // Case 2: auto_deploy: true, device_root: None discovers ancestor Kindle root and syncs
+            let sync_options = ConversionOptions {
+                content_type: "EBOK".into(),
+                word_wise: false,
+                auto_deploy: true,
+                device_root: None,
+            };
+            let report_sync = ConversionPipeline::run_with_log_path(
+                Path::new("input.epub"),
+                Some(Path::new("rel_book_sync.kfx")),
+                &sync_options,
+                Some(Path::new("../test_pipeline_sync.log")),
+                None::<fn(f32, &str)>,
+            )
+            .expect("Relative pipeline run with auto_deploy=true must succeed");
+            assert!(
+                report_sync.synced_to_device,
+                "Relative output inside Kindle documents/ with auto_deploy=true must sync"
+            );
+            assert!(report_sync.synced_device_path.is_some());
+            assert!(Path::new("rel_book_sync.kfx").is_file());
+            assert!(Path::new("rel_book_sync.sdr").is_dir());
+            let sync_log = std::fs::read_to_string("../test_pipeline_sync.log").unwrap();
+            assert!(
+                sync_log.contains("SYNC ok synced_kfx_path="),
+                "Expected synced_kfx_path= in sync log, got: {}",
+                sync_log
+            );
             return;
         }
 
@@ -722,7 +918,95 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(docs_dir.join("rel_book.kfx").is_file());
-        assert!(docs_dir.join("rel_book.sdr").is_dir());
+        assert!(docs_dir.join("rel_book_nosync.kfx").is_file());
+        assert!(docs_dir.join("rel_book_nosync.sdr").is_dir());
+        assert!(docs_dir.join("rel_book_sync.kfx").is_file());
+        assert!(docs_dir.join("rel_book_sync.sdr").is_dir());
+    }
+
+    #[test]
+    fn test_pipeline_sdr_deploy_failure_sets_sdr_error_not_word_wise_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let epub_path = temp.path().join("sdr_err_book.epub");
+        create_test_epub(&epub_path);
+
+        for word_wise in [false, true] {
+            let kfx_path = temp.path().join(format!("out_ww_{}.kfx", word_wise));
+            let blocking_sdr = kfx_path.with_extension("sdr");
+            std::fs::write(&blocking_sdr, b"blocking-file").unwrap();
+
+            let options = ConversionOptions {
+                content_type: "EBOK".into(),
+                word_wise,
+                auto_deploy: false,
+                device_root: None,
+            };
+            let report = ConversionPipeline::run_with_log_path(
+                &epub_path,
+                Some(&kfx_path),
+                &options,
+                None,
+                None::<fn(f32, &str)>,
+            )
+            .expect("Non-fatal SDR deploy failure must still return Ok(report)");
+
+            assert!(
+                report.sdr_error.is_some(),
+                "sdr_error must be populated when SdrDeployer::deploy fails (word_wise={})",
+                word_wise
+            );
+            assert!(
+                report.word_wise_error.is_none(),
+                "word_wise_error must remain None when only SDR deployment failed (word_wise={})",
+                word_wise
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_conversion_log_rejects_symlinks_for_file_backup_and_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+
+        // 1. Symlinked conversion.log must not follow or clobber victim
+        let victim = temp.path().join("victim.txt");
+        std::fs::write(&victim, b"UNTOUCHED_LOG_VICTIM").unwrap();
+        let sym_log = temp.path().join("conversion.log");
+        symlink(&victim, &sym_log).unwrap();
+        append_conversion_log_at(&sym_log, "SHOULD_NOT_WRITE");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"UNTOUCHED_LOG_VICTIM");
+
+        // 2. Symlinked conversion.log.old during rotation must not overwrite victim
+        let rot_dir = temp.path().join("rot_case");
+        std::fs::create_dir_all(&rot_dir).unwrap();
+        let rot_victim = temp.path().join("rot_victim.txt");
+        std::fs::write(&rot_victim, b"UNTOUCHED_ROT_VICTIM").unwrap();
+        let rot_log = rot_dir.join("conversion.log");
+        let rot_backup_link = rot_dir.join("conversion.log.old");
+        let oversized = vec![b'Z'; 2 * 1024 * 1024 + 32];
+        std::fs::write(&rot_log, &oversized).unwrap();
+        symlink(&rot_victim, &rot_backup_link).unwrap();
+
+        append_conversion_log_at(&rot_log, "POST_SAFE_ROTATE");
+        assert_eq!(std::fs::read(&rot_victim).unwrap(), b"UNTOUCHED_ROT_VICTIM");
+        let after_rot = std::fs::read_to_string(&rot_log).unwrap();
+        assert!(after_rot.contains("POST_SAFE_ROTATE"));
+        assert!(
+            !std::fs::symlink_metadata(&rot_backup_link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "Rotated backup should be a real file after safely unlinking the symlink"
+        );
+
+        // 3. Symlinked parent directory must be refused without creating log inside target
+        let target_dir = temp.path().join("real_target_dir");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let sym_parent = temp.path().join("sym_parent_dir");
+        symlink(&target_dir, &sym_parent).unwrap();
+        append_conversion_log_at(&sym_parent.join("conversion.log"), "NO_ESCAPE");
+        assert!(!target_dir.join("conversion.log").exists());
     }
 }

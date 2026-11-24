@@ -1,20 +1,106 @@
 //! External resource and raw media entity generation for KFX packaging.
 
-use super::{KfxPackager, symbols::LocalSymbols};
+use super::{KfxPackager, symbols::LocalSymbols, types::AllocatedResourceSym};
 use crate::container::KfxEntity;
 use crate::ion::{IonValue, IonWriter};
 use crate::symbols::KfxSymbol;
 
+/// Returns `true` iff `id` collides with a reserved internal packager symbol namespace.
+pub(crate) fn is_reserved_packager_symbol(id: &str) -> bool {
+    id.is_empty()
+        || matches!(id, "toc_nav" | "landmarks_nav" | "page_list_nav")
+        || id.starts_with("style_")
+        || id.starts_with("c_")
+        || id.starts_with("story_")
+        || id.starts_with("resource/")
+        || id
+            .strip_prefix("content_")
+            .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        || id
+            .strip_prefix("a_")
+            .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        || id
+            .strip_prefix("note_")
+            .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl<'a> KfxPackager<'a> {
-    /// Builds external resource entities ($164) and raw binary payload entities ($417)
-    /// for all images, covers, and embedded assets.
+    /// Pre-allocates collision-free local symbols for all supported raster image resources
+    /// (`$164 external_resource` and `$417 bcRawMedia`), running immediately after `build_styles`
+    /// so style SIDs `852..=890` remain frozen.
     ///
-    /// For every resource in `BookIR::resources`, Yellowjacket emits a dual-entity pair:
+    /// Clean non-colliding OPF resource IDs retain their original symbol names; reserved or
+    /// colliding IDs are deterministically remapped to `res_1`, `res_2`, ...
+    pub(crate) fn allocate_resource_symbols(&mut self, symbols: &mut LocalSymbols) {
+        self.resource_symbols.clear();
+        let cover_id = self.resolve_cover_resource_id();
+        let mut sorted_keys: Vec<&String> = self
+            .book
+            .resources
+            .iter()
+            .filter_map(|(k, v)| v.is_supported_raster_image().then_some(k))
+            .collect();
+        sorted_keys.sort_by(|a_key, b_key| {
+            let a_is_cover = cover_id.as_deref() == Some(a_key.as_str());
+            let b_is_cover = cover_id.as_deref() == Some(b_key.as_str());
+            match (a_is_cover, b_is_cover) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a_key.cmp(b_key),
+            }
+        });
+
+        let mut counter = 1usize;
+        for res_id in sorted_keys {
+            let raw_cand = format!("resource/{}", res_id);
+            let (res_sym_name, raw_path) = if !is_reserved_packager_symbol(res_id)
+                && symbols.get_id(res_id).is_none()
+                && symbols.get_id(&raw_cand).is_none()
+            {
+                (res_id.clone(), raw_cand)
+            } else {
+                loop {
+                    let cand = format!("res_{}", counter);
+                    let cand_raw = format!("resource/{}", cand);
+                    counter += 1;
+                    if symbols.get_id(&cand).is_none() && symbols.get_id(&cand_raw).is_none() {
+                        break (cand, cand_raw);
+                    }
+                }
+            };
+            let res_sym_id = symbols.intern(&res_sym_name);
+            let raw_sym_id = symbols.intern(&raw_path);
+            self.resource_symbols.insert(
+                res_id.clone(),
+                AllocatedResourceSym {
+                    res_sym_id,
+                    res_sym_name,
+                    raw_sym_id,
+                    raw_path,
+                },
+            );
+        }
+    }
+
+    /// Builds external resource entities ($164) and raw binary payload entities ($417)
+    /// for all supported raster images and covers.
+    ///
+    /// For every supported raster resource in `BookIR::resources`, Yellowjacket emits a dual-entity pair:
     /// 1. $164 (`external_resource`) metadata entity containing MIME type, format, and dimensions
     ///    required by Kindle OS layout engine (KPP / Hermes JS) to compute e-ink pagination
     ///    and bounding boxes. Omission results in height=0px rendering collapse.
     /// 2. $417 (`bcRawMedia`) raw binary image payload entity.
     pub(crate) fn build_resources(&mut self, symbols: &mut LocalSymbols) {
+        if self.resource_symbols.is_empty()
+            && self
+                .book
+                .resources
+                .values()
+                .any(crate::ir::ResourceAsset::is_supported_raster_image)
+        {
+            self.allocate_resource_symbols(symbols);
+        }
+
         let sym_ext_resource = KfxSymbol::ExternalResource as u32;
         let sym_raw_media = KfxSymbol::Bcrawmedia as u32;
         let sym_resource_name = KfxSymbol::ResourceName as u32;
@@ -26,7 +112,11 @@ impl<'a> KfxPackager<'a> {
         let sym_jpg = KfxSymbol::Jpg as u32;
 
         let cover_id = self.resolve_cover_resource_id();
-        let mut sorted_resources: Vec<_> = self.book.resources.iter().collect();
+        let mut sorted_resources: Vec<(String, AllocatedResourceSym)> = self
+            .resource_symbols
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         // Priority ordering: cover image entity MUST be emitted first so that Kindle lockscreen
         // and Calibre extractors picking the first bcRawMedia ($417) entity reliably receive the cover.
         sorted_resources.sort_by(|(a_key, _), (b_key, _)| {
@@ -39,20 +129,36 @@ impl<'a> KfxPackager<'a> {
             }
         });
 
-        for (res_id, asset) in sorted_resources {
-            let res_sym_id = symbols.intern(res_id);
-            let raw_path = format!("resource/{}", res_id);
-            let raw_sym_id = symbols.intern(&raw_path);
+        let placeholder = || {
+            (
+                crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+                sym_jpg,
+                "image/jpeg".to_string(),
+                Some((1, 1)),
+            )
+        };
+
+        for (res_id, alloc) in sorted_resources {
+            let Some(asset) = self.book.resources.get(&res_id) else {
+                continue;
+            };
+            if !asset.is_supported_raster_image() {
+                continue;
+            }
+
+            let res_sym_id = alloc.res_sym_id;
+            let raw_sym_id = alloc.raw_sym_id;
+            let raw_path = alloc.raw_path;
 
             let is_cover_res = cover_id.as_deref() == Some(res_id.as_str());
-            let ext_hint = std::path::Path::new(res_id)
+            let ext_hint = std::path::Path::new(&res_id)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or(asset.mime_type.as_str());
 
             // For the book cover, transcode to a Kindle-compliant baseline RGB JPEG (JFIF).
-            // For oversized / limit-exceeding images, substitute a valid 1x1 baseline placeholder JPEG
-            // rather than emitting empty $417 payloads or raw multi-megabyte image bombs.
+            // For empty, oversized, limit-exceeding, or unrecognized non-raster payloads, substitute
+            // a valid 1x1 baseline placeholder JPEG rather than emitting corrupt/empty $417 chunks.
             let (payload_data, format_sym, mime_type, forced_dims) = if is_cover_res {
                 match crate::enhancements::CoverOptimizer::optimize_cover_image(
                     &asset.data,
@@ -63,37 +169,45 @@ impl<'a> KfxPackager<'a> {
                             crate::enhancements::detect_image_format(&data, "jpg");
                         (data, f_sym, m_type.to_string(), None)
                     }
+                    Err(crate::enhancements::CoverError::EmptyData) => {
+                        eprintln!(
+                            "Warning: Cover image resource '{}' is empty; substituting 1x1 placeholder JPEG.",
+                            res_id
+                        );
+                        placeholder()
+                    }
                     Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
                         eprintln!(
                             "Warning: Cover image dimensions ({}x{}) exceed safe limits; substituting 1x1 placeholder JPEG.",
                             w, h
                         );
-                        (
-                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
-                            sym_jpg,
-                            "image/jpeg".to_string(),
-                            Some((1, 1)),
-                        )
+                        placeholder()
                     }
                     Err(crate::enhancements::CoverError::LimitExceeded(reason)) => {
                         eprintln!(
                             "Warning: Cover image limit exceeded ({}); substituting 1x1 placeholder JPEG.",
                             reason
                         );
-                        (
-                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
-                            sym_jpg,
-                            "image/jpeg".to_string(),
-                            Some((1, 1)),
-                        )
+                        placeholder()
                     }
-                    Err(_) => {
-                        let (_, f_sym, m_type) =
-                            crate::enhancements::detect_image_format(&asset.data, ext_hint);
-                        (asset.data.clone(), f_sym, m_type.to_string(), None)
+                    Err(
+                        crate::enhancements::CoverError::Decode(_)
+                        | crate::enhancements::CoverError::Io(_),
+                    ) => {
+                        if crate::enhancements::cover::has_known_raster_magic(&asset.data) {
+                            let (_, f_sym, m_type) =
+                                crate::enhancements::detect_image_format(&asset.data, ext_hint);
+                            (asset.data.clone(), f_sym, m_type.to_string(), None)
+                        } else {
+                            eprintln!(
+                                "Warning: Cover image resource '{}' has corrupt or unrecognized bytes; substituting 1x1 placeholder JPEG.",
+                                res_id
+                            );
+                            placeholder()
+                        }
                     }
                 }
-            } else if asset.mime_type.starts_with("image/") {
+            } else {
                 match crate::enhancements::CoverOptimizer::optimize_content_image(
                     &asset.data,
                     crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
@@ -103,46 +217,48 @@ impl<'a> KfxPackager<'a> {
                             crate::enhancements::detect_image_format(&data, ext_hint);
                         (data, f_sym, m_type.to_string(), None)
                     }
+                    Err(crate::enhancements::CoverError::EmptyData) => {
+                        eprintln!(
+                            "Warning: Image resource '{}' is empty; substituting 1x1 placeholder JPEG.",
+                            res_id
+                        );
+                        placeholder()
+                    }
                     Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
                         eprintln!(
                             "Warning: Image resource '{}' dimensions ({}x{}) exceed safe limits; substituting 1x1 placeholder JPEG.",
                             res_id, w, h
                         );
-                        (
-                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
-                            sym_jpg,
-                            "image/jpeg".to_string(),
-                            Some((1, 1)),
-                        )
+                        placeholder()
                     }
                     Err(crate::enhancements::CoverError::LimitExceeded(reason)) => {
                         eprintln!(
                             "Warning: Image resource '{}' limit exceeded ({}); substituting 1x1 placeholder JPEG.",
                             res_id, reason
                         );
-                        (
-                            crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
-                            sym_jpg,
-                            "image/jpeg".to_string(),
-                            Some((1, 1)),
-                        )
+                        placeholder()
                     }
-                    Err(_) => {
-                        let (_, f_sym, m_type) =
-                            crate::enhancements::detect_image_format(&asset.data, ext_hint);
-                        (asset.data.clone(), f_sym, m_type.to_string(), None)
+                    Err(
+                        crate::enhancements::CoverError::Decode(_)
+                        | crate::enhancements::CoverError::Io(_),
+                    ) => {
+                        if crate::enhancements::cover::has_known_raster_magic(&asset.data) {
+                            let (_, f_sym, m_type) =
+                                crate::enhancements::detect_image_format(&asset.data, ext_hint);
+                            (asset.data.clone(), f_sym, m_type.to_string(), None)
+                        } else {
+                            eprintln!(
+                                "Warning: Image resource '{}' has corrupt or unrecognized bytes; substituting 1x1 placeholder JPEG.",
+                                res_id
+                            );
+                            placeholder()
+                        }
                     }
                 }
-            } else {
-                (asset.data.clone(), sym_jpg, asset.mime_type.clone(), None)
             };
 
             let dimensions = forced_dims.or_else(|| {
-                if mime_type.starts_with("image/") || asset.mime_type.starts_with("image/") {
-                    crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
-                } else {
-                    None
-                }
+                crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
             });
 
             // 1. External Resource metadata entity ($164)

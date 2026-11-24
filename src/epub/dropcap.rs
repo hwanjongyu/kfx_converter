@@ -1,12 +1,7 @@
 //! Drop-cap styling detection, opening quote preservation, and text span splitting.
 
 use crate::ir::TextSpan;
-
-/// Checks if a character is an opening quotation mark in Western or CJK typography.
-#[inline]
-pub fn is_opening_quote(c: char) -> bool {
-    matches!(c, '“' | '‘' | '"' | '\'' | '«' | '‹' | '「' | '『')
-}
+pub use crate::util::is_opening_quote;
 
 /// Applies drop-cap enhancements to paragraph text spans:
 /// - Case A: If an explicit `<span class="dropcap">` contains only an opening quotation mark,

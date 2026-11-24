@@ -1,7 +1,16 @@
 //! Intermediate Representation (IR) Data Models
 //! Decouples input formats (EPUB) from output formats (KFX).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
+
+/// Returns the length of `s` measured in UTF-16 code units (BMP = 1, non-BMP = 2),
+/// matching Amazon Yellowjacket / KFX `$143`/`$144`/`$265` and Word Wise PID indexing.
+#[inline]
+pub fn str_utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct BookMetadata {
@@ -297,6 +306,22 @@ pub struct Section {
     pub blocks: Vec<Block>,
 }
 
+impl Section {
+    /// Returns `true` iff this section at `section_index` is the dedicated cover section.
+    pub fn is_cover_section(&self, section_index: usize) -> bool {
+        (section_index == 0)
+            && (self.id.to_lowercase().contains("cover")
+                || (self.blocks.iter().any(|b| matches!(b, Block::Image { .. }))
+                    && self.blocks.iter().all(|b| match b {
+                        Block::Image { .. } => true,
+                        Block::Paragraph { spans, .. } => {
+                            spans.iter().all(|s| s.text.trim().is_empty())
+                        }
+                        _ => false,
+                    })))
+    }
+}
+
 #[derive(Debug)]
 pub struct TocItem {
     pub title: String,
@@ -317,6 +342,21 @@ pub struct ResourceAsset {
     pub id: String,
     pub mime_type: String,
     pub data: Vec<u8>,
+}
+
+impl ResourceAsset {
+    /// Returns `true` iff this asset is a supported raster image MIME type
+    /// (`image/*` excluding vector `image/svg+xml`). Excludes `font/*` and other non-raster assets.
+    pub fn is_supported_raster_image(&self) -> bool {
+        let mime = self
+            .mime_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        mime.starts_with("image/") && !mime.contains("svg")
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -407,7 +447,49 @@ impl Block {
         out
     }
 
-    /// Returns the total character count of text content in this block.
+    /// Returns `true` iff this block is a `Block::Image` or (iteratively) contains one
+    /// nested inside `Block::List`.
+    pub fn contains_image(&self) -> bool {
+        let mut stack = vec![self];
+        while let Some(block) = stack.pop() {
+            match block {
+                Block::Image { .. } => return true,
+                Block::List { items, .. } => {
+                    for item in items.iter().rev() {
+                        for child in item.iter().rev() {
+                            stack.push(child);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Returns the fallback display text for an unresolved `Block::Image`.
+    pub fn image_fallback_text(alt: Option<&str>) -> &str {
+        alt.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("[Image]")
+    }
+
+    /// Returns the Yellowjacket PID span (in UTF-16 code units, minimum 1) occupied by this block.
+    pub fn yellowjacket_pid_len(&self, has_resolved_resource: bool) -> usize {
+        match self {
+            Block::Image { alt, .. } => {
+                if has_resolved_resource {
+                    alt.as_deref().map_or(0, str_utf16_len).max(1)
+                } else {
+                    str_utf16_len(Self::image_fallback_text(alt.as_deref())).max(1)
+                }
+            }
+            _ => str_utf16_len(&self.plain_text()).max(1),
+        }
+    }
+
+    /// Returns the total character count of text content in this block,
+    /// including `\n`/`\t` separators so `block.char_count() == block.plain_text().chars().count()`.
     pub fn char_count(&self) -> usize {
         let mut total = 0usize;
         let mut stack = vec![self];
@@ -417,18 +499,23 @@ impl Block {
                     total += spans.iter().map(|s| s.text.chars().count()).sum::<usize>();
                 }
                 Block::Table { rows, .. } => {
-                    total += rows
-                        .iter()
-                        .flat_map(|r| r.iter())
-                        .map(|c| c.chars().count())
-                        .sum::<usize>();
+                    total += rows.len().saturating_sub(1);
+                    for r in rows {
+                        total += r.len().saturating_sub(1);
+                        for c in r {
+                            total += c.chars().count();
+                        }
+                    }
                 }
                 Block::List { items, .. } => {
+                    let mut child_count = 0usize;
                     for item in items.iter().rev() {
                         for b in item.iter().rev() {
                             stack.push(b);
+                            child_count += 1;
                         }
                     }
+                    total += child_count.saturating_sub(1);
                 }
                 Block::Image { alt, .. } => {
                     total += alt.as_ref().map(|a| a.chars().count()).unwrap_or(0);
@@ -839,13 +926,13 @@ impl BookIR {
     }
 
     /// Resolves the cover image resource ID using a robust 5-tier fallback hierarchy:
-    /// 1. Explicit metadata cover_image_id (verified to exist in resources as an image)
+    /// 1. Explicit metadata cover_image_id (verified to exist in resources as a supported raster image)
     /// 2. First image block in the first section (cover page)
-    /// 3. Any image resource with a key containing "cover" (case-insensitive)
-    /// 4. Any image resource with a key containing "thumb" (case-insensitive)
-    /// 5. First available image resource in the book
+    /// 3. Any raster image resource with a key containing "cover" (case-insensitive)
+    /// 4. Any raster image resource with a key containing "thumb" (case-insensitive)
+    /// 5. First available raster image resource in the book
     ///
-    /// Guarantees that any returned ID points to an existing image resource in `self.resources`.
+    /// Guarantees that any returned ID points to an existing supported raster image resource in `self.resources`.
     pub fn resolve_cover_resource_id(&self) -> Option<String> {
         let mut sorted_keys: Vec<&String> = self.resources.keys().collect();
         sorted_keys.sort();
@@ -857,7 +944,7 @@ impl BookIR {
                 .find(|k| {
                     self.resources
                         .get(*k)
-                        .is_some_and(|v| v.mime_type.starts_with("image/") && pred(k))
+                        .is_some_and(|v| v.is_supported_raster_image() && pred(k))
                 })
                 .cloned()
         };
@@ -868,11 +955,11 @@ impl BookIR {
             .as_ref()
             .and_then(|id| {
                 if let Some(res) = self.resources.get(id)
-                    && res.mime_type.starts_with("image/")
+                    && res.is_supported_raster_image()
                 {
                     return Some(id.clone());
                 }
-                // Try case-insensitive or stripped filename matching against image resources
+                // Try case-insensitive or stripped filename matching against raster image resources
                 find_image_key(&|k| {
                     k.eq_ignore_ascii_case(id) || k.ends_with(id.as_str()) || id.ends_with(k)
                 })
@@ -883,7 +970,7 @@ impl BookIR {
                     s.blocks.iter().find_map(|b| match b {
                         Block::Image { resource_id, .. } => {
                             if let Some(res) = self.resources.get(resource_id)
-                                && res.mime_type.starts_with("image/")
+                                && res.is_supported_raster_image()
                             {
                                 return Some(resource_id.clone());
                             }
@@ -893,12 +980,103 @@ impl BookIR {
                     })
                 })
             })
-            // 3. Any image resource with a key containing "cover"
+            // 3. Any raster image resource with a key containing "cover"
             .or_else(|| find_image_key(&|k| k.to_lowercase().contains("cover")))
-            // 4. Any image resource with a key containing "thumb"
+            // 4. Any raster image resource with a key containing "thumb"
             .or_else(|| find_image_key(&|k| k.to_lowercase().contains("thumb")))
-            // 5. Fallback: First image resource in the entire book
+            // 5. Fallback: First raster image resource in the entire book
             .or_else(|| find_image_key(&|_| true))
+    }
+
+    fn normalize_resource_path(raw: &str) -> String {
+        let decoded = crate::util::decode_percent(raw.trim());
+        crate::util::resolve_zip_path("", &decoded)
+    }
+
+    /// Resolves a `Block::Image.resource_id` against `self.resources`, filtering strictly to
+    /// supported raster images (`ResourceAsset::is_supported_raster_image`).
+    pub fn resolve_resource_key(&self, resource_id: &str) -> Option<String> {
+        if self
+            .resources
+            .get(resource_id)
+            .is_some_and(ResourceAsset::is_supported_raster_image)
+        {
+            return Some(resource_id.to_string());
+        }
+        let norm_target = Self::normalize_resource_path(resource_id);
+        if norm_target.is_empty() {
+            return None;
+        }
+        let mut keys: Vec<&String> = self
+            .resources
+            .iter()
+            .filter_map(|(k, v)| v.is_supported_raster_image().then_some(k))
+            .collect();
+        keys.sort();
+
+        for key in &keys {
+            if Self::normalize_resource_path(key) == norm_target {
+                return Some((*key).clone());
+            }
+        }
+        for key in &keys {
+            if Self::normalize_resource_path(key).eq_ignore_ascii_case(&norm_target) {
+                return Some((*key).clone());
+            }
+        }
+        let target_file = Path::new(&norm_target)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if !target_file.is_empty() {
+            for key in &keys {
+                let norm_key = Self::normalize_resource_path(key);
+                let key_file = Path::new(&norm_key)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if !key_file.is_empty() && key_file.eq_ignore_ascii_case(target_file) {
+                    return Some((*key).clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns a borrow of `self.sections` (zero-copy when already normalized with a cover section
+    /// or when no cover resource exists), or an owned `Vec<Section>` with the synthetic cover
+    /// section prepended at index 0.
+    pub fn sections_with_cover(&self) -> Cow<'_, [Section]> {
+        if let Some(cover_res_id) = self.resolve_cover_resource_id() {
+            let first_is_cover = self
+                .sections
+                .first()
+                .map(|s| {
+                    s.blocks.iter().any(|b| match b {
+                        Block::Image { resource_id, .. } => resource_id == &cover_res_id,
+                        _ => false,
+                    })
+                })
+                .unwrap_or(false);
+
+            if !first_is_cover {
+                let mut sections = Vec::with_capacity(self.sections.len() + 1);
+                sections.push(Section {
+                    id: "cover".to_string(),
+                    title: "Cover".to_string(),
+                    blocks: vec![Block::Image {
+                        id: "cover_img_block".to_string(),
+                        resource_id: cover_res_id,
+                        alt: Some("Cover".to_string()),
+                        width: None,
+                        height: None,
+                    }],
+                });
+                sections.extend(self.sections.iter().cloned());
+                return Cow::Owned(sections);
+            }
+        }
+        Cow::Borrowed(&self.sections)
     }
 
     /// Normalizes the intermediate representation by fragmenting oversized sections
@@ -954,9 +1132,9 @@ pub(crate) enum UriKind {
     InternalOrRelative,
 }
 
-/// Strips ASCII control characters and trims surrounding whitespace from a raw href.
+/// Strips Unicode control characters (ASCII C0 and Unicode C1) and trims surrounding whitespace from a raw href.
 pub(crate) fn sanitize_href_whitespace(raw: &str) -> String {
-    let stripped: String = raw.chars().filter(|ch| !ch.is_ascii_control()).collect();
+    let stripped: String = raw.chars().filter(|ch| !ch.is_control()).collect();
     stripped.trim().to_string()
 }
 
@@ -995,7 +1173,7 @@ pub(crate) fn classify_uri(raw: &str) -> Option<UriKind> {
         }
         if scheme.eq_ignore_ascii_case("mailto") {
             let recipient = rest.trim();
-            if recipient.is_empty() {
+            if recipient.is_empty() || recipient.chars().any(char::is_whitespace) {
                 return Some(UriKind::Blocked);
             }
             return Some(UriKind::External(format!("mailto:{}", recipient)));
@@ -1010,7 +1188,7 @@ pub(crate) fn classify_uri(raw: &str) -> Option<UriKind> {
 pub(crate) fn is_allowlisted_external_uri(uri: &str) -> bool {
     !uri.is_empty()
         && uri.trim() == uri
-        && !uri.chars().any(|ch| ch.is_ascii_control())
+        && !uri.chars().any(char::is_control)
         && matches!(classify_uri(uri), Some(UriKind::External(_)))
 }
 
@@ -1477,7 +1655,8 @@ mod tests {
                 vec!["Val1".to_string(), "Val2".to_string()],
             ],
         };
-        assert_eq!(table.char_count(), 16);
+        assert_eq!(table.char_count(), 19);
+        assert_eq!(table.char_count(), table.plain_text().chars().count());
 
         let list = Block::List {
             id: "l1".to_string(),
@@ -1496,6 +1675,139 @@ mod tests {
         };
         assert_eq!(list.char_count(), 6);
         assert_eq!(list.plain_text(), "Item 1");
+
+        let multi_list = Block::List {
+            id: "l2".to_string(),
+            ordered: true,
+            items: vec![
+                vec![Block::Paragraph {
+                    id: "li2_1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "First".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                }],
+                vec![Block::Paragraph {
+                    id: "li2_2".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Second".to_string(),
+                        style: None,
+                        anchor_id: None,
+                        href: None,
+                        ruby: None,
+                    }],
+                    style: None,
+                }],
+            ],
+        };
+        assert_eq!(multi_list.plain_text(), "First\nSecond");
+        assert_eq!(multi_list.char_count(), 12);
+        assert_eq!(
+            multi_list.char_count(),
+            multi_list.plain_text().chars().count()
+        );
+    }
+
+    #[test]
+    fn test_wave1_ir_helpers_utf16_raster_cover_and_uri_controls() {
+        assert_eq!(str_utf16_len("abc"), 3);
+        assert_eq!(str_utf16_len("한글"), 2);
+        assert_eq!(str_utf16_len("📖"), 2);
+        assert_eq!(str_utf16_len("𠮷"), 2);
+
+        let jpg = ResourceAsset {
+            id: "cover.jpg".to_string(),
+            mime_type: "image/jpeg; charset=binary".to_string(),
+            data: vec![0xFF, 0xD8, 0xFF, 0xE0],
+        };
+        let svg = ResourceAsset {
+            id: "cover.svg".to_string(),
+            mime_type: "image/svg+xml".to_string(),
+            data: b"<svg/>".to_vec(),
+        };
+        let font = ResourceAsset {
+            id: "body.ttf".to_string(),
+            mime_type: "font/ttf".to_string(),
+            data: vec![0, 1, 0, 0],
+        };
+        assert!(jpg.is_supported_raster_image());
+        assert!(!svg.is_supported_raster_image());
+        assert!(!font.is_supported_raster_image());
+
+        let mut book = BookIR::default();
+        book.metadata.cover_image_id = Some("cover.svg".to_string());
+        book.resources.insert("cover.svg".to_string(), svg);
+        book.resources.insert("body.ttf".to_string(), font);
+        assert_eq!(book.resolve_cover_resource_id(), None);
+        assert_eq!(book.resolve_resource_key("cover.svg"), None);
+        assert_eq!(book.resolve_resource_key("body.ttf"), None);
+
+        book.resources
+            .insert("OEBPS/Images/My Cover.jpg".to_string(), jpg);
+        assert_eq!(
+            book.resolve_cover_resource_id(),
+            Some("OEBPS/Images/My Cover.jpg".to_string())
+        );
+        assert_eq!(
+            book.resolve_resource_key("Images/My%20Cover.jpg"),
+            Some("OEBPS/Images/My Cover.jpg".to_string())
+        );
+
+        let sections_owned = book.sections_with_cover();
+        assert!(matches!(sections_owned, Cow::Owned(_)));
+        assert_eq!(sections_owned.len(), 1);
+        assert!(sections_owned[0].is_cover_section(0));
+        assert!(!sections_owned[0].is_cover_section(1));
+
+        book.ensure_cover_section();
+        let sections_borrowed = book.sections_with_cover();
+        assert!(matches!(sections_borrowed, Cow::Borrowed(_)));
+
+        let img_none = Block::Image {
+            id: "img1".to_string(),
+            resource_id: "missing.jpg".to_string(),
+            alt: None,
+            width: None,
+            height: None,
+        };
+        assert_eq!(Block::image_fallback_text(None), "[Image]");
+        assert_eq!(Block::image_fallback_text(Some("   ")), "[Image]");
+        assert_eq!(Block::image_fallback_text(Some("  Fig 1  ")), "Fig 1");
+        assert_eq!(img_none.yellowjacket_pid_len(true), 1);
+        assert_eq!(img_none.yellowjacket_pid_len(false), 7);
+        assert!(img_none.contains_image());
+
+        let list_with_img = Block::List {
+            id: "l_img".to_string(),
+            ordered: false,
+            items: vec![vec![img_none]],
+        };
+        assert!(list_with_img.contains_image());
+
+        // Unicode C1 control chars stripped; mailto whitespace rejected
+        assert_eq!(
+            sanitize_href_whitespace("java\u{0085}script:alert(1)"),
+            "javascript:alert(1)"
+        );
+        assert_eq!(
+            classify_uri("java\u{0085}script:alert(1)"),
+            Some(UriKind::Blocked)
+        );
+        assert_eq!(
+            classify_uri("mailto:user @example.com"),
+            Some(UriKind::Blocked)
+        );
+        assert_eq!(
+            classify_uri("mailto:user@example.com"),
+            Some(UriKind::External("mailto:user@example.com".to_string()))
+        );
+        assert!(!is_allowlisted_external_uri(
+            "https://example.com/\u{0085}x"
+        ));
     }
 
     #[test]

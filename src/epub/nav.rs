@@ -9,11 +9,12 @@ use zip::ZipArchive;
 
 use crate::epub::EpubError;
 use crate::epub::archive::{
-    DecompressionBudget, MAX_EPUB_UNCOMPRESSED_TOTAL, MAX_METADATA_BYTES, decode_percent,
-    open_zip_entry, read_entry_string, resolve_zip_path,
+    DecompressionBudget, MAX_EPUB_UNCOMPRESSED_TOTAL, MAX_METADATA_BYTES, open_zip_entry,
+    read_entry_string,
 };
 use crate::epub::opf::ManifestItem;
-use crate::ir::{PageEntry, Section, TocItem};
+use crate::ir::{PageEntry, Section, TocItem, UriKind, classify_uri, sanitize_href_whitespace};
+use crate::util::{decode_percent, resolve_zip_path};
 
 /// Extracts navigation structure (TOC hierarchy and page-list) under a shared decompression budget
 /// by inspecting EPUB 3 `nav.xhtml`, EPUB 2 `toc.ncx`, or falling back to linear sections.
@@ -22,6 +23,28 @@ pub fn extract_navigation_with_budget<R: Read + std::io::Seek>(
     opf_dir: &str,
     manifest: &HashMap<String, ManifestItem>,
     href_to_section: &HashMap<String, String>,
+    sections: &[Section],
+    budget: &mut DecompressionBudget,
+) -> Result<(Vec<TocItem>, Vec<PageEntry>), EpubError> {
+    extract_navigation_with_budget_and_lc(
+        archive,
+        opf_dir,
+        manifest,
+        href_to_section,
+        None,
+        sections,
+        budget,
+    )
+}
+
+/// Context-aware navigation extractor that resolves relative hrefs against each navigation
+/// document's directory (`nav_dir`) and supports case-insensitive fallback via `href_lc_to_section`.
+pub(crate) fn extract_navigation_with_budget_and_lc<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    opf_dir: &str,
+    manifest: &HashMap<String, ManifestItem>,
+    href_to_section: &HashMap<String, String>,
+    href_lc_to_section: Option<&HashMap<String, String>>,
     sections: &[Section],
     budget: &mut DecompressionBudget,
 ) -> Result<(Vec<TocItem>, Vec<PageEntry>), EpubError> {
@@ -40,10 +63,19 @@ pub fn extract_navigation_with_budget<R: Read + std::io::Seek>(
             || item.href.to_ascii_lowercase().ends_with("nav.xhtml");
         if is_nav && (item.media_type.contains("xml") || item.media_type.contains("html")) {
             let full_path = resolve_zip_path(opf_dir, &item.href);
+            let nav_dir = Path::new(&full_path)
+                .parent()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
             if let Ok(mut entry) = open_zip_entry(archive, &full_path) {
                 match read_entry_string(&mut entry, MAX_METADATA_BYTES, budget) {
                     Ok(s) => {
-                        let (toc, page_list) = parse_nav_xhtml(&s, href_to_section);
+                        let (toc, page_list) = parse_nav_xhtml_with_context(
+                            &s,
+                            &nav_dir,
+                            href_to_section,
+                            href_lc_to_section,
+                        );
                         if !toc.is_empty() || !page_list.is_empty() {
                             if nav_toc.is_empty() {
                                 nav_toc = toc;
@@ -71,10 +103,19 @@ pub fn extract_navigation_with_budget<R: Read + std::io::Seek>(
                 || item.href.to_ascii_lowercase().ends_with(".ncx");
             if is_ncx {
                 let full_path = resolve_zip_path(opf_dir, &item.href);
+                let nav_dir = Path::new(&full_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
                 if let Ok(mut entry) = open_zip_entry(archive, &full_path) {
                     match read_entry_string(&mut entry, MAX_METADATA_BYTES, budget) {
                         Ok(s) => {
-                            let (ncx_toc, ncx_page_list) = parse_ncx(&s, href_to_section);
+                            let (ncx_toc, ncx_page_list) = parse_ncx_with_context(
+                                &s,
+                                &nav_dir,
+                                href_to_section,
+                                href_lc_to_section,
+                            );
                             if nav_toc.is_empty() && !ncx_toc.is_empty() {
                                 nav_toc = ncx_toc;
                             }
@@ -147,7 +188,9 @@ struct NavPointBuilder {
 
 fn finish_nav_point(
     builder: NavPointBuilder,
+    nav_dir: &str,
     href_to_section: &HashMap<String, String>,
+    href_lc_to_section: Option<&HashMap<String, String>>,
     nav_stack: &mut [NavPointBuilder],
     items: &mut Vec<TocItem>,
 ) {
@@ -157,8 +200,19 @@ fn finish_nav_point(
         .collect::<Vec<_>>()
         .join(" ");
     let src = builder.src.trim().to_string();
+    if !src.is_empty() && is_blocked_or_external_nav_href(&src) {
+        if !builder.children.is_empty() {
+            if let Some(parent) = nav_stack.last_mut() {
+                parent.children.extend(builder.children);
+            } else {
+                items.extend(builder.children);
+            }
+        }
+        return;
+    }
     if !title.is_empty() || !src.is_empty() || !builder.children.is_empty() {
-        let (target_section, target_anchor) = resolve_href_target(&src, href_to_section);
+        let (target_section, target_anchor) =
+            resolve_href_target_with_context(&src, nav_dir, href_to_section, href_lc_to_section);
         let toc_item = TocItem {
             title: if title.is_empty() {
                 "Chapter".into()
@@ -181,6 +235,17 @@ fn finish_nav_point(
 pub fn parse_ncx(
     ncx_xml: &str,
     href_to_section: &HashMap<String, String>,
+) -> (Vec<TocItem>, Vec<PageEntry>) {
+    parse_ncx_with_context(ncx_xml, "", href_to_section, None)
+}
+
+/// Parses EPUB 2 NCX XML resolving relative `content/@src` hrefs against `nav_dir`
+/// with optional case-insensitive section lookup via `href_lc_to_section`.
+pub(crate) fn parse_ncx_with_context(
+    ncx_xml: &str,
+    nav_dir: &str,
+    href_to_section: &HashMap<String, String>,
+    href_lc_to_section: Option<&HashMap<String, String>>,
 ) -> (Vec<TocItem>, Vec<PageEntry>) {
     let mut items = Vec::new();
     let mut page_items = Vec::new();
@@ -283,13 +348,27 @@ pub fn parse_ncx(
                     }
                     b"navPoint" => {
                         if let Some(builder) = nav_stack.pop() {
-                            finish_nav_point(builder, href_to_section, &mut nav_stack, &mut items);
+                            finish_nav_point(
+                                builder,
+                                nav_dir,
+                                href_to_section,
+                                href_lc_to_section,
+                                &mut nav_stack,
+                                &mut items,
+                            );
                         }
                     }
                     b"pageTarget" => {
-                        if in_page_target && !page_src.is_empty() {
-                            let (target_sec, target_anchor) =
-                                resolve_href_target(&page_src, href_to_section);
+                        if in_page_target
+                            && !page_src.is_empty()
+                            && !is_blocked_or_external_nav_href(&page_src)
+                        {
+                            let (target_sec, target_anchor) = resolve_href_target_with_context(
+                                &page_src,
+                                nav_dir,
+                                href_to_section,
+                                href_lc_to_section,
+                            );
                             let clean_title =
                                 page_title.split_whitespace().collect::<Vec<_>>().join(" ");
                             let pnum = if !page_val.trim().is_empty() {
@@ -315,7 +394,14 @@ pub fn parse_ncx(
             }
             Ok(Event::Eof) | Err(_) => {
                 while let Some(builder) = nav_stack.pop() {
-                    finish_nav_point(builder, href_to_section, &mut nav_stack, &mut items);
+                    finish_nav_point(
+                        builder,
+                        nav_dir,
+                        href_to_section,
+                        href_lc_to_section,
+                        &mut nav_stack,
+                        &mut items,
+                    );
                 }
                 break;
             }
@@ -372,6 +458,17 @@ fn finish_nav_li(li: NavLiBuilder, li_stack: &mut [NavLiBuilder], toc_items: &mu
 pub fn parse_nav_xhtml(
     nav_xml: &str,
     href_to_section: &HashMap<String, String>,
+) -> (Vec<TocItem>, Vec<PageEntry>) {
+    parse_nav_xhtml_with_context(nav_xml, "", href_to_section, None)
+}
+
+/// Parses EPUB 3 Navigation Document (`nav.xhtml`) resolving relative `<a href>` targets
+/// against `nav_dir` with optional case-insensitive section lookup via `href_lc_to_section`.
+pub(crate) fn parse_nav_xhtml_with_context(
+    nav_xml: &str,
+    nav_dir: &str,
+    href_to_section: &HashMap<String, String>,
+    href_lc_to_section: Option<&HashMap<String, String>>,
 ) -> (Vec<TocItem>, Vec<PageEntry>) {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum NavContext {
@@ -513,13 +610,17 @@ pub fn parse_nav_xhtml(
                     span_depth -= 1;
                 } else if local_bytes == b"a" && in_a {
                     in_a = false;
-                    if !current_href.is_empty() {
+                    if !current_href.is_empty() && !is_blocked_or_external_nav_href(&current_href) {
                         let clean_text = current_text
                             .split_whitespace()
                             .collect::<Vec<_>>()
                             .join(" ");
-                        let (target_sec, target_anchor) =
-                            resolve_href_target(&current_href, href_to_section);
+                        let (target_sec, target_anchor) = resolve_href_target_with_context(
+                            &current_href,
+                            nav_dir,
+                            href_to_section,
+                            href_lc_to_section,
+                        );
                         let current_ctx = nav_stack.last().copied().unwrap_or(NavContext::Toc);
                         match current_ctx {
                             NavContext::Toc => {
@@ -575,22 +676,84 @@ pub fn parse_nav_xhtml(
     (toc_items, page_items)
 }
 
+/// Returns `true` if `raw_href` (or its percent-decoded / backslash-normalized form)
+/// represents a blocked URI scheme, protocol-relative URL, or external URI unsuitable
+/// for an internal EPUB navigation target.
+fn is_blocked_or_external_nav_href(raw_href: &str) -> bool {
+    match classify_uri(raw_href) {
+        Some(UriKind::Blocked) | Some(UriKind::External(_)) => return true,
+        None => return false,
+        Some(UriKind::InternalOrRelative) => {}
+    }
+    let cleaned = sanitize_href_whitespace(raw_href);
+    let raw_file = cleaned.split('#').next().unwrap_or(&cleaned);
+    let file_part = raw_file.split('?').next().unwrap_or(raw_file).trim();
+    if file_part.is_empty() {
+        return false;
+    }
+    let decoded = decode_percent(file_part).replace('\\', "/");
+    if matches!(
+        classify_uri(&decoded),
+        Some(UriKind::Blocked) | Some(UriKind::External(_))
+    ) {
+        return true;
+    }
+    let stripped_dot = decoded.trim().trim_start_matches("./");
+    !stripped_dot.is_empty()
+        && matches!(
+            classify_uri(stripped_dot),
+            Some(UriKind::Blocked) | Some(UriKind::External(_))
+        )
+}
+
+#[inline]
+fn lookup_non_empty<'a>(map: &'a HashMap<String, String>, key: &str) -> Option<&'a String> {
+    if key.is_empty() { None } else { map.get(key) }
+}
+
 /// Resolves raw href (e.g. `chapter%201.xhtml#p2`) into `(target_section, target_anchor)`.
 pub fn resolve_href_target(
     raw_href: &str,
     href_to_section: &HashMap<String, String>,
 ) -> (String, Option<String>) {
-    let (raw_file, raw_anchor) = match raw_href.split_once('#') {
+    resolve_href_target_with_context(raw_href, "", href_to_section, None)
+}
+
+/// Resolves a raw navigation href relative to `nav_dir` with query stripping,
+/// percent-decoding of both path and fragment, URI scheme rejection, and optional
+/// case-insensitive fallback via `href_lc_to_section`.
+pub(crate) fn resolve_href_target_with_context(
+    raw_href: &str,
+    nav_dir: &str,
+    href_to_section: &HashMap<String, String>,
+    href_lc_to_section: Option<&HashMap<String, String>>,
+) -> (String, Option<String>) {
+    if is_blocked_or_external_nav_href(raw_href) {
+        return ("section".to_string(), None);
+    }
+
+    let cleaned = sanitize_href_whitespace(raw_href);
+    let (raw_file, raw_anchor) = match cleaned.split_once('#') {
         Some((f, a)) => (f, Some(a)),
-        None => (raw_href, None),
+        None => (cleaned.as_str(), None),
     };
-    let file_part = raw_file.trim();
+    let file_part = raw_file.split('?').next().unwrap_or(raw_file).trim();
+    let anchor_part = raw_anchor
+        .map(|a| {
+            decode_percent(a.trim().trim_start_matches('#'))
+                .trim()
+                .to_string()
+        })
+        .filter(|a| !a.is_empty());
+
     let decoded_file = decode_percent(file_part);
+    let resolved = if decoded_file.is_empty() {
+        String::new()
+    } else {
+        resolve_zip_path(nav_dir, &decoded_file)
+    };
     let normalized = decoded_file.replace('\\', "/");
     let clean_decoded = normalized.trim_start_matches("./").trim_start_matches('/');
-    let anchor_part = raw_anchor
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty());
 
     let file_name = Path::new(clean_decoded)
         .file_name()
@@ -601,12 +764,26 @@ pub fn resolve_href_target(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let sec_id = href_to_section
-        .get(file_part)
-        .or_else(|| href_to_section.get(&decoded_file))
-        .or_else(|| href_to_section.get(clean_decoded))
-        .or_else(|| href_to_section.get(&file_name))
-        .or_else(|| href_to_section.get(&raw_file_name))
+    let sec_id = lookup_non_empty(href_to_section, &resolved)
+        .or_else(|| lookup_non_empty(href_to_section, file_part))
+        .or_else(|| lookup_non_empty(href_to_section, &decoded_file))
+        .or_else(|| lookup_non_empty(href_to_section, clean_decoded))
+        .or_else(|| {
+            href_lc_to_section.and_then(|lc| {
+                lookup_non_empty(lc, &resolved.to_lowercase())
+                    .or_else(|| lookup_non_empty(lc, &file_part.to_lowercase()))
+                    .or_else(|| lookup_non_empty(lc, &decoded_file.to_lowercase()))
+                    .or_else(|| lookup_non_empty(lc, &clean_decoded.to_lowercase()))
+            })
+        })
+        .or_else(|| lookup_non_empty(href_to_section, &file_name))
+        .or_else(|| lookup_non_empty(href_to_section, &raw_file_name))
+        .or_else(|| {
+            href_lc_to_section.and_then(|lc| {
+                lookup_non_empty(lc, &file_name.to_lowercase())
+                    .or_else(|| lookup_non_empty(lc, &raw_file_name.to_lowercase()))
+            })
+        })
         .cloned()
         .unwrap_or_else(|| {
             if !file_name.is_empty() {
@@ -840,5 +1017,157 @@ mod tests {
         assert_eq!(toc.len(), 1);
         assert_eq!(toc[0].title, "Fallback NCX Chapter");
         assert_eq!(toc[0].target_section, "section_1");
+    }
+
+    #[test]
+    fn test_nav_dir_query_strip_percent_anchor_case_insensitive_and_blocked_uris() {
+        // Two sections share the same bare filename `ch1.xhtml` in different dirs,
+        // and Part2 uses uppercase `CH1.XHTML` to verify case-insensitive full-path resolution
+        // takes precedence over ambiguous bare filename collisions.
+        let mut href_to_sec = HashMap::new();
+        let mut href_lc_to_sec = HashMap::new();
+        for (k, sec) in [
+            ("Part1/ch1.xhtml", "section_1"),
+            ("OEBPS/Part1/ch1.xhtml", "section_1"),
+            ("ch1.xhtml", "section_1"),
+            ("Part2/CH1.XHTML", "section_2"),
+            ("OEBPS/Part2/CH1.XHTML", "section_2"),
+        ] {
+            href_to_sec.insert(k.to_string(), sec.to_string());
+            href_lc_to_sec.insert(k.to_lowercase(), sec.to_string());
+        }
+
+        // 1. Direct resolver checks: nav_dir + ?query + percent-decoded anchor + case-insensitive + blocked schemes
+        assert_eq!(
+            resolve_href_target_with_context(
+                "../Part2/ch1.xhtml?v=1#sec%201",
+                "OEBPS/Text",
+                &href_to_sec,
+                Some(&href_lc_to_sec),
+            ),
+            ("section_2".to_string(), Some("sec 1".to_string()))
+        );
+        assert_eq!(
+            resolve_href_target_with_context(
+                "javascript:alert(1)",
+                "OEBPS/Text",
+                &href_to_sec,
+                Some(&href_lc_to_sec),
+            ),
+            ("section".to_string(), None)
+        );
+        assert_eq!(
+            resolve_href_target_with_context(
+                "javascript%3Aalert(1)#frag",
+                "OEBPS/Text",
+                &href_to_sec,
+                Some(&href_lc_to_sec),
+            ),
+            ("section".to_string(), None)
+        );
+        assert_eq!(
+            resolve_href_target_with_context(
+                r"\\evil.com\share#x",
+                "OEBPS/Text",
+                &href_to_sec,
+                Some(&href_lc_to_sec),
+            ),
+            ("section".to_string(), None)
+        );
+
+        // 2. End-to-end EPUB 3 OEBPS/Text/nav.xhtml and EPUB 2 OEBPS/Text/toc.ncx under extract_navigation_with_budget_and_lc
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("OEBPS/Text/nav.xhtml", opts).unwrap();
+            zip.write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+  <nav epub:type="toc">
+    <ol>
+      <li><a href="../Part2/ch1.xhtml?v=1#sec%201">Part 2 Chapter 1</a></li>
+      <li><a href="javascript:alert(1)">Blocked JS</a></li>
+      <li><a href="file%3A///etc/passwd">Blocked Encoded File</a></li>
+      <li><a href="https://example.com/external">External Link</a></li>
+    </ol>
+  </nav>
+</body></html>"#,
+            )
+            .unwrap();
+            zip.start_file("OEBPS/Text/toc.ncx", opts).unwrap();
+            zip.write_all(
+                br#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+<navMap>
+  <navPoint id="p1"><navLabel><text>NCX Blocked</text></navLabel><content src="javascript:alert(1)"/></navPoint>
+  <navPoint id="p2"><navLabel><text>NCX Part 2</text></navLabel><content src="../Part2/ch1.xhtml?ver=2#ncx%20anchor"/></navPoint>
+</navMap>
+<pageList>
+  <pageTarget value="10"><navLabel><text>10</text></navLabel><content src="../Part2/ch1.xhtml?p=10#pg%2010"/></pageTarget>
+  <pageTarget value="11"><navLabel><text>11</text></navLabel><content src="data%3Atext/html,bad"/></pageTarget>
+</pageList>
+</ncx>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let mut archive = ZipArchive::new(Cursor::new(buf.into_inner())).unwrap();
+
+        let mut manifest = HashMap::new();
+        manifest.insert(
+            "nav".to_string(),
+            ManifestItem {
+                id: "nav".to_string(),
+                href: "Text/nav.xhtml".to_string(),
+                media_type: "application/xhtml+xml".to_string(),
+                properties: Some("nav".to_string()),
+            },
+        );
+        manifest.insert(
+            "ncx".to_string(),
+            ManifestItem {
+                id: "ncx".to_string(),
+                href: "Text/toc.ncx".to_string(),
+                media_type: "application/x-dtbncx+xml".to_string(),
+                properties: None,
+            },
+        );
+
+        let mut budget = DecompressionBudget::new(MAX_EPUB_UNCOMPRESSED_TOTAL);
+        let (toc, pages) = extract_navigation_with_budget_and_lc(
+            &mut archive,
+            "OEBPS",
+            &manifest,
+            &href_to_sec,
+            Some(&href_lc_to_sec),
+            &[],
+            &mut budget,
+        )
+        .unwrap();
+
+        // Only the valid internal TOC entry survives (blocked/external entries skipped)
+        assert_eq!(toc.len(), 1);
+        assert_eq!(toc[0].title, "Part 2 Chapter 1");
+        assert_eq!(toc[0].target_section, "section_2");
+        assert_eq!(toc[0].target_anchor.as_deref(), Some("sec 1"));
+
+        // Page list merged from OEBPS/Text/toc.ncx resolves ../Part2/ch1.xhtml?p=10#pg%2010 and drops data: entry
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].page_number, "10");
+        assert_eq!(pages[0].target_section, "section_2");
+        assert_eq!(pages[0].target_anchor.as_deref(), Some("pg 10"));
+
+        // Verify NCX TOC parsing directly with nav_dir + href_lc_to_section
+        let ncx_only = r#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+<navMap>
+  <navPoint id="p1"><navLabel><text>Blocked</text></navLabel><content src="javascript%3Aalert(1)"/></navPoint>
+  <navPoint id="p2"><navLabel><text>NCX Part 2</text></navLabel><content src="../Part2/ch1.xhtml?ver=2#ncx%20anchor"/></navPoint>
+</navMap></ncx>"#;
+        let (ncx_toc, _) =
+            parse_ncx_with_context(ncx_only, "OEBPS/Text", &href_to_sec, Some(&href_lc_to_sec));
+        assert_eq!(ncx_toc.len(), 1);
+        assert_eq!(ncx_toc[0].title, "NCX Part 2");
+        assert_eq!(ncx_toc[0].target_section, "section_2");
+        assert_eq!(ncx_toc[0].target_anchor.as_deref(), Some("ncx anchor"));
     }
 }

@@ -176,6 +176,26 @@ pub fn scan_device_files(doc_path: &Path) -> Vec<KindleBookFile> {
     files
 }
 
+fn verify_non_symlink_parent(raw_parent: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(raw_parent)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "Refusing to delete inside symlinked parent directory {:?}",
+                raw_parent
+            ),
+        ));
+    }
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Parent path {:?} is not a directory", raw_parent),
+        ));
+    }
+    Ok(())
+}
+
 /// Deletes an e-book file and its companion `.sdr` directory from the device safely.
 ///
 /// # Security Guardrails:
@@ -274,6 +294,7 @@ pub fn delete_book_file_safe(
         }
         (target_path, canon_parent, Some(canon_root))
     } else {
+        verify_non_symlink_parent(raw_parent)?;
         (full_path.to_path_buf(), raw_parent.to_path_buf(), None)
     };
 
@@ -286,6 +307,9 @@ pub fn delete_book_file_safe(
     let sdr_path = effective_parent.join(sdr_name);
 
     if target_exists {
+        if canon_root_opt.is_none() {
+            verify_non_symlink_parent(&effective_parent)?;
+        }
         std::fs::remove_file(&target_path)?;
     }
 
@@ -303,6 +327,8 @@ pub fn delete_book_file_safe(
                     ),
                 ));
             }
+        } else {
+            verify_non_symlink_parent(&effective_parent)?;
         }
         let _ = std::fs::remove_file(&part_path);
     }
@@ -322,6 +348,8 @@ pub fn delete_book_file_safe(
                     ),
                 ));
             }
+        } else {
+            verify_non_symlink_parent(&effective_parent)?;
         }
         let _ = std::fs::remove_dir_all(&sdr_path);
     }
@@ -771,5 +799,37 @@ mod tests {
         .unwrap();
         assert!(outside_sdr.join("stale.han").exists());
         assert!(outside_sdr.join("LanguageLayer.en.TEST.kll").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_delete_book_file_safe_none_root_rejects_symlinked_parent_dir() {
+        use std::io::ErrorKind;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let victim_dir = temp.path().join("victim_dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+
+        let victim_kfx = victim_dir.join("Book.kfx");
+        let victim_part = victim_dir.join("Book.kfx.part");
+        let victim_sdr = victim_dir.join("Book.sdr");
+        std::fs::write(&victim_kfx, b"KEEP_KFX").unwrap();
+        std::fs::write(&victim_part, b"KEEP_PART").unwrap();
+        std::fs::create_dir_all(&victim_sdr).unwrap();
+        std::fs::write(victim_sdr.join("cover.jpg"), b"KEEP_COVER").unwrap();
+
+        let link_parent = temp.path().join("link_parent");
+        symlink(&victim_dir, &link_parent).unwrap();
+
+        let err =
+            KindleSync::delete_book_file_safe(None, &link_parent.join("Book.kfx")).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&victim_kfx).unwrap(), b"KEEP_KFX");
+        assert_eq!(std::fs::read(&victim_part).unwrap(), b"KEEP_PART");
+        assert_eq!(
+            std::fs::read(victim_sdr.join("cover.jpg")).unwrap(),
+            b"KEEP_COVER"
+        );
     }
 }
