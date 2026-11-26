@@ -230,19 +230,19 @@ fn classify_footnote_element(
 
     for attr in e.attributes().flatten() {
         match attr.key.as_ref() {
-            b"id" => {
+            "id" => {
                 let v = crate::epub::unescape_attr_value(&attr).trim().to_string();
                 if !v.is_empty() {
                     id = Some(v);
                 }
             }
-            b"class" => {
+            "class" => {
                 class_val = crate::epub::unescape_attr_value(&attr).to_ascii_lowercase();
             }
-            b"epub:type" => {
+            "epub:type" => {
                 epub_type_val = crate::epub::unescape_attr_value(&attr).to_ascii_lowercase();
             }
-            b"role" => {
+            "role" => {
                 role_val = crate::epub::unescape_attr_value(&attr).to_ascii_lowercase();
             }
             _ => {}
@@ -791,8 +791,8 @@ fn parse_xhtml_core(
         let mut inline_style: Option<String> = None;
         for attr in e.attributes().flatten() {
             match attr.key.as_ref() {
-                b"class" => class_attr = Some(crate::epub::unescape_attr_value(&attr)),
-                b"style" => inline_style = Some(crate::epub::unescape_attr_value(&attr)),
+                "class" => class_attr = Some(crate::epub::unescape_attr_value(&attr)),
+                "style" => inline_style = Some(crate::epub::unescape_attr_value(&attr)),
                 _ => {}
             }
         }
@@ -824,7 +824,7 @@ fn parse_xhtml_core(
         |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
             let mut class_attr: Option<String> = None;
             for attr in e.attributes().flatten() {
-                if attr.key.as_ref() == b"class" {
+                if attr.key.as_ref() == "class" {
                     class_attr = Some(crate::epub::unescape_attr_value(&attr));
                     break;
                 }
@@ -1287,12 +1287,12 @@ fn parse_xhtml_core(
         let mut alt = None;
         for attr in e.attributes().flatten() {
             let key = attr.key.as_ref();
-            if key == b"src" || key == b"xlink:href" || key == b"href" {
+            if key == "src" || key == "xlink:href" || key == "href" {
                 let val = crate::epub::unescape_attr_value(&attr);
-                if src.is_empty() || key == b"src" || key == b"xlink:href" {
+                if src.is_empty() || key == "src" || key == "xlink:href" {
                     src = val;
                 }
-            } else if key == b"alt" {
+            } else if key == "alt" {
                 alt = Some(crate::epub::unescape_attr_value(&attr));
             }
         }
@@ -1338,7 +1338,7 @@ fn parse_xhtml_core(
 
     let extract_id_attr = |e: &quick_xml::events::BytesStart| -> Option<String> {
         for attr in e.attributes().flatten() {
-            if attr.key.as_ref() == b"id" {
+            if attr.key.as_ref() == "id" {
                 let v = crate::epub::unescape_attr_value(&attr).trim().to_string();
                 if !v.is_empty() {
                     return Some(v);
@@ -1441,13 +1441,13 @@ fn parse_xhtml_core(
         let ev = xml_reader.read_event_into(&mut buf);
         let empty_or_void = match &ev {
             Ok(Event::Empty(e)) => Some(e),
-            Ok(Event::Start(e)) if is_html_void_tag(e.local_name().as_ref()) => Some(e),
+            Ok(Event::Start(e)) if is_html_void_tag(e.local_name().as_ref().as_bytes()) => Some(e),
             _ => None,
         };
 
         if let Some(e) = empty_or_void {
             let tag_lc = e.local_name().as_ref().to_ascii_lowercase();
-            let local_bytes = tag_lc.as_slice();
+            let local_bytes = tag_lc.as_bytes();
             if ignore_stack.is_empty() {
                 let inside_cell = in_table_cell(&table_stack);
                 match local_bytes {
@@ -1518,13 +1518,13 @@ fn parse_xhtml_core(
                             } else {
                                 let mut is_page_break = false;
                                 for attr in e.attributes().flatten() {
-                                    if attr.key.as_ref() == b"class" {
+                                    if attr.key.as_ref() == "class" {
                                         let val = crate::epub::unescape_attr_value(&attr)
                                             .to_ascii_lowercase();
                                         if val.contains("pagebreak") || val.contains("page-break") {
                                             is_page_break = true;
                                         }
-                                    } else if attr.key.as_ref() == b"style" {
+                                    } else if attr.key.as_ref() == "style" {
                                         let val = crate::epub::unescape_attr_value(&attr);
                                         let tokens = sanitize_css_style(&val);
                                         if tokens.iter().any(|t| {
@@ -1597,18 +1597,18 @@ fn parse_xhtml_core(
                             let mut raw_xlink_href = None;
                             for attr in e.attributes().flatten() {
                                 let key = attr.key.as_ref();
-                                if key == b"id" || key == b"name" {
+                                if key == "id" || key == "name" {
                                     let v =
                                         crate::epub::unescape_attr_value(&attr).trim().to_string();
                                     if !v.is_empty() {
                                         anchor = Some(v);
                                     }
-                                } else if key == b"href" {
+                                } else if key == "href" {
                                     let v = crate::epub::unescape_attr_value(&attr);
                                     if !v.is_empty() {
                                         raw_href = Some(v);
                                     }
-                                } else if key == b"xlink:href" {
+                                } else if key == "xlink:href" {
                                     let v = crate::epub::unescape_attr_value(&attr);
                                     if !v.is_empty() {
                                         raw_xlink_href = Some(v);
@@ -1649,7 +1649,7 @@ fn parse_xhtml_core(
                             if table_overflow_depth == 0 {
                                 let mut alt_trimmed: Option<String> = None;
                                 for attr in e.attributes().flatten() {
-                                    if attr.key.as_ref() == b"alt" {
+                                    if attr.key.as_ref() == "alt" {
                                         let alt_val = crate::epub::unescape_attr_value(&attr);
                                         let trimmed = alt_val.trim();
                                         if !trimmed.is_empty() {
@@ -1867,7 +1867,7 @@ fn parse_xhtml_core(
         match ev {
             Ok(Event::Start(ref e)) => {
                 let tag_lc = e.local_name().as_ref().to_ascii_lowercase();
-                let local_bytes = tag_lc.as_slice();
+                let local_bytes = tag_lc.as_bytes();
 
                 if !ignore_stack.is_empty() || matches!(local_bytes, b"script" | b"style" | b"head")
                 {
@@ -2152,17 +2152,17 @@ fn parse_xhtml_core(
                             let mut class_attr: Option<String> = None;
                             for attr in e.attributes().flatten() {
                                 let key = attr.key.as_ref();
-                                if key == b"href" {
+                                if key == "href" {
                                     raw_href = Some(crate::epub::unescape_attr_value(&attr));
-                                } else if key == b"xlink:href" {
+                                } else if key == "xlink:href" {
                                     raw_xlink_href = Some(crate::epub::unescape_attr_value(&attr));
-                                } else if key == b"id" || key == b"name" {
+                                } else if key == "id" || key == "name" {
                                     let v =
                                         crate::epub::unescape_attr_value(&attr).trim().to_string();
                                     if !v.is_empty() {
                                         anchor = Some(v);
                                     }
-                                } else if key == b"class" {
+                                } else if key == "class" {
                                     let raw_cls = crate::epub::unescape_attr_value(&attr);
                                     let val = raw_cls.to_ascii_lowercase();
                                     if val.contains("backlink")
@@ -2178,7 +2178,7 @@ fn parse_xhtml_core(
                                         is_noteref = true;
                                     }
                                     class_attr = Some(raw_cls);
-                                } else if key == b"epub:type" || key == b"role" {
+                                } else if key == "epub:type" || key == "role" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     if val.contains("backlink")
@@ -2259,7 +2259,7 @@ fn parse_xhtml_core(
                                 span_tokens.push("small_caps".to_string());
                             }
                             for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"class" {
+                                if attr.key.as_ref() == "class" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     for cls in val.split_whitespace() {
@@ -2426,13 +2426,13 @@ fn parse_xhtml_core(
                             );
                             for attr in e.attributes().flatten() {
                                 let key = attr.key.as_ref();
-                                if key == b"class" {
+                                if key == "class" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     if val.contains("pagebreak") || val.contains("page-break") {
                                         pending_page_break = true;
                                     }
-                                } else if key == b"style" {
+                                } else if key == "style" {
                                     let val = crate::epub::unescape_attr_value(&attr);
                                     let tokens = sanitize_css_style(&val);
                                     if tokens.iter().any(|t| t == "page_break_before") {
@@ -2477,7 +2477,7 @@ fn parse_xhtml_core(
                             );
                             for attr in e.attributes().flatten() {
                                 let key = attr.key.as_ref();
-                                if key == b"class" {
+                                if key == "class" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     if val.contains("pagebreak") || val.contains("page-break") {
@@ -2486,7 +2486,7 @@ fn parse_xhtml_core(
                                             vec!["page_break_before".to_string()],
                                         );
                                     }
-                                } else if key == b"align" {
+                                } else if key == "align" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     let tok = match val.as_str() {
@@ -2588,7 +2588,7 @@ fn parse_xhtml_core(
                             push_unique_tokens(&mut p_tokens, resolved);
                             for attr in e.attributes().flatten() {
                                 let key = attr.key.as_ref();
-                                if key == b"class" {
+                                if key == "class" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     if val.contains("pagebreak") || val.contains("page-break") {
@@ -2615,7 +2615,7 @@ fn parse_xhtml_core(
                                             p_has_dropcap = true;
                                         }
                                     }
-                                } else if key == b"align" {
+                                } else if key == "align" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     let tok = match val.as_str() {
@@ -2749,7 +2749,7 @@ fn parse_xhtml_core(
                             let mut h_tokens = element_style_tokens(local_bytes, e);
                             for attr in e.attributes().flatten() {
                                 let key = attr.key.as_ref();
-                                if key == b"class" {
+                                if key == "class" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     if val.contains("pagebreak") || val.contains("page-break") {
@@ -2770,7 +2770,7 @@ fn parse_xhtml_core(
                                             vec!["uppercase".to_string()],
                                         );
                                     }
-                                } else if key == b"align" {
+                                } else if key == "align" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
                                     let tok = match val.as_str() {
@@ -2928,9 +2928,30 @@ fn parse_xhtml_core(
                     );
                 }
             }
+            Ok(Event::GeneralRef(ref e)) => {
+                if ignore_stack.is_empty() {
+                    let text = crate::epub::decode_general_ref(e);
+                    handle_text_chunk(
+                        &text,
+                        &mut ruby,
+                        &footnote_stack,
+                        &backlink_stack,
+                        &mut current_footnote_text,
+                        table_overflow_depth,
+                        &mut table_stack,
+                        &mut in_p,
+                        in_heading,
+                        in_li,
+                        &blockquote_stack,
+                        &center_stack,
+                        &mut p_style,
+                        &mut current_span_text,
+                    );
+                }
+            }
             Ok(Event::CData(ref e)) => {
                 if ignore_stack.is_empty() {
-                    let text = String::from_utf8_lossy(e.as_ref());
+                    let text = e.html_content();
                     handle_text_chunk(
                         &text,
                         &mut ruby,
@@ -2951,7 +2972,7 @@ fn parse_xhtml_core(
             }
             Ok(Event::End(ref e)) => {
                 let tag_lc = e.local_name().as_ref().to_ascii_lowercase();
-                let local_bytes = tag_lc.as_slice();
+                let local_bytes = tag_lc.as_bytes();
 
                 // Ignore stray closing tags for HTML5 void elements
                 if is_html_void_tag(local_bytes) {
@@ -4827,6 +4848,92 @@ mod tests {
                 "link_visited_style_normal",
                 "link_visited_color_000080",
             ]
+        );
+    }
+
+    #[test]
+    fn test_quick_xml_general_ref_splitting_and_whitespace_preservation() {
+        let xhtml = r##"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+  <p>Foo &mdash; bar</p>
+  <p>A&nbsp;B</p>
+  <p>Tom &amp; Jerry</p>
+  <p>&ldquo;Hello&rdquo;</p>
+  <p>Dash &#x2014; and&#160;space</p>
+  <p>Keep &madeup; verbatim</p>
+  <p>&amp;lt;tag&amp;gt; and &amp;#8212;</p>
+  <h1>Ch. 1 &mdash; Intro &amp; &#x201C;Scope&#x201D;</h1>
+  <table>
+    <tr>
+      <th>Col &amp; 1</th>
+      <td>Val &mdash; A&#160;B</td>
+    </tr>
+  </table>
+  <p>Base <ruby>A&amp;B<rt>a&#x2014;b</rt></ruby> end</p>
+  <ul><li>Item 1 &mdash; A&nbsp;B</li></ul>
+  <div>&ldquo;Implicit&rdquo;</div>
+  <div>&nbsp;SkippedLeading</div>
+  <p>&nbsp;ExplicitLeading</p>
+  <aside epub:type="footnote" id="fn_ent">
+    <p>Note &mdash; see A&amp;B &#160;end.</p>
+  </aside>
+</body>
+</html>"##;
+
+        let empty_css = CssStylesheet::new();
+        let parsed = parse_xhtml_with_warnings(xhtml, &HashMap::new(), &empty_css, None);
+        assert!(
+            parsed.warnings.is_empty(),
+            "Unexpected warnings: {:?}",
+            parsed.warnings
+        );
+
+        let blocks = &parsed.blocks;
+        assert_eq!(blocks[0].plain_text(), "Foo — bar");
+        assert_eq!(blocks[1].plain_text(), "A\u{00A0}B");
+        assert_eq!(blocks[2].plain_text(), "Tom & Jerry");
+        assert_eq!(blocks[3].plain_text(), "“Hello”");
+        assert_eq!(blocks[4].plain_text(), "Dash — and\u{00A0}space");
+        assert_eq!(blocks[5].plain_text(), "Keep &madeup; verbatim");
+        assert_eq!(blocks[6].plain_text(), "&lt;tag&gt; and &#8212;");
+
+        // Heading preserves Text -> GeneralRef -> Text
+        assert!(matches!(blocks[7], Block::Heading { level: 1, .. }));
+        assert_eq!(blocks[7].plain_text(), "Ch. 1 — Intro & “Scope”");
+
+        // Table cells preserve entities and spaces
+        let Block::Table { rows, .. } = &blocks[8] else {
+            panic!("Expected Table at blocks[8], got {:?}", blocks[8]);
+        };
+        assert_eq!(rows, &vec![vec!["Col & 1", "Val — A\u{00A0}B"]]);
+
+        // Ruby base and <rt> preserve entities
+        let Block::Paragraph { spans, .. } = &blocks[9] else {
+            panic!("Expected Paragraph at blocks[9], got {:?}", blocks[9]);
+        };
+        let ruby_span = spans
+            .iter()
+            .find(|s| s.text == "A&B")
+            .expect("ruby base A&B");
+        assert_eq!(ruby_span.ruby.as_deref(), Some("a—b"));
+        assert_eq!(blocks[9].plain_text(), "Base A&B end");
+
+        // List item preserves entities & adjacent whitespace
+        let Block::List { items, .. } = &blocks[10] else {
+            panic!("Expected List at blocks[10], got {:?}", blocks[10]);
+        };
+        assert_eq!(items[0][0].plain_text(), "Item 1 — A\u{00A0}B");
+
+        // Implicit <p> edge cases inside bare <div> vs explicit <p>
+        assert_eq!(blocks[11].plain_text(), "“Implicit”");
+        assert_eq!(blocks[12].plain_text(), "SkippedLeading");
+        assert_eq!(blocks[13].plain_text(), "\u{00A0}ExplicitLeading");
+
+        // Footnote body preserves Text -> GeneralRef -> Text
+        assert_eq!(
+            parsed.footnotes.get("fn_ent").map(String::as_str),
+            Some("Note — see A&B \u{00A0}end.")
         );
     }
 }

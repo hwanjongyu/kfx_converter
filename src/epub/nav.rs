@@ -266,33 +266,33 @@ pub(crate) fn parse_ncx_with_context(
             Ok(Event::Start(ref e)) => {
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"navPoint" => {
+                    "navPoint" => {
                         nav_stack.push(NavPointBuilder {
                             title: String::new(),
                             src: String::new(),
                             children: Vec::new(),
                         });
                     }
-                    b"pageTarget" => {
+                    "pageTarget" => {
                         in_page_target = true;
                         page_title.clear();
                         page_src.clear();
                         page_val.clear();
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"value" {
+                            if attr.key.as_ref() == "value" {
                                 page_val = crate::epub::unescape_attr_value(&attr);
                             }
                         }
                     }
-                    b"navLabel" => {
+                    "navLabel" => {
                         in_nav_label = true;
                     }
-                    b"text" if in_nav_label => {
+                    "text" if in_nav_label => {
                         in_text = true;
                     }
-                    b"content" => {
+                    "content" => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"src" {
+                            if attr.key.as_ref() == "src" {
                                 let src = crate::epub::unescape_attr_value(&attr);
                                 if in_page_target {
                                     page_src = src;
@@ -307,9 +307,9 @@ pub(crate) fn parse_ncx_with_context(
             }
             Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
-                if local.as_ref() == b"content" {
+                if local.as_ref() == "content" {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"src" {
+                        if attr.key.as_ref() == "src" {
                             let src = crate::epub::unescape_attr_value(&attr);
                             if in_page_target {
                                 page_src = src;
@@ -328,8 +328,16 @@ pub(crate) fn parse_ncx_with_context(
                     top.title.push_str(&txt);
                 }
             }
+            Ok(Event::GeneralRef(ref e)) if in_text => {
+                let txt = crate::epub::decode_general_ref(e);
+                if in_page_target {
+                    page_title.push_str(&txt);
+                } else if let Some(top) = nav_stack.last_mut() {
+                    top.title.push_str(&txt);
+                }
+            }
             Ok(Event::CData(ref e)) if in_text => {
-                let txt = String::from_utf8_lossy(e.as_ref());
+                let txt = e.html_content();
                 if in_page_target {
                     page_title.push_str(&txt);
                 } else if let Some(top) = nav_stack.last_mut() {
@@ -339,14 +347,14 @@ pub(crate) fn parse_ncx_with_context(
             Ok(Event::End(ref e)) => {
                 let local = e.local_name();
                 match local.as_ref() {
-                    b"text" => {
+                    "text" => {
                         in_text = false;
                     }
-                    b"navLabel" => {
+                    "navLabel" => {
                         in_nav_label = false;
                         in_text = false;
                     }
-                    b"navPoint" => {
+                    "navPoint" => {
                         if let Some(builder) = nav_stack.pop() {
                             finish_nav_point(
                                 builder,
@@ -358,7 +366,7 @@ pub(crate) fn parse_ncx_with_context(
                             );
                         }
                     }
-                    b"pageTarget" => {
+                    "pageTarget" => {
                         if in_page_target
                             && !page_src.is_empty()
                             && !is_blocked_or_external_nav_href(&page_src)
@@ -496,11 +504,11 @@ pub(crate) fn parse_nav_xhtml_with_context(
         match xml_reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 let local = e.local_name();
-                let local_bytes = local.as_ref();
-                if local_bytes == b"nav" {
+                let local_name = local.as_ref();
+                if local_name == "nav" {
                     let mut detected_ctx = None;
                     for attr in e.attributes().flatten() {
-                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
+                        let key = attr.key.as_ref().to_lowercase();
                         let val = crate::epub::unescape_attr_value(&attr).to_lowercase();
                         if key.contains("type") {
                             if val.contains("page-list") {
@@ -544,22 +552,22 @@ pub(crate) fn parse_nav_xhtml_with_context(
                     nav_stack.push(ctx);
                 } else {
                     let current_ctx = nav_stack.last().copied().unwrap_or(NavContext::Toc);
-                    if local_bytes == b"li" && current_ctx == NavContext::Toc {
+                    if local_name == "li" && current_ctx == NavContext::Toc {
                         li_stack.push(NavLiBuilder {
                             item: None,
                             span_title: String::new(),
                             children: Vec::new(),
                         });
-                    } else if local_bytes == b"span" && current_ctx == NavContext::Toc && !in_a {
+                    } else if local_name == "span" && current_ctx == NavContext::Toc && !in_a {
                         span_depth += 1;
-                    } else if local_bytes == b"a"
+                    } else if local_name == "a"
                         && (current_ctx == NavContext::Toc || current_ctx == NavContext::PageList)
                     {
                         in_a = true;
                         current_href.clear();
                         current_text.clear();
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"href" {
+                            if attr.key.as_ref() == "href" {
                                 current_href = crate::epub::unescape_attr_value(&attr);
                             }
                         }
@@ -577,8 +585,19 @@ pub(crate) fn parse_nav_xhtml_with_context(
                     top_li.span_title.push_str(&txt);
                 }
             }
+            Ok(Event::GeneralRef(ref e)) => {
+                let txt = crate::epub::decode_general_ref(e);
+                if in_a {
+                    current_text.push_str(&txt);
+                } else if span_depth > 0
+                    && let Some(top_li) = li_stack.last_mut()
+                    && top_li.item.is_none()
+                {
+                    top_li.span_title.push_str(&txt);
+                }
+            }
             Ok(Event::CData(ref e)) => {
-                let txt = String::from_utf8_lossy(e.as_ref());
+                let txt = e.html_content();
                 if in_a {
                     current_text.push_str(&txt);
                 } else if span_depth > 0
@@ -590,8 +609,8 @@ pub(crate) fn parse_nav_xhtml_with_context(
             }
             Ok(Event::End(ref e)) => {
                 let local = e.local_name();
-                let local_bytes = local.as_ref();
-                if local_bytes == b"nav" {
+                let local_name = local.as_ref();
+                if local_name == "nav" {
                     if let Some(NavContext::Toc) = nav_stack.pop() {
                         while let Some(li) = li_stack.pop() {
                             finish_nav_li(li, &mut li_stack, &mut toc_items);
@@ -599,16 +618,16 @@ pub(crate) fn parse_nav_xhtml_with_context(
                     }
                     in_a = false;
                     span_depth = 0;
-                } else if local_bytes == b"li" {
+                } else if local_name == "li" {
                     let current_ctx = nav_stack.last().copied().unwrap_or(NavContext::Toc);
                     if current_ctx == NavContext::Toc
                         && let Some(li) = li_stack.pop()
                     {
                         finish_nav_li(li, &mut li_stack, &mut toc_items);
                     }
-                } else if local_bytes == b"span" && !in_a && span_depth > 0 {
+                } else if local_name == "span" && !in_a && span_depth > 0 {
                     span_depth -= 1;
-                } else if local_bytes == b"a" && in_a {
+                } else if local_name == "a" && in_a {
                     in_a = false;
                     if !current_href.is_empty() && !is_blocked_or_external_nav_href(&current_href) {
                         let clean_text = current_text
@@ -1169,5 +1188,67 @@ mod tests {
         assert_eq!(ncx_toc[0].title, "NCX Part 2");
         assert_eq!(ncx_toc[0].target_section, "section_2");
         assert_eq!(ncx_toc[0].target_anchor.as_deref(), Some("ncx anchor"));
+    }
+
+    #[test]
+    fn test_parse_ncx_and_nav_xhtml_general_ref_entities_and_whitespace() {
+        let mut map = HashMap::new();
+        map.insert("ch1.xhtml".to_string(), "section_1".to_string());
+        map.insert("ch2.xhtml".to_string(), "section_2".to_string());
+
+        let ncx = r#"<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="n1" playOrder="1">
+      <navLabel><text>Part &amp; 1 &mdash; Act&#160;I&#x2019;s &madeup;</text></navLabel>
+      <content src="ch1.xhtml"/>
+    </navPoint>
+  </navMap>
+  <pageList>
+    <pageTarget id="p1" type="normal">
+      <navLabel><text>Page &mdash; 1&#x2014;A &#160;iv</text></navLabel>
+      <content src="ch1.xhtml#pg1"/>
+    </pageTarget>
+  </pageList>
+</ncx>"#;
+
+        let (ncx_toc, ncx_pages) = parse_ncx(ncx, &map);
+        assert_eq!(ncx_toc.len(), 1);
+        // Note: finish_nav_point normalizes whitespace (including U+00A0) with join(" ")
+        assert_eq!(ncx_toc[0].title, "Part & 1 — Act I’s &madeup;");
+        assert_eq!(ncx_pages.len(), 1);
+        assert_eq!(ncx_pages[0].page_number, "Page — 1—A iv");
+        assert_eq!(ncx_pages[0].target_anchor.as_deref(), Some("pg1"));
+
+        let nav_xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+  <body>
+    <nav epub:type="toc">
+      <ol>
+        <li>
+          <span>Section &amp; Header &mdash; &#x201C;I&#x201D;</span>
+          <ol>
+            <li><a href="ch1.xhtml#s1">Part &amp; 1 &mdash; Intro&#160;A</a></li>
+            <li><a href="ch2.xhtml">Part&#x2014;2 &madeup;</a></li>
+          </ol>
+        </li>
+      </ol>
+    </nav>
+    <nav epub:type="page-list">
+      <ol>
+        <li><a href="ch1.xhtml#p1">Pg &amp; &#x2014; &#160;1</a></li>
+      </ol>
+    </nav>
+  </body>
+</html>"#;
+
+        let (nav_toc, nav_pages) = parse_nav_xhtml(nav_xhtml, &map);
+        assert_eq!(nav_toc.len(), 1);
+        assert_eq!(nav_toc[0].title, "Section & Header — “I”");
+        assert_eq!(nav_toc[0].children.len(), 2);
+        assert_eq!(nav_toc[0].children[0].title, "Part & 1 — Intro A");
+        assert_eq!(nav_toc[0].children[1].title, "Part—2 &madeup;");
+        assert_eq!(nav_pages.len(), 1);
+        assert_eq!(nav_pages[0].page_number, "Pg & — 1");
     }
 }

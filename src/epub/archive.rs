@@ -50,12 +50,12 @@ impl DecompressionBudget {
 
 /// Streams a ZIP entry in bounded 64 KiB chunks while enforcing per-entry limits,
 /// cumulative decompression budgets, and live compression ratio checks.
-pub fn read_entry_bytes(
-    entry: &mut zip::read::ZipFile<'_>,
+pub fn read_entry_bytes<R: Read + ?Sized>(
+    entry: &mut zip::read::ZipFile<'_, R>,
     max_entry_bytes: u64,
     budget: &mut DecompressionBudget,
 ) -> Result<Vec<u8>, EpubError> {
-    let entry_name = entry.name().to_string();
+    let entry_name = entry.name()?.into_owned();
     let declared_size = entry.size();
     let compressed = entry.compressed_size();
     read_bounded_stream(
@@ -123,8 +123,8 @@ fn read_bounded_stream<R: Read>(
 }
 
 /// Streams a UTF-8 text entry from an EPUB archive under entry and cumulative budget limits.
-pub fn read_entry_string(
-    entry: &mut zip::read::ZipFile<'_>,
+pub fn read_entry_string<R: Read + ?Sized>(
+    entry: &mut zip::read::ZipFile<'_, R>,
     max_entry_bytes: u64,
     budget: &mut DecompressionBudget,
 ) -> Result<String, EpubError> {
@@ -200,6 +200,7 @@ fn resolve_zip_entry_index<R: Read + std::io::Seek>(
 
     let matched_name = archive
         .file_names()
+        .flatten()
         .find(|name| {
             let entry_norm = name.replace('\\', "/");
             let entry_trimmed = entry_norm.trim_start_matches('/');
@@ -208,7 +209,7 @@ fn resolve_zip_entry_index<R: Read + std::io::Seek>(
             let e2 = entry_collapsed.to_lowercase();
             lc_candidates.iter().any(|c| c == &e1 || c == &e2)
         })
-        .map(str::to_string)?;
+        .map(std::borrow::Cow::into_owned)?;
 
     archive.index_for_name(&matched_name)
 }
@@ -218,7 +219,7 @@ fn resolve_zip_entry_index<R: Read + std::io::Seek>(
 pub(crate) fn open_zip_entry<'a, R: Read + std::io::Seek>(
     archive: &'a mut ZipArchive<R>,
     raw_path: &str,
-) -> zip::result::ZipResult<zip::read::ZipFile<'a>> {
+) -> zip::result::ZipResult<zip::read::ZipFile<'a, R>> {
     match resolve_zip_entry_index(archive, raw_path) {
         Some(idx) => archive.by_index(idx),
         None => Err(zip::result::ZipError::FileNotFound),
@@ -242,9 +243,9 @@ pub fn find_opf_path_with_budget<R: Read + std::io::Seek>(
         match xml_reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let name = e.local_name();
-                if name.as_ref() == b"rootfile" {
+                if name.as_ref() == "rootfile" {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"full-path" {
+                        if attr.key.as_ref() == "full-path" {
                             let path = crate::epub::unescape_attr_value(&attr);
                             return Ok(path);
                         }

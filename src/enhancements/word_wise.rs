@@ -437,7 +437,7 @@ impl WordWiseBuilder {
     pub fn to_bytes(&self) -> SqlResult<Vec<u8>> {
         let mut conn = Connection::open_in_memory()?;
         self.populate_connection(&mut conn)?;
-        let data = conn.serialize(rusqlite::DatabaseName::Main)?;
+        let data = conn.serialize(rusqlite::MAIN_DB)?;
         let mut bytes = data.to_vec();
         Self::normalize_sqlite_header(&mut bytes)?;
         Ok(bytes)
@@ -842,12 +842,14 @@ mod tests {
         builder.write_to_file(&db_path).unwrap();
         assert!(db_path.exists());
 
-        // Verify database contents
-        let conn = Connection::open(&db_path).unwrap();
-        let count: i64 = conn
-            .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
+        // Verify database contents (scoped so SQLite closes handle before Windows overwrite)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let count: i64 = conn
+                .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
 
         // Test overwrite of an existing read-only file
         let mut perms = std::fs::metadata(&db_path).unwrap().permissions();
@@ -857,11 +859,13 @@ mod tests {
         builder.add_gloss(20, Some(25), 4, 102, false);
         builder.write_to_file(&db_path).unwrap();
 
-        let conn2 = Connection::open(&db_path).unwrap();
-        let count2: i64 = conn2
-            .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count2, 2);
+        {
+            let conn2 = Connection::open(&db_path).unwrap();
+            let count2: i64 = conn2
+                .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count2, 2);
+        }
     }
 
     #[test]

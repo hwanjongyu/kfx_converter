@@ -37,12 +37,8 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
     let mut current_identifier_id: Option<String> = None;
     let mut current_meta_refines: Option<String> = None;
 
-    fn attr_local_key(key: &[u8]) -> &[u8] {
-        if let Some(pos) = key.iter().position(|&b| b == b':') {
-            &key[pos + 1..]
-        } else {
-            key
-        }
+    fn attr_local_key(key: &str) -> &str {
+        key.split_once(':').map_or(key, |(_, local)| local)
     }
 
     fn is_metadata_value_tag(tag: &str) -> bool {
@@ -67,7 +63,7 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
             _ => None,
         };
         if let Some((e, is_start)) = start_or_empty {
-            let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+            let local = e.local_name().as_ref().to_string();
             if is_start {
                 tag_stack.push(local.clone());
             }
@@ -75,7 +71,7 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
             match local.as_str() {
                 "package" => {
                     for attr in e.attributes().flatten() {
-                        if attr_local_key(attr.key.as_ref()) == b"unique-identifier" {
+                        if attr_local_key(attr.key.as_ref()) == "unique-identifier" {
                             unique_identifier_id = Some(crate::epub::unescape_attr_value(&attr));
                         }
                     }
@@ -88,10 +84,10 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
 
                     for attr in e.attributes().flatten() {
                         match attr.key.as_ref() {
-                            b"id" => id = crate::epub::unescape_attr_value(&attr),
-                            b"href" => href = crate::epub::unescape_attr_value(&attr),
-                            b"media-type" => media_type = crate::epub::unescape_attr_value(&attr),
-                            b"properties" => {
+                            "id" => id = crate::epub::unescape_attr_value(&attr),
+                            "href" => href = crate::epub::unescape_attr_value(&attr),
+                            "media-type" => media_type = crate::epub::unescape_attr_value(&attr),
+                            "properties" => {
                                 properties = Some(crate::epub::unescape_attr_value(&attr))
                             }
                             _ => {}
@@ -118,7 +114,7 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                 }
                 "itemref" => {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"idref" {
+                        if attr.key.as_ref() == "idref" {
                             spine.push(crate::epub::unescape_attr_value(&attr));
                         }
                     }
@@ -129,9 +125,9 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                     current_title_type = None;
                     for attr in e.attributes().flatten() {
                         let local_key = attr_local_key(attr.key.as_ref());
-                        if local_key == b"id" {
+                        if local_key == "id" {
                             current_title_id = Some(crate::epub::unescape_attr_value(&attr));
-                        } else if local_key == b"title-type" {
+                        } else if local_key == "title-type" {
                             current_title_type = Some(crate::epub::unescape_attr_value(&attr));
                         }
                     }
@@ -140,7 +136,7 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                     current_text.clear();
                     current_identifier_id = None;
                     for attr in e.attributes().flatten() {
-                        if attr_local_key(attr.key.as_ref()) == b"id" {
+                        if attr_local_key(attr.key.as_ref()) == "id" {
                             current_identifier_id = Some(crate::epub::unescape_attr_value(&attr));
                         }
                     }
@@ -158,13 +154,13 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                     for attr in e.attributes().flatten() {
                         let local_key = attr_local_key(attr.key.as_ref());
                         let val = crate::epub::unescape_attr_value(&attr);
-                        if local_key == b"name" && val == "cover" {
+                        if local_key == "name" && val == "cover" {
                             is_cover_meta = true;
-                        } else if local_key == b"content" {
+                        } else if local_key == "content" {
                             content_val = val;
-                        } else if local_key == b"property" && val == "title-type" {
+                        } else if local_key == "property" && val == "title-type" {
                             is_title_type_meta = true;
-                        } else if local_key == b"refines" {
+                        } else if local_key == "refines" {
                             refines_val = val.trim_start_matches('#').to_string();
                         }
                     }
@@ -195,13 +191,19 @@ pub fn parse_opf(opf_xml: &str) -> Result<ParsedOpf, EpubError> {
                     current_text.push_str(&decoded);
                 }
             }
+            Ok(Event::GeneralRef(ref e)) => {
+                if tag_stack.iter().any(|t| is_metadata_value_tag(t)) {
+                    let decoded = crate::epub::decode_general_ref(e);
+                    current_text.push_str(&decoded);
+                }
+            }
             Ok(Event::CData(ref e)) => {
                 if tag_stack.iter().any(|t| is_metadata_value_tag(t)) {
-                    current_text.push_str(&String::from_utf8_lossy(e.as_ref()));
+                    current_text.push_str(&e.html_content());
                 }
             }
             Ok(Event::End(ref e)) => {
-                let end_local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                let end_local = e.local_name().as_ref().to_string();
                 let popped = if let Some(pos) = tag_stack.iter().rposition(|t| t == &end_local) {
                     let popped = tag_stack[pos].clone();
                     tag_stack.truncate(pos);
@@ -437,5 +439,33 @@ mod tests {
             Some("text/ch1.xhtml?x=1&y=2")
         );
         assert_eq!(spine, vec!["c1"]);
+    }
+
+    #[test]
+    fn test_parse_opf_general_ref_entities_in_title_creator_and_description() {
+        let opf = r##"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Book &mdash; Vol. 1 &amp; 2&#x2019;s Edition&#160;!</dc:title>
+    <dc:creator>Jane &amp; John&#x2014;Doe</dc:creator>
+    <dc:description>&ldquo;Quoted&rdquo; &amp; &madeup; &#160;text</dc:description>
+    <dc:language>en</dc:language>
+    <dc:identifier id="uid">urn:uuid:5678</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="c1"/>
+  </spine>
+</package>"##;
+
+        let (meta, _, _) = parse_opf(opf).expect("parse_opf should succeed");
+        assert_eq!(meta.title, "Book — Vol. 1 & 2’s Edition\u{00A0}!");
+        assert_eq!(meta.creators, vec!["Jane & John—Doe"]);
+        assert_eq!(
+            meta.description.as_deref(),
+            Some("“Quoted” & &madeup; \u{00A0}text")
+        );
     }
 }

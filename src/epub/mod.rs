@@ -26,29 +26,40 @@ pub use nav::*;
 pub use opf::*;
 pub use xhtml::*;
 
-/// Decodes XML and HTML named and numeric entities safely.
+/// Decodes XML and HTML named and numeric entities safely from a `BytesText` event.
 ///
-/// If `quick_xml::events::BytesText::unescape` encounters an unrecognized HTML entity
-/// (such as `&nbsp;`, `&mdash;`, `&ndash;`, `&hellip;`, `&rsquo;`), it returns an error.
-/// Rather than dropping the text node via `unwrap_or_default()`, this function falls back
-/// to decoding known HTML entities from the raw byte stream, preventing silent content loss.
+/// In `quick-xml` 0.42+, entity references inside element content are emitted separately as
+/// `Event::GeneralRef` (handled via `decode_general_ref`); this helper normalizes line endings
+/// via `BytesText::html_content` and falls back to [`decode_html_entities`] if any literal `&`
+/// sequences remain.
 pub fn unescape_xml_or_html(e: &quick_xml::events::BytesText) -> String {
-    match e.unescape() {
-        Ok(s) => s.into_owned(),
-        Err(_) => {
-            let raw = String::from_utf8_lossy(e.as_ref());
-            decode_html_entities(&raw)
-        }
+    let content = e.html_content();
+    if content.contains('&') {
+        decode_html_entities(&content)
+    } else {
+        content.into_owned()
     }
 }
 
+/// Decodes a `quick_xml::events::BytesRef` (`Event::GeneralRef`) into its UTF-8 text.
+///
+/// Resolves numeric character references (`&#160;`, `&#x2014;`, `&#x1F680;`), XML/HTML named
+/// entities (`&amp;`, `&nbsp;`, `&mdash;`, etc.), and preserves unknown/malformed references as
+/// `&name;`.
+pub(crate) fn decode_general_ref(e: &quick_xml::events::BytesRef<'_>) -> String {
+    if let Ok(Some(ch)) = e.resolve_char_ref() {
+        return ch.to_string();
+    }
+    if let Some(decoded) = decode_named_entity(e.as_ref()) {
+        return decoded.to_string();
+    }
+    format!("&{};", e.as_ref())
+}
+
 pub(crate) fn unescape_attr_value(attr: &quick_xml::events::attributes::Attribute<'_>) -> String {
-    match attr.unescape_value() {
+    match attr.normalized_value_with(quick_xml::XmlVersion::Implicit1_0, 1, decode_named_entity) {
         Ok(s) => s.into_owned(),
-        Err(_) => {
-            let raw = String::from_utf8_lossy(&attr.value);
-            decode_html_entities(&raw)
-        }
+        Err(_) => decode_html_entities(attr.value.as_ref()),
     }
 }
 
@@ -449,13 +460,16 @@ impl EpubReader {
             let mut total_uncompressed: u64 = 0;
             for i in 0..num_files {
                 let entry = archive.by_index_raw(i)?;
+                let entry_name = entry
+                    .name()
+                    .unwrap_or(std::borrow::Cow::Borrowed("<invalid-name>"));
                 let size = entry.size();
                 let compressed = entry.compressed_size();
 
                 if size > MAX_EPUB_FILE_SIZE {
                     return Err(EpubError::Security(format!(
                         "Member '{}' exceeds maximum file size limit",
-                        entry.name()
+                        entry_name
                     )));
                 }
 
@@ -463,16 +477,14 @@ impl EpubReader {
                     if compressed == 0 {
                         return Err(EpubError::Security(format!(
                             "Member '{}' declares {} bytes with zero compressed size",
-                            entry.name(),
-                            size
+                            entry_name, size
                         )));
                     }
                     let ratio = (size as f64) / (compressed as f64);
                     if ratio > MAX_COMPRESSION_RATIO {
                         return Err(EpubError::Security(format!(
                             "Member '{}' has compression ratio {:.1}:1 exceeding limit",
-                            entry.name(),
-                            ratio
+                            entry_name, ratio
                         )));
                     }
                 }

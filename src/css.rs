@@ -1091,24 +1091,24 @@ pub fn extract_linked_stylesheets(xhtml: &str) -> Vec<String> {
         match reader.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(ref e)) => {
                 let name = e.local_name();
-                if name.as_ref().eq_ignore_ascii_case(b"body") {
+                if name.as_ref().eq_ignore_ascii_case("body") {
                     break;
                 }
-                if name.as_ref().eq_ignore_ascii_case(b"link")
+                if name.as_ref().eq_ignore_ascii_case("link")
                     && let Some(href) = extract_stylesheet_link_href(e)
                 {
                     hrefs.push(href);
                 }
             }
             Ok(quick_xml::events::Event::Empty(ref e)) => {
-                if e.local_name().as_ref().eq_ignore_ascii_case(b"link")
+                if e.local_name().as_ref().eq_ignore_ascii_case("link")
                     && let Some(href) = extract_stylesheet_link_href(e)
                 {
                     hrefs.push(href);
                 }
             }
             Ok(quick_xml::events::Event::End(ref e)) => {
-                if e.local_name().as_ref().eq_ignore_ascii_case(b"head") {
+                if e.local_name().as_ref().eq_ignore_ascii_case("head") {
                     break;
                 }
             }
@@ -1127,22 +1127,16 @@ fn extract_stylesheet_link_href(e: &quick_xml::events::BytesStart<'_>) -> Option
 
     for attr in e.attributes().flatten() {
         let key = attr.key.as_ref();
-        if key.eq_ignore_ascii_case(b"rel") {
-            let val = attr
-                .unescape_value()
-                .map(Cow::into_owned)
-                .unwrap_or_else(|_| String::from_utf8_lossy(attr.value.as_ref()).into_owned());
+        if key.eq_ignore_ascii_case("rel") {
+            let val = crate::epub::unescape_attr_value(&attr);
             if val
                 .split_whitespace()
                 .any(|tok| tok.eq_ignore_ascii_case("stylesheet"))
             {
                 is_stylesheet = true;
             }
-        } else if key.eq_ignore_ascii_case(b"href") {
-            let val = attr
-                .unescape_value()
-                .map(Cow::into_owned)
-                .unwrap_or_else(|_| String::from_utf8_lossy(attr.value.as_ref()).into_owned());
+        } else if key.eq_ignore_ascii_case("href") {
+            let val = crate::epub::unescape_attr_value(&attr);
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 href = Some(trimmed.to_string());
