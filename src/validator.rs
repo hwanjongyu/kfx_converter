@@ -57,6 +57,9 @@ const SYM_RESOURCE_HEIGHT: u32 = KfxSymbol::ResourceHeight as u32;
 const SYM_BACKDROP_STYLE: u32 = KfxSymbol::BackdropStyle as u32;
 const SYM_KEY: u32 = KfxSymbol::Key as u32;
 const SYM_LOCATION_MAP: u32 = KfxSymbol::LocationMap as u32;
+const SYM_TEXT_COLOR: u32 = KfxSymbol::TextColor as u32;
+const SYM_LINK_VISITED_STYLE: u32 = KfxSymbol::LinkVisitedStyle as u32;
+const SYM_LINK_UNVISITED_STYLE: u32 = KfxSymbol::LinkUnvisitedStyle as u32;
 
 /// Validation errors indicating broken referential integrity in a KFX container.
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -1868,6 +1871,61 @@ impl<'a> KfxPreflightValidator<'a> {
                         SYM_YJ_NOTE if referrer.chunk_type == SYM_AUXILIARY_DATA => {
                             Self::validate_yj_note_list(referrer, fval)?;
                         }
+
+                        // $576 = link_visited_style, $577 = link_unvisited_style -> symbol referencing $157 (style)
+                        SYM_LINK_VISITED_STYLE | SYM_LINK_UNVISITED_STYLE => {
+                            let fname = if *fid == SYM_LINK_VISITED_STYLE {
+                                "link_visited_style"
+                            } else {
+                                "link_unvisited_style"
+                            };
+                            match fval {
+                                IonValue::Symbol(target_sym) => {
+                                    if *target_sym == 0
+                                        || !entity_map.contains_key(&(SYM_STYLE, *target_sym))
+                                    {
+                                        return Err(ValidationError::MissingFragment {
+                                            referrer_chunk: referrer.chunk_type,
+                                            referrer_eid: referrer.entity_id,
+                                            field_id: *fid,
+                                            field_name: fname.to_string(),
+                                            target_sym: *target_sym,
+                                            target_name: self.resolve_symbol_name(*target_sym),
+                                            expected_chunk: SYM_STYLE,
+                                        });
+                                    }
+                                }
+                                other => {
+                                    return Err(ValidationError::IllegalField {
+                                        chunk_type: referrer.chunk_type,
+                                        eid: referrer.entity_id,
+                                        field_id: *fid,
+                                        field_name: fname.to_string(),
+                                        reason: format!(
+                                            "Field '{}' (${}) must be a Symbol referencing a style ($157), found {:?}",
+                                            fname, fid, other
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+
+                        // $19 = text_color inside $157 (style) -> Int 0..=0x00FF_FFFF (24-bit RGB)
+                        SYM_TEXT_COLOR if referrer.chunk_type == SYM_STYLE => match fval {
+                            IonValue::Int(rgb) if (0..=0x00FF_FFFF).contains(rgb) => {}
+                            other => {
+                                return Err(ValidationError::IllegalField {
+                                    chunk_type: SYM_STYLE,
+                                    eid: referrer.entity_id,
+                                    field_id: SYM_TEXT_COLOR,
+                                    field_name: "text_color".to_string(),
+                                    reason: format!(
+                                        "Style 'text_color' ($19) must be an Int in 0..=0x00FF_FFFF, found {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        },
 
                         _ => {}
                     }
@@ -3742,5 +3800,207 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn test_validator_link_state_styles_and_text_color() {
+        let mut symbols = LocalSymbols::new();
+        let style_p_sym = symbols.intern("style_p");
+        let style_unvisited_sym = symbols.intern("style_link_unvisited_1");
+        let style_visited_sym = symbols.intern("style_link_visited_1");
+        let missing_style_sym = symbols.intern("style_missing");
+        let content_sym = symbols.intern("content_1");
+        let anchor_sym = symbols.intern("a_1");
+        let story_sym = symbols.intern("c_sec_1-story");
+        let sym_style_name = KfxSymbol::StyleName as u32;
+
+        let encode = |v: &IonValue| {
+            let mut w = IonWriter::new();
+            w.write_bvm();
+            w.write_value(v);
+            w.into_bytes()
+        };
+
+        let make_style = |sym: u32, extra: Vec<(u32, IonValue)>| {
+            let mut fields = vec![(sym_style_name, IonValue::Symbol(sym))];
+            fields.extend(extra);
+            KfxEntity {
+                entity_id: sym,
+                chunk_type: SYM_STYLE,
+                data: encode(&IonValue::Struct(fields)),
+            }
+        };
+
+        let style_p_ent = make_style(style_p_sym, vec![]);
+        let style_unvisited_ent = make_style(
+            style_unvisited_sym,
+            vec![(SYM_TEXT_COLOR, IonValue::Int(0x0000_44AA))],
+        );
+        let style_visited_ent = make_style(
+            style_visited_sym,
+            vec![(SYM_TEXT_COLOR, IonValue::Int(0x00FF_FFFF))],
+        );
+        let content_ent = KfxEntity {
+            entity_id: content_sym,
+            chunk_type: SYM_CONTENT,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_NAME, IonValue::Symbol(content_sym)),
+                (
+                    SYM_CONTENT_LIST,
+                    IonValue::List(vec![IonValue::String("Link".to_string())]),
+                ),
+            ])),
+        };
+        let anchor_ent = KfxEntity {
+            entity_id: anchor_sym,
+            chunk_type: SYM_ANCHOR,
+            data: encode(&IonValue::Struct(vec![
+                (SYM_ANCHOR_NAME, IonValue::Symbol(anchor_sym)),
+                (SYM_URI, IonValue::String("https://example.com".to_string())),
+            ])),
+        };
+
+        let make_story = |link_extra: Vec<(u32, IonValue)>| {
+            let mut ev_fields = vec![
+                (SYM_OFFSET, IonValue::Int(0)),
+                (SYM_LENGTH, IonValue::Int(4)),
+                (SYM_STYLE, IonValue::Symbol(style_p_sym)),
+                (SYM_LINK_TO, IonValue::Symbol(anchor_sym)),
+            ];
+            ev_fields.extend(link_extra);
+            KfxEntity {
+                entity_id: story_sym,
+                chunk_type: SYM_STORYLINE,
+                data: encode(&IonValue::Struct(vec![
+                    (SYM_STORY_NAME, IonValue::Symbol(story_sym)),
+                    (
+                        SYM_CONTENT_LIST,
+                        IonValue::List(vec![IonValue::Struct(vec![
+                            (SYM_ID, IonValue::Int(951)),
+                            (
+                                SYM_CONTENT,
+                                IonValue::Struct(vec![
+                                    (SYM_NAME, IonValue::Symbol(content_sym)),
+                                    (SYM_INDEX, IonValue::Int(0)),
+                                ]),
+                            ),
+                            (
+                                SYM_STYLE_EVENTS,
+                                IonValue::List(vec![IonValue::Struct(ev_fields)]),
+                            ),
+                        ])]),
+                    ),
+                ])),
+            }
+        };
+
+        // 1. Positive: valid $577, $576, and $19 in 0..=0x00FF_FFFF
+        let valid_story = make_story(vec![
+            (
+                SYM_LINK_UNVISITED_STYLE,
+                IonValue::Symbol(style_unvisited_sym),
+            ),
+            (SYM_LINK_VISITED_STYLE, IonValue::Symbol(style_visited_sym)),
+        ]);
+        assert!(
+            KfxPreflightValidator::new(
+                &[
+                    style_p_ent.clone(),
+                    style_unvisited_ent.clone(),
+                    style_visited_ent.clone(),
+                    content_ent.clone(),
+                    anchor_ent.clone(),
+                    valid_story,
+                ],
+                Some(&symbols),
+            )
+            .validate()
+            .is_ok()
+        );
+
+        // 2. Negative: dangling $577 pointing to nonexistent $157
+        let dangling_unvisited = make_story(vec![(
+            SYM_LINK_UNVISITED_STYLE,
+            IonValue::Symbol(missing_style_sym),
+        )]);
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[
+                    style_p_ent.clone(),
+                    content_ent.clone(),
+                    anchor_ent.clone(),
+                    dangling_unvisited,
+                ],
+                Some(&symbols),
+            )
+            .validate(),
+            Err(ValidationError::MissingFragment {
+                field_id: SYM_LINK_UNVISITED_STYLE,
+                expected_chunk: SYM_STYLE,
+                ..
+            })
+        ));
+
+        // 3. Negative: dangling $576 pointing to nonexistent $157
+        let dangling_visited = make_story(vec![(
+            SYM_LINK_VISITED_STYLE,
+            IonValue::Symbol(missing_style_sym),
+        )]);
+        assert!(matches!(
+            KfxPreflightValidator::new(
+                &[
+                    style_p_ent.clone(),
+                    content_ent.clone(),
+                    anchor_ent.clone(),
+                    dangling_visited,
+                ],
+                Some(&symbols),
+            )
+            .validate(),
+            Err(ValidationError::MissingFragment {
+                field_id: SYM_LINK_VISITED_STYLE,
+                expected_chunk: SYM_STYLE,
+                ..
+            })
+        ));
+
+        // 4. Negative: non-Symbol $576 / $577 rejected as IllegalField
+        for fid in [SYM_LINK_VISITED_STYLE, SYM_LINK_UNVISITED_STYLE] {
+            let bad_type_story = make_story(vec![(fid, IonValue::Int(123))]);
+            assert!(matches!(
+                KfxPreflightValidator::new(
+                    &[
+                        style_p_ent.clone(),
+                        content_ent.clone(),
+                        anchor_ent.clone(),
+                        bad_type_story,
+                    ],
+                    Some(&symbols),
+                )
+                .validate(),
+                Err(ValidationError::IllegalField {
+                    chunk_type: SYM_STORYLINE,
+                    field_id,
+                    ..
+                }) if field_id == fid
+            ));
+        }
+
+        // 5. Negative: non-Int and out-of-range $19 text_color inside $157 rejected as IllegalField
+        for bad_rgb in [
+            IonValue::String("#0044AA".to_string()),
+            IonValue::Int(-1),
+            IonValue::Int(0x0100_0000),
+        ] {
+            let bad_color_style = make_style(style_unvisited_sym, vec![(SYM_TEXT_COLOR, bad_rgb)]);
+            assert!(matches!(
+                KfxPreflightValidator::new(&[bad_color_style], Some(&symbols)).validate(),
+                Err(ValidationError::IllegalField {
+                    chunk_type: SYM_STYLE,
+                    field_id: SYM_TEXT_COLOR,
+                    ..
+                })
+            ));
+        }
     }
 }

@@ -6,15 +6,15 @@
 - **Scope:**
   - **Stage 1 — Core Text Links (Internal & External)** `[Implemented in c91e114]`
   - **Stage 2 — List Links (`Block::List`) & Footnote Popups (`$617 yj.note`)** `[Implemented in c91e114]`
-  - **Stage 3 — Optional Extensions (`3A` Table Links, `3B` Image Links, `3C` Visited/Unvisited Link Styles)** `[Deferred to spec-epub-kfx-links-stage3.md]`
-- **Status:** Stages 1 & 2 Implemented in `c91e114` (Stage 3 tracked in [`spec-epub-kfx-links-stage3.md`](spec-epub-kfx-links-stage3.md))
+  - **Stage 3 — Optional Extensions (`3A` Table Links, `3B` Image Links, `3C` Visited/Unvisited Link Styles)** `[Implemented — see spec-epub-kfx-links-stage3.md & qa-epub-kfx-links-stage3.md]`
+- **Status:** Stages 1, 2 & 3 Implemented (Stages 1 & 2 in `c91e114`, Stage 3 in [`spec-epub-kfx-links-stage3.md`](spec-epub-kfx-links-stage3.md))
 
 ---
 
 ## 1. Executive Summary & Cross-Cutting Invariants
 
 > [!NOTE]
-> **Implementation Status:** Stages 1 & 2 shipped in commit `c91e114` and passed full verification in [`docs/qa/qa-epub-kfx-links.md`](../qa/qa-epub-kfx-links.md). The pre-`c91e114` gap summary below is preserved as historical baseline context; Stage 3 extensions are specified in [`docs/specs/spec-epub-kfx-links-stage3.md`](spec-epub-kfx-links-stage3.md).
+> **Implementation Status:** Stages 1 & 2 shipped in commit `c91e114` and passed full verification in [`docs/qa/qa-epub-kfx-links.md`](../qa/qa-epub-kfx-links.md). Stage 3 (`3A` Table Links, `3B` Image Links, `3C` Visited/Unvisited Link Styles) is now implemented and verified in [`docs/qa/qa-epub-kfx-links-stage3.md`](../qa/qa-epub-kfx-links-stage3.md). The pre-`c91e114` gap summary below is preserved as historical baseline context.
 
 Currently, `EpubReader` extracts `<a href="...">` targets onto `TextSpan.href` (`src/epub/xhtml.rs:1438-1498`), and `EpubReader::read_from_file` extracts footnote strings into `BookIR.footnotes` (`src/epub/mod.rs:583-591`), **but** three architectural gaps prevent hyperlinks and popup footnotes from functioning in packaged `.kfx` files:
 

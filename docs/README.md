@@ -54,7 +54,7 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 | **TOC & Page-List Section Link Filtering** | [spec-fix-toc-page-list-filtering.md](specs/spec-fix-toc-page-list-filtering.md) | [qa-fix-toc-page-list-filtering.md](qa/qa-fix-toc-page-list-filtering.md) | **PASS** |
 | **libYJSDK Navigation Crash Resolution** | [spec-fix-navigation-crash.md](specs/spec-fix-navigation-crash.md) | [qa-fix-navigation-crash.md](qa/qa-fix-navigation-crash.md) | **PASS** |
 | **EPUB-to-KFX Links, Anchors & Footnote Popups (Stages 1 & 2)** | [spec-epub-kfx-links.md](specs/spec-epub-kfx-links.md) | [qa-epub-kfx-links.md](qa/qa-epub-kfx-links.md) | **PASS** |
-| **EPUB-to-KFX Links Stage 3 (Table Links, Image Links & Link Styles)** | [spec-epub-kfx-links-stage3.md](specs/spec-epub-kfx-links-stage3.md) | - | **Pending Approval** |
+| **EPUB-to-KFX Links Stage 3 (Table Links, Image Links & Link Styles)** | [spec-epub-kfx-links-stage3.md](specs/spec-epub-kfx-links-stage3.md) | [qa-epub-kfx-links-stage3.md](qa/qa-epub-kfx-links-stage3.md) | **PASS** |
 
 ### 4. Sleep Screen Cover Art & Kindle Lockscreen Compliance
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
@@ -190,6 +190,7 @@ docs/
     ├── qa-ci-pipeline-setup.md
     ├── qa-dual-pane-ui.md
     ├── qa-epub-css-styling-fidelity.md
+    ├── qa-epub-kfx-links-stage3.md
     ├── qa-epub-kfx-links.md
     ├── qa-epub-modularization.md
     ├── qa-epub-xhtml-modularization.md

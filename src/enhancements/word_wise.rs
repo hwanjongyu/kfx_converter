@@ -1064,6 +1064,7 @@ mod tests {
                         alt: Some("Cover".to_string()),
                         width: None,
                         height: None,
+                        href: None,
                     }],
                 },
                 Section {
@@ -1076,6 +1077,7 @@ mod tests {
                             alt: Some(alt_text.to_string()),
                             width: None,
                             height: None,
+                            href: None,
                         },
                         Block::Image {
                             id: "img_none".to_string(),
@@ -1083,6 +1085,7 @@ mod tests {
                             alt: None,
                             width: None,
                             height: None,
+                            href: None,
                         },
                         Block::Image {
                             id: "img_resolved".to_string(),
@@ -1090,6 +1093,7 @@ mod tests {
                             alt: None,
                             width: None,
                             height: None,
+                            href: None,
                         },
                         Block::Image {
                             id: "img_resolved_long_alt".to_string(),
@@ -1097,6 +1101,7 @@ mod tests {
                             alt: Some(format!("An abstruse diagram {}", "X".repeat(380))),
                             width: None,
                             height: None,
+                            href: None,
                         },
                         Block::Paragraph {
                             id: "p1".to_string(),
@@ -1212,6 +1217,7 @@ mod tests {
                         alt: Some("Cover".to_string()),
                         width: None,
                         height: None,
+                        href: None,
                     }],
                 },
                 Section {
@@ -1250,6 +1256,7 @@ mod tests {
                                     alt: Some("An abstruse figure".to_string()), // 18 UTF-16 units, must NOT be glossed
                                     width: None,
                                     height: None,
+                                    href: None,
                                 }],
                                 vec![Block::Paragraph {
                                     id: "lp2".to_string(),
@@ -1576,8 +1583,13 @@ mod tests {
 
     #[test]
     fn test_word_wise_to_bytes_sqlite_header_and_write_to_file_parity() {
-        let mut builder =
-            WordWiseBuilder::new("034BE348BEAA0CDDBF568FB246A84883", "CR!PARITY", "en", "en-US", "7");
+        let mut builder = WordWiseBuilder::new(
+            "034BE348BEAA0CDDBF568FB246A84883",
+            "CR!PARITY",
+            "en",
+            "en-US",
+            "7",
+        );
         builder.add_gloss(10, Some(18), 1, 8435, false);
         builder.add_gloss(50, Some(59), 2, 36391, true);
         builder.add_gloss(120, None, 3, 99102, false);
@@ -1643,8 +1655,7 @@ mod tests {
             "sqlite_version parity"
         );
 
-        let mem_schema_cookie =
-            u32::from_be_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]);
+        let mem_schema_cookie = u32::from_be_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]);
         let disk_schema_cookie = u32::from_be_bytes([
             disk_bytes[40],
             disk_bytes[41],
@@ -1652,18 +1663,13 @@ mod tests {
             disk_bytes[43],
         ]);
         assert_ne!(mem_schema_cookie, 0, "schema_cookie must be non-zero");
-        assert_eq!(mem_schema_cookie, disk_schema_cookie, "schema_cookie parity");
+        assert_eq!(
+            mem_schema_cookie, disk_schema_cookie,
+            "schema_cookie parity"
+        );
 
-        assert_eq!(
-            &bytes[44..48],
-            &disk_bytes[44..48],
-            "schema_format parity"
-        );
-        assert_eq!(
-            &bytes[56..60],
-            &disk_bytes[56..60],
-            "text_encoding parity"
-        );
+        assert_eq!(&bytes[44..48], &disk_bytes[44..48], "schema_format parity");
+        assert_eq!(&bytes[56..60], &disk_bytes[56..60], "text_encoding parity");
 
         // Write to_bytes() output to a temp file and verify SQLite integrity & payload
         let verify_path = temp.path().join("verify_bytes.kll");
@@ -1756,8 +1762,14 @@ mod tests {
         WordWiseBuilder::normalize_sqlite_header(&mut partial)
             .expect("partial header repair must succeed");
 
-        assert_eq!(u32::from_be_bytes([partial[24], partial[25], partial[26], partial[27]]), 4);
-        assert_eq!(u32::from_be_bytes([partial[92], partial[93], partial[94], partial[95]]), 4);
+        assert_eq!(
+            u32::from_be_bytes([partial[24], partial[25], partial[26], partial[27]]),
+            4
+        );
+        assert_eq!(
+            u32::from_be_bytes([partial[92], partial[93], partial[94], partial[95]]),
+            4
+        );
         let expected_ver = u32::try_from(rusqlite::version_number()).unwrap();
         assert_eq!(
             u32::from_be_bytes([partial[96], partial[97], partial[98], partial[99]]),

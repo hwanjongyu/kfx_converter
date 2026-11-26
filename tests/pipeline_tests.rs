@@ -1042,3 +1042,347 @@ fn test_pipeline_content_type_typed_builder_and_lossy_sanitization() {
         evil_log_text
     );
 }
+
+#[test]
+fn test_pipeline_stage3_epub_tables_image_links_and_link_state_styles_e2e() {
+    use image::{ImageBuffer, Rgb};
+    use kfx_converter::{
+        EpubReader, IonReader, IonValue, KfxEntity, KfxPreflightValidator, KfxSymbol,
+        WordWiseBuilder, symbol_id,
+    };
+    use std::io::{Cursor, Write};
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    let temp = common::temp_dir();
+    let epub_path = temp.path().join("stage3_e2e.epub");
+    let kfx_path = temp.path().join("stage3_e2e.kfx");
+    let log_path = temp.path().join("stage3_e2e.log");
+
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(32, 24);
+    let mut png_buf = Cursor::new(Vec::new());
+    img.write_to(&mut png_buf, image::ImageFormat::Png).unwrap();
+    let png_bytes = png_buf.into_inner();
+
+    let mut zip_buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut zip_buf);
+        let opts = SimpleFileOptions::default();
+        zip.start_file("mimetype", opts).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/content.opf", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/dc/elements/1.1/" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Stage 3 E2E Links Volume</dc:title>
+    <dc:language>en</dc:language>
+    <dc:creator>QA Suite</dc:creator>
+  </metadata>
+  <manifest>
+    <item id="css" href="Styles/book.css" media-type="text/css"/>
+    <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="Text/ch2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="fig" href="Images/fig.png" media-type="image/png"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+  </spine>
+</package>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/Styles/book.css", opts).unwrap();
+        zip.write_all(
+            br#"
+a:link { color: #114488; text-decoration: none; }
+a:visited { color: #800080; }
+a.nearblack:link { color: #050505; font-weight: bold; }
+a.broken_cls:link { color: #AA2211; }
+"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/Images/fig.png", opts).unwrap();
+        zip.write_all(&png_bytes).unwrap();
+        zip.start_file("OEBPS/Text/ch1.xhtml", opts).unwrap();
+        zip.write_all(
+            br##"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <link rel="stylesheet" type="text/css" href="../Styles/book.css"/>
+  <style type="text/css">
+    a.btn:visited { color: #226633; font-style: italic; }
+  </style>
+</head>
+<body>
+  <table id="tbl1">
+    <tr>
+      <td><b>Bold</b> <a href="ch2.xhtml#sec2_td">TblLink &#x1F680;</a></td>
+      <td id="cell_anc">ameliorate <a epub:type="noteref" href="#fn1">1</a></td>
+    </tr>
+  </table>
+  <p><a href="ch2.xhtml#sec2_td"><img src="../Images/fig.png" alt="Figure Diagram"/></a></p>
+  <p><a href="ch2.xhtml#sec2_td"><img src="../Images/missing.png" alt="Missing &#x1F680;"/></a></p>
+  <p><a href="#cell_anc">L1</a><a class="btn" href="#cell_anc">L2</a> <a class="nearblack" href="https://example.org/stage3">NB</a> <a class="broken_cls" href="missing.xhtml#bad">Dead</a></p>
+  <p>The abstruse conclusion follows ephemeral prose.</p>
+  <aside id="fn1" epub:type="footnote"><p>Table footnote popup.</p></aside>
+</body>
+</html>"##,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/Text/ch2.xhtml", opts).unwrap();
+        zip.write_all(
+            br##"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink">
+<head>
+  <link rel="stylesheet" type="text/css" href="../Styles/book.css"/>
+</head>
+<body>
+  <table>
+    <tr><td>Header</td><td id="sec2_td">Target Cell</td></tr>
+  </table>
+  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="24">
+    <a xlink:href="ch1.xhtml#cell_anc"><image xlink:href="../Images/fig.png" width="32" height="24"/></a>
+  </svg>
+</body>
+</html>"##,
+        )
+        .unwrap();
+    }
+    std::fs::write(&epub_path, zip_buf.into_inner()).unwrap();
+
+    let options = ConversionOptions {
+        content_type: "EBOK".to_string(),
+        word_wise: true,
+        auto_deploy: false,
+        device_root: None,
+    };
+    let report = ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&kfx_path),
+        &options,
+        Some(&log_path),
+        None::<fn(f32, &str)>,
+    )
+    .expect("Stage 3 E2E pipeline must succeed");
+    assert!(report.total_bytes > 0);
+    assert!(report.word_wise_error.is_none());
+    assert!(report.word_wise_glosses.is_some_and(|g| g >= 2));
+
+    let mut container = KfxContainer::open(&kfx_path).expect("Open Stage 3 KFX");
+    let raw_kfx = std::fs::read(&kfx_path).unwrap();
+    let ci_start = container.header.info_offset as usize;
+    let ci_end = ci_start + container.header.info_length as usize;
+    let ci_vals = IonReader::new(&raw_kfx[ci_start..ci_end])
+        .decode_all()
+        .unwrap();
+    let mut local_symbols = kfx_converter::symbols::LocalSymbols::new();
+    if let IonValue::Struct(ci_fields) = &ci_vals[0] {
+        let doc_off = ci_fields
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::Bcdocsymboloffset as u32)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap();
+        let doc_len = ci_fields
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::Bcdocsymbollength as u32)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap();
+        let doc_vals = IonReader::new(&raw_kfx[doc_off..doc_off + doc_len])
+            .decode_all()
+            .unwrap();
+        let st_struct = match &doc_vals[0] {
+            IonValue::Annotated(_, inner) => inner.as_ref(),
+            other => other,
+        };
+        if let IonValue::Struct(st_fields) = st_struct
+            && let Some((_, IonValue::List(syms))) = st_fields.iter().find(|(k, _)| *k == 7)
+        {
+            for sym in syms {
+                if let IonValue::String(name) = sym {
+                    local_symbols.intern(name);
+                }
+            }
+        }
+    }
+
+    let mut entities = Vec::with_capacity(container.chunks.len());
+    for chunk in container.chunks.clone() {
+        let data = container.read_chunk(&chunk).unwrap();
+        entities.push(KfxEntity {
+            entity_id: chunk.entity_id,
+            chunk_type: chunk.chunk_type,
+            data,
+        });
+    }
+
+    KfxPreflightValidator::new(&entities, Some(&local_symbols))
+        .validate_container()
+        .expect("Stage 3 E2E KFX must pass KfxPreflightValidator");
+
+    // 1. Verify $585 content_features omits yj_table / yj_table_viewer
+    let sym_cf = symbol_id("content_features").unwrap_or(585);
+    let cf_ent = entities.iter().find(|e| e.chunk_type == sym_cf).unwrap();
+    let cf_vals = IonReader::new(&cf_ent.data).decode_all().unwrap();
+    if let IonValue::Struct(cf_root) = &cf_vals[0]
+        && let Some((_, IonValue::List(feats))) = cf_root.iter().find(|(k, _)| *k == 586)
+    {
+        for f in feats {
+            if let IonValue::Struct(ff) = f
+                && let Some((_, IonValue::String(key))) = ff.iter().find(|(k, _)| *k == 492)
+            {
+                assert_ne!(key, "yj_table");
+                assert_ne!(key, "yj_table_viewer");
+            }
+        }
+    }
+
+    // 2. Verify $271 images carry $179 link_to and $142 style_events carry $576/$577
+    let sym_story = symbol_id("storyline").unwrap_or(259);
+    let sym_content_list = symbol_id("content_list").unwrap_or(146);
+    let sym_type = symbol_id("type").unwrap_or(159);
+    let sym_image = symbol_id("image").unwrap_or(271);
+    let sym_link_to = symbol_id("link_to").unwrap_or(179);
+    let sym_style_events = symbol_id("style_events").unwrap_or(142);
+    let sym_link_visited = symbol_id("link_visited_style").unwrap_or(576);
+    let sym_link_unvisited = symbol_id("link_unvisited_style").unwrap_or(577);
+
+    let mut linked_271_count = 0usize;
+    let mut saw_576_event = false;
+    let mut saw_577_event = false;
+    for ent in entities.iter().filter(|e| e.chunk_type == sym_story) {
+        let vals = IonReader::new(&ent.data).decode_all().unwrap();
+        if let IonValue::Struct(root) = &vals[0]
+            && let Some((_, IonValue::List(elems))) =
+                root.iter().find(|(k, _)| *k == sym_content_list)
+        {
+            for elem in elems {
+                if let IonValue::Struct(ef) = elem {
+                    if ef
+                        .iter()
+                        .any(|(k, v)| *k == sym_type && *v == IonValue::Symbol(sym_image))
+                        && ef.iter().any(|(k, _)| *k == sym_link_to)
+                    {
+                        linked_271_count += 1;
+                    }
+                    if let Some((_, IonValue::List(evs))) =
+                        ef.iter().find(|(k, _)| *k == sym_style_events)
+                    {
+                        for ev in evs {
+                            if let IonValue::Struct(sf) = ev {
+                                if sf.iter().any(|(k, _)| *k == sym_link_visited) {
+                                    saw_576_event = true;
+                                }
+                                if sf.iter().any(|(k, _)| *k == sym_link_unvisited) {
+                                    saw_577_event = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        linked_271_count >= 2,
+        "Both HTML <a><img> and SVG <a xlink:href><image/> must emit linked $271 images, got {}",
+        linked_271_count
+    );
+    assert!(saw_576_event, "Must emit $576 link_visited_style");
+    assert!(saw_577_event, "Must emit $577 link_unvisited_style");
+
+    // 3. Verify $617 yj.note popup present
+    let sym_aux = symbol_id("auxiliary_data").unwrap_or(597);
+    let sym_yj_note = symbol_id("yj.note").unwrap_or(617);
+    assert!(
+        entities
+            .iter()
+            .filter(|e| e.chunk_type == sym_aux)
+            .any(|e| {
+                let vals = IonReader::new(&e.data).decode_all().unwrap();
+                matches!(&vals[0], IonValue::Struct(f) if f.iter().any(|(k, _)| *k == sym_yj_note))
+            })
+    );
+
+    // 4. Verify >=891 dynamic $157 styles emit $173 style_name, valid colors, and omit #050505 / #AA2211
+    let sym_style = symbol_id("style").unwrap_or(157);
+    let sym_style_name = symbol_id("style_name").unwrap_or(173);
+    let sym_name = symbol_id("name").unwrap_or(4);
+    let sym_text_color = symbol_id("text_color").unwrap_or(19);
+    let mut colors = Vec::new();
+    let mut dynamic_count = 0usize;
+    for ent in entities
+        .iter()
+        .filter(|e| e.chunk_type == sym_style && e.entity_id >= 891)
+    {
+        dynamic_count += 1;
+        let vals = IonReader::new(&ent.data).decode_all().unwrap();
+        let IonValue::Struct(sf) = &vals[0] else {
+            panic!("style struct");
+        };
+        assert!(sf.iter().any(|(k, _)| *k == sym_style_name));
+        assert!(!sf.iter().any(|(k, _)| *k == sym_name));
+        if let Some((_, IonValue::Int(rgb))) = sf.iter().find(|(k, _)| *k == sym_text_color) {
+            assert_ne!(*rgb, 0x050505);
+            assert_ne!(*rgb, 0xAA2211);
+            colors.push(*rgb);
+        }
+    }
+    assert!(dynamic_count >= 4);
+    colors.sort_unstable();
+    assert_eq!(colors, vec![0x114488, 0x226633, 0x800080]);
+
+    // 5. Verify Word Wise .kll gloss start PIDs match normalized BookIR WordWiseBuilder parity
+    let mut book = EpubReader::read_from_file(&epub_path).expect("Read Stage 3 EPUB");
+    book.normalize();
+    let mut ww = WordWiseBuilder::new("B0STAGE3E2", "CR!STAGE3", "en", "en", "1");
+    ww.generate_from_book(&book);
+    let mut mem_conn = rusqlite::Connection::open_in_memory().unwrap();
+    ww.populate_connection(&mut mem_conn).unwrap();
+    let expected_starts: Vec<i64> = {
+        let mut stmt = mem_conn
+            .prepare("SELECT start FROM glosses ORDER BY start ASC")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+
+    let sdr_path = temp.path().join("stage3_e2e.sdr");
+    let kll_path = std::fs::read_dir(&sdr_path)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "kll"))
+        .expect("Generated .kll sidecar");
+    let disk_conn = rusqlite::Connection::open(&kll_path).unwrap();
+    let actual_starts: Vec<i64> = {
+        let mut stmt = disk_conn
+            .prepare("SELECT start FROM glosses ORDER BY start ASC")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert_eq!(
+        actual_starts, expected_starts,
+        "Pipeline .kll gloss PIDs must match WordWiseBuilder parity across Stage 3 tables, emojis, and image links"
+    );
+}

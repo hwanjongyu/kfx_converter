@@ -14,12 +14,97 @@ use crate::ir::{Block, Section, TextSpan, UriKind, classify_uri};
 use crate::symbols::*;
 use std::collections::{HashMap, HashSet};
 
+/// Parsed `:link` or `:visited` CSS override properties emitted onto a dynamic `$157 style` entity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub(crate) struct LinkStateStyleSpec {
+    pub(crate) underline: Option<bool>,
+    pub(crate) strikethrough: bool,
+    pub(crate) bold: Option<bool>,
+    pub(crate) italic: Option<bool>,
+    pub(crate) text_color: Option<u32>,
+}
+
+impl LinkStateStyleSpec {
+    /// Parses `{prefix}underline`, `{prefix}underline_none`, `{prefix}strike`, `{prefix}bold`,
+    /// `{prefix}weight_normal`, `{prefix}italic`, `{prefix}style_normal`, and `{prefix}color_RRGGBB`.
+    pub(crate) fn from_tokens(tokens: &str, prefix: &str) -> Option<Self> {
+        let mut spec = Self::default();
+        let mut any = false;
+        for tok in tokens.split_whitespace() {
+            let Some(suffix) = tok.strip_prefix(prefix) else {
+                continue;
+            };
+            match suffix {
+                "underline" => {
+                    spec.underline = Some(true);
+                    any = true;
+                }
+                "underline_none" => {
+                    spec.underline = Some(false);
+                    any = true;
+                }
+                "strike" => {
+                    spec.strikethrough = true;
+                    any = true;
+                }
+                "bold" => {
+                    spec.bold = Some(true);
+                    any = true;
+                }
+                "weight_normal" => {
+                    spec.bold = Some(false);
+                    any = true;
+                }
+                "italic" => {
+                    spec.italic = Some(true);
+                    any = true;
+                }
+                "style_normal" => {
+                    spec.italic = Some(false);
+                    any = true;
+                }
+                _ => {
+                    if let Some(hex) = suffix.strip_prefix("color_")
+                        && hex.len() == 6
+                        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+                        && let Ok(rgb) = u32::from_str_radix(hex, 16)
+                    {
+                        spec.text_color = Some(rgb);
+                        any = true;
+                    }
+                }
+            }
+        }
+        any.then_some(spec)
+    }
+}
+
+/// Optional `:link` (unvisited) and `:visited` style specifications carried on a `PendingLink`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub(crate) struct LinkStyleOverrides {
+    pub(crate) unvisited: Option<LinkStateStyleSpec>,
+    pub(crate) visited: Option<LinkStateStyleSpec>,
+}
+
+impl LinkStyleOverrides {
+    pub(crate) fn from_tokens(tokens: &str) -> Option<Self> {
+        let unvisited = LinkStateStyleSpec::from_tokens(tokens, "link_unvisited_");
+        let visited = LinkStateStyleSpec::from_tokens(tokens, "link_visited_");
+        if unvisited.is_some() || visited.is_some() {
+            Some(Self { unvisited, visited })
+        } else {
+            None
+        }
+    }
+}
+
 /// Staged hyperlink span inside a storyline element awaiting Pass 2 resolution.
 pub(crate) struct PendingLink {
     pub(crate) char_offset: usize,
     pub(crate) char_len: usize,
     pub(crate) raw_href: String,
     pub(crate) is_noteref: bool,
+    pub(crate) link_styles: Option<LinkStyleOverrides>,
 }
 
 /// Staged storyline element awaiting Pass 2 link coalescing and `$259` serialization.
@@ -29,6 +114,7 @@ pub(crate) struct PendingStoryElement {
     pub(crate) elem_fields: Vec<(u32, IonValue)>,
     pub(crate) style_events: Vec<IonValue>,
     pub(crate) pending_links: Vec<PendingLink>,
+    pub(crate) element_link_href: Option<String>,
 }
 
 /// Staged footnote popup metadata emitted in a section's `$597 auxiliary_data` (`$617 yj.note`).
@@ -87,6 +173,17 @@ struct StorylineSymIds {
     anchor_name: u32,
     position: u32,
     uri: u32,
+    link_visited_style: u32,
+    link_unvisited_style: u32,
+    style_name: u32,
+    text_color: u32,
+    underline: u32,
+    strikethrough: u32,
+    font_weight: u32,
+    font_style: u32,
+    bold: u32,
+    normal: u32,
+    italic: u32,
 }
 
 impl StorylineSymIds {
@@ -118,6 +215,17 @@ impl StorylineSymIds {
             anchor_name: KfxSymbol::AnchorName as u32,
             position: KfxSymbol::Position as u32,
             uri: KfxSymbol::Uri as u32,
+            link_visited_style: KfxSymbol::LinkVisitedStyle as u32,
+            link_unvisited_style: KfxSymbol::LinkUnvisitedStyle as u32,
+            style_name: KfxSymbol::StyleName as u32,
+            text_color: KfxSymbol::TextColor as u32,
+            underline: KfxSymbol::Underline as u32,
+            strikethrough: KfxSymbol::Strikethrough as u32,
+            font_weight: KfxSymbol::FontWeight as u32,
+            font_style: KfxSymbol::FontStyle as u32,
+            bold: KfxSymbol::Bold as u32,
+            normal: KfxSymbol::Normal as u32,
+            italic: KfxSymbol::Italic as u32,
         }
     }
 }
@@ -338,16 +446,85 @@ fn extract_style_events_with_base(
             }
             if let Some(ref href) = span.href {
                 let is_noteref = span_st.is_some_and(|s| has_token(s, "noteref"));
+                let link_styles = span_st.and_then(LinkStyleOverrides::from_tokens);
                 pending_links.push(PendingLink {
                     char_offset: offset,
                     char_len: span_len,
                     raw_href: href.clone(),
                     is_noteref,
+                    link_styles,
                 });
             }
         }
         full_text.push_str(&span.text);
         offset += span_len;
+    }
+
+    ExtractedBlockRuns {
+        full_text,
+        style_events,
+        anchors,
+        pending_links,
+    }
+}
+
+/// Verifies in O(bytes) with zero heap allocation whether `spans` concatenate to `expected`.
+fn spans_equal_str(spans: &[TextSpan], expected: &str) -> bool {
+    let mut rest = expected;
+    for span in spans {
+        let Some(next) = rest.strip_prefix(span.text.as_str()) else {
+            return false;
+        };
+        rest = next;
+    }
+    rest.is_empty()
+}
+
+/// Extracts plain text, inline style events, cell/table anchors, and pending links from a
+/// flattened `Block::Table` using UTF-16 code-unit offsets (`crate::ir::str_utf16_len`).
+fn extract_table_block_with_base(
+    id: &str,
+    rows: &[Vec<String>],
+    cell_spans: &[Vec<Vec<TextSpan>>],
+    base_offset: usize,
+    styles: &StyleSymMap,
+    syms: &StorylineSymIds,
+) -> ExtractedBlockRuns {
+    let mut full_text = String::new();
+    let mut style_events = Vec::new();
+    let mut anchors = Vec::new();
+    let mut pending_links = Vec::new();
+    let mut char_offset = base_offset;
+
+    if !id.is_empty() {
+        anchors.push((id.to_string(), char_offset));
+    }
+
+    for (r_idx, row) in rows.iter().enumerate() {
+        if r_idx > 0 {
+            full_text.push('\n');
+            char_offset += 1;
+        }
+        for (c_idx, cell) in row.iter().enumerate() {
+            if c_idx > 0 {
+                full_text.push('\t');
+                char_offset += 1;
+            }
+            if let Some(spans) = cell_spans.get(r_idx).and_then(|r| r.get(c_idx))
+                && spans_equal_str(spans, cell)
+            {
+                let extracted =
+                    extract_style_events_with_base(spans, "", char_offset, styles, syms);
+                full_text.push_str(&extracted.full_text);
+                char_offset += crate::ir::str_utf16_len(&extracted.full_text);
+                style_events.extend(extracted.style_events);
+                anchors.extend(extracted.anchors);
+                pending_links.extend(extracted.pending_links);
+            } else {
+                full_text.push_str(cell);
+                char_offset += crate::ir::str_utf16_len(cell);
+            }
+        }
     }
 
     ExtractedBlockRuns {
@@ -421,37 +598,49 @@ fn extract_list_block(
                     anchors.extend(extracted.anchors);
                     pending_links.extend(extracted.pending_links);
                 }
-                Block::Image { id, alt, .. } => {
+                Block::Image { id, alt, href, .. } => {
                     if !id.is_empty() {
                         anchors.push((id.clone(), char_offset));
                     }
                     if let Some(a) = alt {
+                        let alt_len = crate::ir::str_utf16_len(a);
+                        if let Some(raw_href) = href
+                            && alt_len > 0
+                        {
+                            pending_links.push(PendingLink {
+                                char_offset,
+                                char_len: alt_len,
+                                raw_href: raw_href.clone(),
+                                is_noteref: false,
+                                link_styles: None,
+                            });
+                        }
                         full_text.push_str(a);
-                        char_offset += crate::ir::str_utf16_len(a);
+                        char_offset += alt_len;
                     }
                 }
                 Block::HorizontalRule => {
                     full_text.push_str("---");
                     char_offset += 3;
                 }
-                Block::Table { id, rows } => {
-                    if !id.is_empty() {
-                        anchors.push((id.clone(), char_offset));
-                    }
-                    for (r_idx, r) in rows.iter().enumerate() {
-                        if r_idx > 0 {
-                            full_text.push('\n');
-                            char_offset += 1;
-                        }
-                        for (c_idx, cell) in r.iter().enumerate() {
-                            if c_idx > 0 {
-                                full_text.push('\t');
-                                char_offset += 1;
-                            }
-                            full_text.push_str(cell);
-                            char_offset += crate::ir::str_utf16_len(cell);
-                        }
-                    }
+                Block::Table {
+                    id,
+                    rows,
+                    cell_spans,
+                } => {
+                    let extracted = extract_table_block_with_base(
+                        id,
+                        rows,
+                        cell_spans,
+                        char_offset,
+                        styles,
+                        syms,
+                    );
+                    full_text.push_str(&extracted.full_text);
+                    char_offset += crate::ir::str_utf16_len(&extracted.full_text);
+                    style_events.extend(extracted.style_events);
+                    anchors.extend(extracted.anchors);
+                    pending_links.extend(extracted.pending_links);
                 }
             },
         }
@@ -565,32 +754,30 @@ fn extract_list_segments<'b>(
                 char_offset += 3;
                 need_sep = true;
             }
-            Block::Table { id, rows } => {
-                let piece = current.plain_text();
-                if !piece.is_empty() && need_sep {
+            Block::Table {
+                id,
+                rows,
+                cell_spans,
+            } => {
+                let has_text = rows.len() > 1
+                    || rows
+                        .iter()
+                        .any(|r| r.len() > 1 || r.iter().any(|c| !c.is_empty()));
+                if has_text && need_sep {
                     full_text.push('\n');
                     char_offset += 1;
                 }
-                if !id.is_empty() {
-                    anchors.push((id.clone(), char_offset));
-                }
-                if !piece.is_empty() {
-                    for (r_idx, r) in rows.iter().enumerate() {
-                        if r_idx > 0 {
-                            full_text.push('\n');
-                            char_offset += 1;
-                        }
-                        for (c_idx, cell) in r.iter().enumerate() {
-                            if c_idx > 0 {
-                                full_text.push('\t');
-                                char_offset += 1;
-                            }
-                            full_text.push_str(cell);
-                            char_offset += crate::ir::str_utf16_len(cell);
-                        }
-                    }
+                let extracted =
+                    extract_table_block_with_base(id, rows, cell_spans, char_offset, styles, syms);
+                debug_assert_eq!(has_text, !extracted.full_text.is_empty());
+                if !extracted.full_text.is_empty() {
+                    full_text.push_str(&extracted.full_text);
+                    char_offset += crate::ir::str_utf16_len(&extracted.full_text);
                     need_sep = true;
                 }
+                style_events.extend(extracted.style_events);
+                anchors.extend(extracted.anchors);
+                pending_links.extend(extracted.pending_links);
             }
         }
     }
@@ -746,6 +933,7 @@ impl<'a> KfxPackager<'a> {
             ],
             style_events,
             pending_links,
+            element_link_href: None,
         });
     }
 
@@ -774,7 +962,9 @@ impl<'a> KfxPackager<'a> {
             id,
             resource_id,
             alt,
-            ..
+            width: _,
+            height: _,
+            href,
         } = block
         else {
             return;
@@ -844,15 +1034,29 @@ impl<'a> KfxPackager<'a> {
                 elem_fields: img_fields,
                 style_events: Vec::new(),
                 pending_links: Vec::new(),
+                element_link_href: href.clone(),
             });
         } else {
             let fallback_text = Block::image_fallback_text(alt.as_deref());
+            let pending_links = if let Some(raw_href) = href
+                && !fallback_text.is_empty()
+            {
+                vec![PendingLink {
+                    char_offset: 0,
+                    char_len: crate::ir::str_utf16_len(fallback_text),
+                    raw_href: raw_href.clone(),
+                    is_noteref: false,
+                    link_styles: None,
+                }]
+            } else {
+                Vec::new()
+            };
             Self::stage_text_element(
                 block_eid,
                 styles.p,
                 fallback_text,
                 Vec::new(),
-                Vec::new(),
+                pending_links,
                 symbols,
                 content_chunk_syms,
                 content_sym_counter,
@@ -1194,18 +1398,41 @@ impl<'a> KfxPackager<'a> {
                         }
                     }
                 }
-                Block::Table { .. } | Block::HorizontalRule => {
-                    if let Block::Table { id, .. } = block
-                        && !id.is_empty()
-                    {
+                Block::Table {
+                    id,
+                    rows,
+                    cell_spans,
+                } => {
+                    let extracted =
+                        extract_table_block_with_base(id, rows, cell_spans, 0, styles, syms);
+                    debug_assert_eq!(extracted.full_text, block.plain_text());
+                    for (anc, anc_off) in extracted.anchors {
                         Self::register_anchor_target(
                             &mut self.anchor_targets,
                             &mut self.global_anchor_targets,
                             (&raw_name, &sec_name, &norm_sec_path),
-                            id,
-                            (block_eid, block_start_pid, 0),
+                            &anc,
+                            (block_eid, block_start_pid + anc_off, anc_off),
                         );
                     }
+                    Self::stage_text_element(
+                        block_eid,
+                        styles.p,
+                        &extracted.full_text,
+                        extracted.style_events,
+                        extracted.pending_links,
+                        symbols,
+                        content_chunk_syms,
+                        content_sym_counter,
+                        syms,
+                        text_acc,
+                        used_styles,
+                        &mut block_info,
+                        running_pid,
+                        &mut elements,
+                    );
+                }
+                Block::HorizontalRule => {
                     let text = block.plain_text();
                     Self::stage_text_element(
                         block_eid,
@@ -1352,23 +1579,20 @@ impl<'a> KfxPackager<'a> {
         let mut seen_missing_keys: HashSet<String> = HashSet::new();
         for story in &pending_storylines {
             for elem in &story.elements {
-                for link in &elem.pending_links {
-                    if !matches!(
-                        classify_uri(&link.raw_href),
-                        Some(UriKind::InternalOrRelative)
-                    ) {
-                        continue;
+                let mut check_orphan_href = |raw_href: &str, is_noteref: bool| {
+                    if !matches!(classify_uri(raw_href), Some(UriKind::InternalOrRelative)) {
+                        return;
                     }
-                    let sec_part = link.raw_href.split('#').next().unwrap_or("").trim();
+                    let sec_part = raw_href.split('#').next().unwrap_or("").trim();
                     if !(sec_part.is_empty() || sec_part == "endnotes") {
-                        continue;
+                        return;
                     }
                     if let Some((fn_key, popup_text)) =
-                        self.lookup_footnote_popup(&story.raw_id, &link.raw_href, link.is_noteref)
+                        self.lookup_footnote_popup(&story.raw_id, raw_href, is_noteref)
                         && self
                             .resolve_target_internal(
                                 &section_data,
-                                &link.raw_href,
+                                raw_href,
                                 None,
                                 TargetResolveMode::HyperlinkStrict {
                                     source_raw_id: &story.raw_id,
@@ -1379,6 +1603,13 @@ impl<'a> KfxPackager<'a> {
                     {
                         missing_endnotes.push((fn_key, popup_text));
                     }
+                };
+
+                for link in &elem.pending_links {
+                    check_orphan_href(&link.raw_href, link.is_noteref);
+                }
+                if let Some(ref raw_href) = elem.element_link_href {
+                    check_orphan_href(raw_href, false);
                 }
             }
         }
@@ -1454,8 +1685,148 @@ impl<'a> KfxPackager<'a> {
         (section_data, pending_storylines, used_styles)
     }
 
+    /// Interns and emits a deduplicated dynamic `$157 style` entity (SID `>= 891`) for `:link` or `:visited` CSS overrides.
+    fn get_or_emit_link_state_style(
+        entities: &mut Vec<KfxEntity>,
+        symbols: &mut LocalSymbols,
+        spec: &LinkStateStyleSpec,
+        prefix_name: &str,
+        dedup: &mut HashMap<LinkStateStyleSpec, u32>,
+        counter: &mut usize,
+        syms: &StorylineSymIds,
+    ) -> u32 {
+        if let Some(&existing) = dedup.get(spec) {
+            return existing;
+        }
+        let style_sym = allocate_unique_symbol(symbols, prefix_name, counter);
+        let mut fields = vec![(syms.style_name, IonValue::Symbol(style_sym))];
+        if let Some(ul) = spec.underline {
+            fields.push((syms.underline, IonValue::Bool(ul)));
+        }
+        if spec.strikethrough {
+            fields.push((syms.strikethrough, IonValue::Bool(true)));
+        }
+        if let Some(is_bold) = spec.bold {
+            fields.push((
+                syms.font_weight,
+                IonValue::Symbol(if is_bold { syms.bold } else { syms.normal }),
+            ));
+        }
+        if let Some(is_italic) = spec.italic {
+            fields.push((
+                syms.font_style,
+                IonValue::Symbol(if is_italic { syms.italic } else { syms.normal }),
+            ));
+        }
+        if let Some(rgb) = spec.text_color {
+            fields.push((syms.text_color, IonValue::Int(i64::from(rgb))));
+        }
+
+        let style_val = IonValue::Struct(fields);
+        let mut w = IonWriter::new();
+        w.write_bvm();
+        w.write_value(&style_val);
+        entities.push(KfxEntity {
+            entity_id: style_sym,
+            chunk_type: SYM_STYLE,
+            data: w.into_bytes(),
+        });
+        dedup.insert(spec.clone(), style_sym);
+        style_sym
+    }
+
+    /// Resolves a staged hyperlink (`raw_href`) to an anchor symbol, emitting a deduplicated
+    /// `$266 anchor` entity and recording any `$617 yj.note` popup metadata if applicable.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_or_create_anchor(
+        &mut self,
+        symbols: &mut LocalSymbols,
+        section_data: &[SectionPackData],
+        source_raw_id: &str,
+        raw_href: &str,
+        is_noteref: bool,
+        syms: &StorylineSymIds,
+        anchor_dedup: &mut HashMap<AnchorTargetKey, u32>,
+        anchor_idx: &mut usize,
+        pending_notes: &mut Vec<PendingNote>,
+        seen_notes: &mut HashSet<(String, String)>,
+    ) -> Option<u32> {
+        let anchor_sym = match classify_uri(raw_href) {
+            None | Some(UriKind::Blocked) => return None,
+            Some(UriKind::External(norm_uri)) => {
+                let key = AnchorTargetKey::Uri(norm_uri.clone());
+                if let Some(&existing) = anchor_dedup.get(&key) {
+                    existing
+                } else {
+                    let sym = allocate_unique_symbol(symbols, "a", anchor_idx);
+                    let anchor_val = IonValue::Struct(vec![
+                        (syms.anchor_name, IonValue::Symbol(sym)),
+                        (syms.uri, IonValue::String(norm_uri)),
+                    ]);
+                    let mut w = IonWriter::new();
+                    w.write_bvm();
+                    w.write_value(&anchor_val);
+                    self.entities.push(KfxEntity {
+                        entity_id: sym,
+                        chunk_type: SYM_ANCHOR,
+                        data: w.into_bytes(),
+                    });
+                    anchor_dedup.insert(key, sym);
+                    sym
+                }
+            }
+            Some(UriKind::InternalOrRelative) => {
+                let (target_eid, _target_pid, target_off) = self.resolve_target_internal(
+                    section_data,
+                    raw_href,
+                    None,
+                    TargetResolveMode::HyperlinkStrict { source_raw_id },
+                )?;
+
+                if let Some((fn_key, popup_text)) =
+                    self.lookup_footnote_popup(source_raw_id, raw_href, is_noteref)
+                    && seen_notes.insert((fn_key.clone(), popup_text.clone()))
+                {
+                    pending_notes.push(PendingNote { fn_key, popup_text });
+                }
+
+                let key = AnchorTargetKey::Position {
+                    eid: target_eid,
+                    offset: target_off,
+                };
+                if let Some(&existing) = anchor_dedup.get(&key) {
+                    existing
+                } else {
+                    let sym = allocate_unique_symbol(symbols, "a", anchor_idx);
+                    let anchor_val = IonValue::Struct(vec![
+                        (syms.anchor_name, IonValue::Symbol(sym)),
+                        (
+                            syms.position,
+                            IonValue::Struct(vec![
+                                (syms.id, IonValue::Int(target_eid as i64)),
+                                (syms.offset, IonValue::Int(target_off as i64)),
+                            ]),
+                        ),
+                    ]);
+                    let mut w = IonWriter::new();
+                    w.write_bvm();
+                    w.write_value(&anchor_val);
+                    self.entities.push(KfxEntity {
+                        entity_id: sym,
+                        chunk_type: SYM_ANCHOR,
+                        data: w.into_bytes(),
+                    });
+                    anchor_dedup.insert(key, sym);
+                    sym
+                }
+            }
+        };
+        Some(anchor_sym)
+    }
+
     /// Pass 2: resolves staged links against complete anchor/section maps, emits deduplicated
-    /// `$266 anchor` entities, injects coalesced `$179 link_to` + `style_link` into `$142`,
+    /// `$266 anchor` and dynamic `$157` link-state style entities, injects coalesced `$179 link_to`,
+    /// `style_link`, and optional `$577`/`$576` into `$142` (and `$179` onto `$271 image`),
     /// and serializes `$259 storyline` and `$597 auxiliary_data` (including `$617 yj.note`).
     pub(crate) fn build_links_and_finalize_storylines(
         &mut self,
@@ -1465,12 +1836,24 @@ impl<'a> KfxPackager<'a> {
         pending_storylines: Vec<PendingStoryline>,
         used_styles: &mut HashSet<u32>,
     ) {
+        struct ResolvedLinkRun {
+            offset: usize,
+            length: usize,
+            anchor_sym: u32,
+            unvisited_style_sym: Option<u32>,
+            visited_style_sym: Option<u32>,
+        }
+
         let syms = StorylineSymIds::resolve();
         let sym_table = KfxSymbol::Table as u32;
         let sym_table_row = KfxSymbol::TableRow as u32;
         let mut anchor_dedup: HashMap<AnchorTargetKey, u32> = HashMap::new();
         let mut anchor_idx: usize = 1;
         let mut note_idx: usize = 1;
+        let mut unvisited_style_dedup: HashMap<LinkStateStyleSpec, u32> = HashMap::new();
+        let mut visited_style_dedup: HashMap<LinkStateStyleSpec, u32> = HashMap::new();
+        let mut unvisited_style_idx: usize = 1;
+        let mut visited_style_idx: usize = 1;
 
         for (sec_idx, mut story) in pending_storylines.into_iter().enumerate() {
             let mut outbound_anchors: Vec<u32> = Vec::new();
@@ -1479,116 +1862,119 @@ impl<'a> KfxPackager<'a> {
             let mut story_elements = Vec::with_capacity(story.elements.len());
 
             for elem in &mut story.elements {
-                let mut resolved_runs: Vec<(usize, usize, u32)> = Vec::new();
+                let mut resolved_runs: Vec<ResolvedLinkRun> = Vec::new();
 
                 for link in &elem.pending_links {
-                    let anchor_sym = match classify_uri(&link.raw_href) {
-                        None | Some(UriKind::Blocked) => continue,
-                        Some(UriKind::External(norm_uri)) => {
-                            let key = AnchorTargetKey::Uri(norm_uri.clone());
-                            if let Some(&existing) = anchor_dedup.get(&key) {
-                                existing
-                            } else {
-                                let sym = allocate_unique_symbol(symbols, "a", &mut anchor_idx);
-                                let anchor_val = IonValue::Struct(vec![
-                                    (syms.anchor_name, IonValue::Symbol(sym)),
-                                    (syms.uri, IonValue::String(norm_uri)),
-                                ]);
-                                let mut w = IonWriter::new();
-                                w.write_bvm();
-                                w.write_value(&anchor_val);
-                                self.entities.push(KfxEntity {
-                                    entity_id: sym,
-                                    chunk_type: SYM_ANCHOR,
-                                    data: w.into_bytes(),
-                                });
-                                anchor_dedup.insert(key, sym);
-                                sym
-                            }
-                        }
-                        Some(UriKind::InternalOrRelative) => {
-                            let Some((target_eid, _target_pid, target_off)) = self
-                                .resolve_target_internal(
-                                    section_data,
-                                    &link.raw_href,
-                                    None,
-                                    TargetResolveMode::HyperlinkStrict {
-                                        source_raw_id: &story.raw_id,
-                                    },
-                                )
-                            else {
-                                continue;
-                            };
-
-                            if let Some((fn_key, popup_text)) = self.lookup_footnote_popup(
-                                &story.raw_id,
-                                &link.raw_href,
-                                link.is_noteref,
-                            ) && seen_notes.insert((fn_key.clone(), popup_text.clone()))
-                            {
-                                pending_notes.push(PendingNote { fn_key, popup_text });
-                            }
-
-                            let key = AnchorTargetKey::Position {
-                                eid: target_eid,
-                                offset: target_off,
-                            };
-                            if let Some(&existing) = anchor_dedup.get(&key) {
-                                existing
-                            } else {
-                                let sym = allocate_unique_symbol(symbols, "a", &mut anchor_idx);
-                                let anchor_val = IonValue::Struct(vec![
-                                    (syms.anchor_name, IonValue::Symbol(sym)),
-                                    (
-                                        syms.position,
-                                        IonValue::Struct(vec![
-                                            (syms.id, IonValue::Int(target_eid as i64)),
-                                            (syms.offset, IonValue::Int(target_off as i64)),
-                                        ]),
-                                    ),
-                                ]);
-                                let mut w = IonWriter::new();
-                                w.write_bvm();
-                                w.write_value(&anchor_val);
-                                self.entities.push(KfxEntity {
-                                    entity_id: sym,
-                                    chunk_type: SYM_ANCHOR,
-                                    data: w.into_bytes(),
-                                });
-                                anchor_dedup.insert(key, sym);
-                                sym
-                            }
-                        }
+                    let Some(anchor_sym) = self.resolve_or_create_anchor(
+                        symbols,
+                        section_data,
+                        &story.raw_id,
+                        &link.raw_href,
+                        link.is_noteref,
+                        &syms,
+                        &mut anchor_dedup,
+                        &mut anchor_idx,
+                        &mut pending_notes,
+                        &mut seen_notes,
+                    ) else {
+                        continue;
                     };
 
                     if !outbound_anchors.contains(&anchor_sym) {
                         outbound_anchors.push(anchor_sym);
                     }
-                    resolved_runs.push((link.char_offset, link.char_len, anchor_sym));
+
+                    let unvisited_style_sym = link
+                        .link_styles
+                        .as_ref()
+                        .and_then(|ls| ls.unvisited.as_ref())
+                        .map(|spec| {
+                            Self::get_or_emit_link_state_style(
+                                &mut self.entities,
+                                symbols,
+                                spec,
+                                "style_link_unvisited",
+                                &mut unvisited_style_dedup,
+                                &mut unvisited_style_idx,
+                                &syms,
+                            )
+                        });
+                    let visited_style_sym = link
+                        .link_styles
+                        .as_ref()
+                        .and_then(|ls| ls.visited.as_ref())
+                        .map(|spec| {
+                            Self::get_or_emit_link_state_style(
+                                &mut self.entities,
+                                symbols,
+                                spec,
+                                "style_link_visited",
+                                &mut visited_style_dedup,
+                                &mut visited_style_idx,
+                                &syms,
+                            )
+                        });
+
+                    resolved_runs.push(ResolvedLinkRun {
+                        offset: link.char_offset,
+                        length: link.char_len,
+                        anchor_sym,
+                        unvisited_style_sym,
+                        visited_style_sym,
+                    });
                 }
 
-                // Coalesce contiguous identical link runs into a single clickable target range
-                let mut coalesced: Vec<(usize, usize, u32)> =
-                    Vec::with_capacity(resolved_runs.len());
-                for (off, len, sym) in resolved_runs {
-                    if let Some(prev) = coalesced.last_mut()
-                        && prev.0 + prev.1 == off
-                        && prev.2 == sym
-                    {
-                        prev.1 += len;
-                    } else {
-                        coalesced.push((off, len, sym));
+                if let Some(raw_href) = elem.element_link_href.as_deref()
+                    && let Some(anchor_sym) = self.resolve_or_create_anchor(
+                        symbols,
+                        section_data,
+                        &story.raw_id,
+                        raw_href,
+                        false,
+                        &syms,
+                        &mut anchor_dedup,
+                        &mut anchor_idx,
+                        &mut pending_notes,
+                        &mut seen_notes,
+                    )
+                {
+                    elem.elem_fields
+                        .push((syms.link_to, IonValue::Symbol(anchor_sym)));
+                    if !outbound_anchors.contains(&anchor_sym) {
+                        outbound_anchors.push(anchor_sym);
                     }
                 }
 
-                for (off, len, anchor_sym) in coalesced {
+                // Coalesce contiguous identical link runs into a single clickable target range
+                let mut coalesced: Vec<ResolvedLinkRun> = Vec::with_capacity(resolved_runs.len());
+                for run in resolved_runs {
+                    if let Some(prev) = coalesced.last_mut()
+                        && prev.offset + prev.length == run.offset
+                        && prev.anchor_sym == run.anchor_sym
+                        && prev.unvisited_style_sym == run.unvisited_style_sym
+                        && prev.visited_style_sym == run.visited_style_sym
+                    {
+                        prev.length += run.length;
+                    } else {
+                        coalesced.push(run);
+                    }
+                }
+
+                for run in coalesced {
                     used_styles.insert(styles.link);
-                    elem.style_events.push(IonValue::Struct(vec![
-                        (syms.offset, IonValue::Int(off as i64)),
-                        (syms.length, IonValue::Int(len as i64)),
+                    let mut ev_fields = vec![
+                        (syms.offset, IonValue::Int(run.offset as i64)),
+                        (syms.length, IonValue::Int(run.length as i64)),
                         (syms.style, IonValue::Symbol(styles.link)),
-                        (syms.link_to, IonValue::Symbol(anchor_sym)),
-                    ]));
+                        (syms.link_to, IonValue::Symbol(run.anchor_sym)),
+                    ];
+                    if let Some(u_sym) = run.unvisited_style_sym {
+                        ev_fields.push((syms.link_unvisited_style, IonValue::Symbol(u_sym)));
+                    }
+                    if let Some(v_sym) = run.visited_style_sym {
+                        ev_fields.push((syms.link_visited_style, IonValue::Symbol(v_sym)));
+                    }
+                    elem.style_events.push(IonValue::Struct(ev_fields));
                 }
 
                 if !elem.style_events.is_empty() {

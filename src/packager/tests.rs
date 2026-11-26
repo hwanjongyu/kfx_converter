@@ -204,6 +204,7 @@ fn test_yj_auxiliary_data_and_cem_and_location_pid_map_emitted() {
             alt: None,
             width: None,
             height: None,
+            href: None,
         }],
     });
     book.sections.push(Section {
@@ -822,6 +823,7 @@ fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
                 alt: Some("Illustration 1".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
         ],
     });
@@ -847,6 +849,7 @@ fn test_multi_image_symbol_resolution_and_no_cover_swapping() {
                 alt: Some("Illustration 2".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
         ],
     });
@@ -1050,6 +1053,7 @@ fn test_image_rendering_storyline_and_resource_dimensions() {
                 alt: Some("Figure One".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
         ],
     });
@@ -1182,6 +1186,7 @@ fn test_cover_image_metadata_and_template_resolution() {
             alt: Some("Book Cover".to_string()),
             width: None,
             height: None,
+            href: None,
         }],
     });
 
@@ -1615,6 +1620,7 @@ fn test_packager_emits_yj_jpg_rst_marker_content_feature() {
             alt: None,
             width: None,
             height: None,
+            href: None,
         }],
     });
 
@@ -1685,6 +1691,7 @@ fn test_packager_oversized_image_fallback_and_magic_sniffing() {
                 alt: Some("Bomb".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
             Block::Image {
                 id: "img_spoof".to_string(),
@@ -1692,6 +1699,7 @@ fn test_packager_oversized_image_fallback_and_magic_sniffing() {
                 alt: Some("Spoof".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
         ],
     });
@@ -1756,6 +1764,7 @@ fn test_packager_missing_image_fallback_and_duplicate_section_dedup() {
             alt: Some("Missing Diagram".to_string()),
             width: None,
             height: None,
+            href: None,
         }],
     });
     book.sections.push(Section {
@@ -2178,6 +2187,7 @@ fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
                 alt: Some(long_alt),
                 width: None,
                 height: None,
+                href: None,
             },
             Block::Paragraph {
                 id: "p1_after".to_string(),
@@ -2418,6 +2428,7 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
                 alt: Some("Z".repeat(400)),
                 width: None,
                 height: None,
+                href: None,
             },
             Block::Image {
                 id: "img_missing".to_string(),
@@ -2425,6 +2436,7 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
                 alt: Some("Absent Fallback".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
         ],
     });
@@ -2482,6 +2494,7 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
             alt: Some("Fallback Text".to_string()),
             width: None,
             height: None,
+            href: None,
         }],
     });
     let mut missing_pkg = KfxPackager::new(&missing_only, "EBOK");
@@ -3942,6 +3955,7 @@ fn test_packager_flattened_table_omits_yj_table_content_features() {
                     vec!["Col A".to_string(), "Col B".to_string()],
                     vec!["Val 1".to_string(), "Val 2".to_string()],
                 ],
+                cell_spans: Vec::new(),
             },
             Block::List {
                 id: "list1".to_string(),
@@ -3949,6 +3963,7 @@ fn test_packager_flattened_table_omits_yj_table_content_features() {
                 items: vec![vec![Block::Table {
                     id: "tbl2".to_string(),
                     rows: vec![vec!["Nested".to_string()], vec!["Cell".to_string()]],
+                    cell_spans: Vec::new(),
                 }]],
             },
         ],
@@ -4089,6 +4104,7 @@ fn test_packager_p1_5_empty_corrupt_gif_svg_and_font_resources() {
                 alt: Some("Corrupt".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
             Block::Image {
                 id: "img_gif".to_string(),
@@ -4096,6 +4112,7 @@ fn test_packager_p1_5_empty_corrupt_gif_svg_and_font_resources() {
                 alt: Some("Gif".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
             Block::Image {
                 id: "img_svg".to_string(),
@@ -4103,6 +4120,7 @@ fn test_packager_p1_5_empty_corrupt_gif_svg_and_font_resources() {
                 alt: Some("Vector Fallback".to_string()),
                 width: None,
                 height: None,
+                href: None,
             },
         ],
     });
@@ -4223,6 +4241,7 @@ fn test_packager_p1_6_colliding_resource_ids_remapped_cleanly() {
             alt: Some(format!("Alt {}", idx)),
             width: None,
             height: None,
+            href: None,
         });
     }
 
@@ -4567,6 +4586,7 @@ fn test_packager_p1_11_list_nested_image_renders_271_and_matches_254() {
                     alt: Some("List diagram".to_string()),
                     width: None,
                     height: None,
+                    href: None,
                 }],
                 vec![Block::Paragraph {
                     id: "li2".to_string(),
@@ -4710,6 +4730,7 @@ fn test_packager_long_image_alt_never_emits_duplicate_550_entries() {
                 alt: Some("Long descriptive alt text ".repeat(50)), // 1,300 chars (> 3 * 350)
                 width: Some(800),
                 height: Some(600),
+                href: None,
             },
             Block::Paragraph {
                 id: "p_after".to_string(),
@@ -4859,7 +4880,10 @@ fn test_packager_content_features_skips_storyline_decode_when_sections_present()
 }
 
 /// Decodes `$490 book_metadata` (`kindle_title_metadata`) and returns the string value for `key`.
-fn extract_kindle_title_metadata_string(entities: &[KfxEntity], target_key: &str) -> Option<String> {
+fn extract_kindle_title_metadata_string(
+    entities: &[KfxEntity],
+    target_key: &str,
+) -> Option<String> {
     let meta_ent = entities
         .iter()
         .find(|e| e.chunk_type == SYM_BOOK_METADATA)
@@ -5008,3 +5032,1300 @@ fn test_book_metadata_490_language_roundtrip_english_vs_non_english() {
     }
 }
 
+/// Decodes the `$ion_symbol_table` from raw KFX container bytes so `KfxPreflightValidator`
+/// can verify dynamic local symbols (such as Stage 3C `style_link_unvisited_*` / `style_link_visited_*`).
+fn decode_local_symbols_from_kfx_bytes(raw_kfx: &[u8]) -> crate::symbols::LocalSymbols {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), raw_kfx).unwrap();
+    let container = crate::container::KfxContainer::open(tmp.path()).expect("KfxContainer::open");
+    let ci_start = container.header.info_offset as usize;
+    let ci_end = ci_start + container.header.info_length as usize;
+    let ci_vals = crate::ion::IonReader::new(&raw_kfx[ci_start..ci_end])
+        .decode_all()
+        .expect("Decode ContainerInfo");
+    let sym_doc_off = KfxSymbol::Bcdocsymboloffset as u32;
+    let sym_doc_len = KfxSymbol::Bcdocsymbollength as u32;
+    let mut local_symbols = crate::symbols::LocalSymbols::new();
+    if let IonValue::Struct(ci_fields) = &ci_vals[0] {
+        let doc_off = ci_fields
+            .iter()
+            .find(|(k, _)| *k == sym_doc_off)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .expect("bcDocSymbolOffset present");
+        let doc_len = ci_fields
+            .iter()
+            .find(|(k, _)| *k == sym_doc_len)
+            .and_then(|(_, v)| match v {
+                IonValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .expect("bcDocSymbolLength present");
+        let doc_vals = crate::ion::IonReader::new(&raw_kfx[doc_off..doc_off + doc_len])
+            .decode_all()
+            .expect("Decode $ion_symbol_table");
+        let sym_table_struct = match &doc_vals[0] {
+            IonValue::Annotated(_, inner) => inner.as_ref(),
+            other => other,
+        };
+        if let IonValue::Struct(st_fields) = sym_table_struct
+            && let Some((_, IonValue::List(syms))) = st_fields.iter().find(|(k, _)| *k == 7)
+        {
+            for sym in syms {
+                if let IonValue::String(name) = sym {
+                    local_symbols.intern(name);
+                }
+            }
+        }
+    }
+    local_symbols
+}
+
+#[test]
+fn test_stage3a_table_links_spans_utf16_anchors_yj_note_and_word_wise_parity() {
+    use image::{ImageBuffer, Rgb};
+
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(8, 8);
+    let mut png_bytes = Cursor::new(Vec::new());
+    img.write_to(&mut png_bytes, image::ImageFormat::Png)
+        .unwrap();
+
+    let mut book = BookIR::default();
+    book.metadata.title = "Stage 3A Table Links".to_string();
+    book.metadata.language = "en".to_string();
+    book.resources.insert(
+        "tbl_fig.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "tbl_fig.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: png_bytes.into_inner(),
+        },
+    );
+    book.footnotes.insert(
+        "fn_tbl".to_string(),
+        "Table footnote popup content.".to_string(),
+    );
+
+    // Top-level table:
+    // Row 0: "BoldLink 🚀" \t "NoteRef"
+    //   "Bold" (4) -> bold; "Link" (4) -> italic + href("sec2#target_td"); " 🚀" (3 UTF-16 units)
+    //   \t -> +1 (offset 12)
+    //   empty-text tr_top_0 & td_top_0_1 anchors at offset 12, "NoteRef" (7) -> noteref href("#fn_tbl")
+    // Row 1: "ameliorate" \t "End"
+    //   \n -> +1 (offset 20); "ameliorate" has td_top_1_0 anchor at offset 20
+    let top_table = Block::Table {
+        id: "tbl_top".to_string(),
+        rows: vec![
+            vec!["BoldLink \u{1F680}".to_string(), "NoteRef".to_string()],
+            vec!["ameliorate".to_string(), "End".to_string()],
+        ],
+        cell_spans: vec![
+            vec![
+                vec![
+                    TextSpan {
+                        text: "Bold".to_string(),
+                        style: Some("bold".to_string()),
+                        ..Default::default()
+                    },
+                    TextSpan {
+                        text: "Link".to_string(),
+                        style: Some("italic".to_string()),
+                        href: Some("sec2#target_td".to_string()),
+                        ..Default::default()
+                    },
+                    TextSpan {
+                        text: " \u{1F680}".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                vec![
+                    TextSpan {
+                        text: String::new(),
+                        anchor_id: Some("tr_top_0".to_string()),
+                        ..Default::default()
+                    },
+                    TextSpan {
+                        text: "NoteRef".to_string(),
+                        style: Some("noteref".to_string()),
+                        anchor_id: Some("td_top_0_1".to_string()),
+                        href: Some("#fn_tbl".to_string()),
+                        ..Default::default()
+                    },
+                ],
+            ],
+            vec![
+                vec![TextSpan {
+                    text: "ameliorate".to_string(),
+                    anchor_id: Some("td_top_1_0".to_string()),
+                    ..Default::default()
+                }],
+                vec![TextSpan {
+                    text: "End".to_string(),
+                    ..Default::default()
+                }],
+            ],
+        ],
+    };
+
+    // Image-free list (routes through extract_list_block) with nested table containing emoji + link + anchor
+    // "ListIntro\nGo \u{1F600}\tCellAnc" ->
+    //   "ListIntro" (9) + '\n' (1) + "Go " (3) + "😀" (2 UTF-16) + '\t' (1) => "CellAnc" starts at UTF-16 offset 16
+    let list_no_img = Block::List {
+        id: "list_no_img".to_string(),
+        ordered: false,
+        items: vec![
+            vec![Block::Paragraph {
+                id: "li_p".to_string(),
+                spans: vec![TextSpan {
+                    text: "ListIntro".to_string(),
+                    ..Default::default()
+                }],
+                style: None,
+            }],
+            vec![Block::Table {
+                id: "tbl_in_list".to_string(),
+                rows: vec![vec!["Go \u{1F600}".to_string(), "CellAnc".to_string()]],
+                cell_spans: vec![vec![
+                    vec![
+                        TextSpan {
+                            text: "Go".to_string(),
+                            style: Some("bold".to_string()),
+                            href: Some("#td_top_1_0".to_string()),
+                            ..Default::default()
+                        },
+                        TextSpan {
+                            text: " \u{1F600}".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    vec![TextSpan {
+                        text: "CellAnc".to_string(),
+                        anchor_id: Some("td_in_list".to_string()),
+                        ..Default::default()
+                    }],
+                ]],
+            }],
+        ],
+    };
+
+    // Image-containing list (routes through extract_list_segments) with nested table
+    let list_with_img = Block::List {
+        id: "list_with_img".to_string(),
+        ordered: true,
+        items: vec![
+            vec![Block::Image {
+                id: "li_img".to_string(),
+                resource_id: "tbl_fig.png".to_string(),
+                alt: Some("List fig".to_string()),
+                width: Some(8),
+                height: Some(8),
+                href: None,
+            }],
+            vec![Block::Table {
+                id: "tbl_in_img_list".to_string(),
+                rows: vec![vec!["Jump \u{1F680}".to_string(), "jaundiced".to_string()]],
+                cell_spans: vec![vec![
+                    vec![
+                        TextSpan {
+                            text: "Jump".to_string(),
+                            style: Some("italic".to_string()),
+                            href: Some("#td_in_list".to_string()),
+                            ..Default::default()
+                        },
+                        TextSpan {
+                            text: " \u{1F680}".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                    vec![TextSpan {
+                        text: "jaundiced".to_string(),
+                        anchor_id: Some("td_in_img_list".to_string()),
+                        ..Default::default()
+                    }],
+                ]],
+            }],
+        ],
+    };
+
+    let p_after = Block::Paragraph {
+        id: "p_after_tbl".to_string(),
+        spans: vec![TextSpan {
+            text: "An abstruse epilogue.".to_string(),
+            ..Default::default()
+        }],
+        style: None,
+    };
+
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![
+            top_table.clone(),
+            list_no_img.clone(),
+            list_with_img,
+            p_after,
+        ],
+    });
+
+    book.sections.push(Section {
+        id: "sec2".to_string(),
+        title: "Chapter 2".to_string(),
+        blocks: vec![Block::Table {
+            id: "tbl_s2".to_string(),
+            rows: vec![
+                vec!["Head".to_string(), "R0C1".to_string()],
+                vec!["R1C0".to_string(), "TargetCell".to_string()],
+            ],
+            cell_spans: vec![
+                vec![
+                    vec![TextSpan {
+                        text: "Head".to_string(),
+                        ..Default::default()
+                    }],
+                    vec![TextSpan {
+                        text: "R0C1".to_string(),
+                        ..Default::default()
+                    }],
+                ],
+                vec![
+                    vec![TextSpan {
+                        text: "R1C0".to_string(),
+                        href: Some("sec1#td_in_img_list".to_string()),
+                        ..Default::default()
+                    }],
+                    vec![TextSpan {
+                        text: "TargetCell".to_string(),
+                        anchor_id: Some("target_td".to_string()),
+                        ..Default::default()
+                    }],
+                ],
+            ],
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("Packaging Stage 3A tables must succeed");
+    let raw_kfx = buf.into_inner();
+    let local_symbols = decode_local_symbols_from_kfx_bytes(&raw_kfx);
+
+    crate::validator::KfxPreflightValidator::new(&packager.entities, Some(&local_symbols))
+        .validate_container()
+        .expect("Stage 3A table container must pass preflight validation");
+
+    // 1. $585 content_features must NOT emit yj_table / yj_table_viewer
+    let features = extract_content_feature_keys(&packager.entities);
+    assert!(!features.iter().any(|k| k == "yj_table"));
+    assert!(!features.iter().any(|k| k == "yj_table_viewer"));
+
+    // 2. Exact UTF-16 anchor offsets inside tables (non-BMP emoji counts as 2 UTF-16 code units!)
+    let (top_eid, top_pid, top_off) = *packager
+        .anchor_targets
+        .get(&("sec1".to_string(), "tbl_top".to_string()))
+        .expect("tbl_top anchor");
+    assert_eq!(top_off, 0);
+
+    let (tr0_eid, _, tr0_off) = *packager
+        .anchor_targets
+        .get(&("sec1".to_string(), "tr_top_0".to_string()))
+        .expect("tr_top_0 anchor");
+    let (td01_eid, _, td01_off) = *packager
+        .anchor_targets
+        .get(&("sec1".to_string(), "td_top_0_1".to_string()))
+        .expect("td_top_0_1 anchor");
+    let (td10_eid, td10_pid, td10_off) = *packager
+        .anchor_targets
+        .get(&("sec1".to_string(), "td_top_1_0".to_string()))
+        .expect("td_top_1_0 anchor");
+    assert_eq!(tr0_eid, top_eid);
+    assert_eq!(td01_eid, top_eid);
+    assert_eq!(td10_eid, top_eid);
+    assert_eq!(
+        tr0_off, 12,
+        "\"BoldLink 🚀\\t\" = 4 + 4 + 1 + 2 + 1 = 12 UTF-16 units"
+    );
+    assert_eq!(td01_off, 12);
+    assert_eq!(
+        td10_off, 20,
+        "Row 0 (12 + 7 = 19) + '\\n' (1) = 20 UTF-16 units"
+    );
+    assert_eq!(td10_pid, top_pid + 20);
+
+    let (list_eid, _, list_td_off) = *packager
+        .anchor_targets
+        .get(&("sec1".to_string(), "td_in_list".to_string()))
+        .expect("td_in_list anchor");
+    assert_eq!(
+        list_td_off, 16,
+        "\"ListIntro\\nGo 😀\\t\" = 9 + 1 + 3 + 2 + 1 = 16 UTF-16 units"
+    );
+
+    let (img_list_tbl_eid, img_list_tbl_pid, img_list_td_off) = *packager
+        .anchor_targets
+        .get(&("sec1".to_string(), "td_in_img_list".to_string()))
+        .expect("td_in_img_list anchor");
+    assert_eq!(
+        img_list_td_off, 8,
+        "\"Jump 🚀\\t\" = 4 + 1 + 2 + 1 = 8 UTF-16 units"
+    );
+
+    let (sec2_tbl_eid, _, sec2_td_off) = *packager
+        .anchor_targets
+        .get(&("sec2".to_string(), "target_td".to_string()))
+        .expect("sec2 target_td anchor");
+    assert_eq!(
+        sec2_td_off, 15,
+        "\"Head\\tR0C1\\nR1C0\\t\" = 4 + 1 + 4 + 1 + 4 + 1 = 15 UTF-16 units"
+    );
+
+    // Verify emitted $266 anchor entities carry matching (id, offset) positions
+    let anchor_positions: Vec<(i64, i64)> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_ANCHOR)
+        .filter_map(|ent| {
+            let vals = crate::ion::IonReader::new(&ent.data).decode_all().unwrap();
+            let IonValue::Struct(f) = &vals[0] else {
+                return None;
+            };
+            let (_, IonValue::Struct(pos)) = f.iter().find(|(k, _)| *k == 183)? else {
+                return None;
+            };
+            let id = match pos.iter().find(|(k, _)| *k == 155)?.1 {
+                IonValue::Int(v) => v,
+                _ => return None,
+            };
+            let off = match pos.iter().find(|(k, _)| *k == 143)?.1 {
+                IonValue::Int(v) => v,
+                _ => return None,
+            };
+            Some((id, off))
+        })
+        .collect();
+    assert!(anchor_positions.contains(&(top_eid as i64, 20)));
+    assert!(anchor_positions.contains(&(list_eid as i64, 16)));
+    assert!(anchor_positions.contains(&(img_list_tbl_eid as i64, 8)));
+    assert!(anchor_positions.contains(&(sec2_tbl_eid as i64, 15)));
+
+    // 3. Verify $142 style_events across top-level table, image-free list, and image-containing list
+    let storylines: Vec<&KfxEntity> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_STORYLINE)
+        .collect();
+    // tbl_fig.png is inside Block::List (not top-level Block::Image), so sections_with_cover() prepends cover:
+    // storylines = [cover, sec1, sec2, endnotes]
+    assert_eq!(storylines.len(), 4);
+    let s1_vals = crate::ion::IonReader::new(&storylines[1].data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(s1_root) = &s1_vals[0] else {
+        panic!("sec1 storyline");
+    };
+    let (_, IonValue::List(s1_elems)) = s1_root.iter().find(|(k, _)| *k == 146).unwrap() else {
+        panic!("sec1 content_list");
+    };
+    // Elements in sec1: [top_table ($269), list_no_img ($269), list_with_img img ($271), list_with_img tbl ($269), p_after ($269)]
+    assert_eq!(s1_elems.len(), 5);
+
+    let extract_events = |elem: &IonValue| -> Vec<(i64, i64, u32, bool)> {
+        let IonValue::Struct(ef) = elem else {
+            panic!("elem struct");
+        };
+        let (_, IonValue::List(evs)) = ef.iter().find(|(k, _)| *k == 142).unwrap() else {
+            panic!("style_events missing");
+        };
+        evs.iter()
+            .map(|ev| {
+                let IonValue::Struct(f) = ev else {
+                    panic!("event struct");
+                };
+                let off = match f.iter().find(|(k, _)| *k == 143).unwrap().1 {
+                    IonValue::Int(n) => n,
+                    _ => panic!("off"),
+                };
+                let len = match f.iter().find(|(k, _)| *k == 144).unwrap().1 {
+                    IonValue::Int(n) => n,
+                    _ => panic!("len"),
+                };
+                let style = match f.iter().find(|(k, _)| *k == 157).unwrap().1 {
+                    IonValue::Symbol(s) => s,
+                    _ => panic!("style"),
+                };
+                let has_link = f.iter().any(|(k, _)| *k == 179);
+                (off, len, style, has_link)
+            })
+            .collect()
+    };
+
+    let top_events = extract_events(&s1_elems[0]);
+    assert!(top_events.contains(&(0, 4, 861, false))); // bold "Bold"
+    assert!(top_events.contains(&(4, 4, 862, false))); // italic "Link"
+    assert!(top_events.contains(&(4, 4, 890, true))); // link "Link"
+    assert!(top_events.contains(&(12, 7, 890, true))); // noteref "NoteRef"
+
+    let list_events = extract_events(&s1_elems[1]);
+    assert!(list_events.contains(&(10, 2, 861, false))); // bold "Go"
+    assert!(list_events.contains(&(10, 2, 890, true))); // link "Go"
+
+    let img_list_tbl_events = extract_events(&s1_elems[3]);
+    assert!(img_list_tbl_events.contains(&(0, 4, 862, false))); // italic "Jump"
+    assert!(img_list_tbl_events.contains(&(0, 4, 890, true))); // link "Jump"
+
+    // 4. Verify $617 yj.note emitted for table noteref
+    let saw_yj_note = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_AUXILIARY_DATA)
+        .any(|ent| {
+            let vals = crate::ion::IonReader::new(&ent.data).decode_all().unwrap();
+            matches!(&vals[0], IonValue::Struct(f) if f.iter().any(|(k, _)| *k == 617))
+        });
+    assert!(saw_yj_note, "Table noteref must emit $617 yj.note popup");
+
+    // 5. Verify WordWiseBuilder UTF-16 PID parity across tables, emojis, lists, and post-table paragraph
+    let mut ww =
+        crate::enhancements::WordWiseBuilder::new("TESTASIN3A", "CR!STAGE3A", "en", "en", "rev1")
+            .with_pacing(crate::enhancements::WordWisePacingConfig {
+                max_difficulty_level: 1,
+                min_distance: 0,
+                max_glosses_per_window: 100,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 1000,
+                window_size: 800,
+            });
+    let gloss_count = ww.generate_from_book(&book);
+    assert_eq!(gloss_count, 3);
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    ww.populate_connection(&mut conn).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT start FROM glosses ORDER BY start ASC")
+        .unwrap();
+    let starts: Vec<usize> = stmt
+        .query_map([], |row| row.get::<_, i64>(0).map(|v| v as usize))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    // Expected running PIDs:
+    // cover section: 1 (root) + 1 (cover img) = 2
+    // sec1 root = PID 2, so sec1 blocks start at PID 3:
+    // top_table: "BoldLink 🚀\tNoteRef\nameliorate\tEnd" => UTF-16 len = 12 + 7 + 1 + 10 + 1 + 3 = 34
+    //   "ameliorate" starts at 3 + 20 = 23 == td10_pid
+    // list_no_img: "ListIntro\nGo 😀\tCellAnc" => UTF-16 len = 9 + 1 + 5 + 1 + 7 = 23
+    // list_with_img: img (1 PID) + tbl_in_img_list ("Jump 🚀\tjaundiced" => 4 + 1 + 2 + 1 + 9 = 17)
+    //   tbl_in_img_list starts at 3 + 34 + 23 + 1 = 61; "jaundiced" anchor is at 61 + 8 = 69 == img_list_tbl_pid
+    // p_after: starts at 3 + 34 + 23 + 1 + 17 = 78; "abstruse" at 78 + 3 = 81
+    assert_eq!(img_list_tbl_pid, 3 + 34 + 23 + 1 + 8);
+    assert_eq!(starts, vec![td10_pid, img_list_tbl_pid, 81]);
+}
+
+#[test]
+fn test_stage3a_synthetic_table_empty_cell_spans_packages_identically() {
+    let mut book = BookIR::default();
+    book.metadata.title = "Synthetic Empty CellSpans".to_string();
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Ch 1".to_string(),
+        blocks: vec![
+            Block::Table {
+                id: "syn_top".to_string(),
+                rows: vec![
+                    vec!["Alpha".to_string(), "Beta".to_string()],
+                    vec!["Gamma".to_string(), "Delta".to_string()],
+                ],
+                cell_spans: Vec::new(),
+            },
+            Block::List {
+                id: "syn_list".to_string(),
+                ordered: false,
+                items: vec![vec![Block::Table {
+                    id: "syn_nested".to_string(),
+                    rows: vec![vec!["One".to_string(), "Two".to_string()]],
+                    cell_spans: Vec::new(),
+                }]],
+            },
+        ],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("Synthetic empty cell_spans table must package cleanly");
+    let raw_kfx = buf.into_inner();
+    let local_symbols = decode_local_symbols_from_kfx_bytes(&raw_kfx);
+
+    crate::validator::KfxPreflightValidator::new(&packager.entities, Some(&local_symbols))
+        .validate_container()
+        .expect("Synthetic table container must pass preflight validation");
+
+    let features = extract_content_feature_keys(&packager.entities);
+    assert!(!features.iter().any(|k| k == "yj_table"));
+    assert!(!features.iter().any(|k| k == "yj_table_viewer"));
+    assert!(
+        !packager
+            .entities
+            .iter()
+            .any(|e| e.chunk_type == SYM_STYLE && e.entity_id == 890),
+        "Synthetic table without links must not emit style_link (890)"
+    );
+
+    let content_texts: Vec<String> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_CONTENT)
+        .flat_map(|ent| {
+            let vals = crate::ion::IonReader::new(&ent.data).decode_all().unwrap();
+            if let IonValue::Struct(cf) = &vals[0]
+                && let Some((_, IonValue::List(segs))) = cf.iter().find(|(k, _)| *k == 146)
+            {
+                segs.iter()
+                    .filter_map(|s| match s {
+                        IonValue::String(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+    assert_eq!(content_texts, vec!["Alpha\tBeta\nGamma\tDelta", "One\tTwo"]);
+}
+
+#[test]
+fn test_stage3b_image_links_resolved_list_fallback_orphan_footnote_and_broken() {
+    use image::{ImageBuffer, Rgb};
+
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(16, 16);
+    let mut png_bytes = Cursor::new(Vec::new());
+    img.write_to(&mut png_bytes, image::ImageFormat::Png)
+        .unwrap();
+    let png_vec = png_bytes.into_inner();
+
+    let mut book = BookIR::default();
+    book.metadata.title = "Stage 3B Image Links".to_string();
+    book.metadata.language = "en".to_string();
+    book.metadata.cover_image_id = Some("cover_img.png".to_string());
+    book.resources.insert(
+        "cover_img.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "cover_img.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: png_vec.clone(),
+        },
+    );
+    book.resources.insert(
+        "fig1.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "fig1.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: png_vec.clone(),
+        },
+    );
+    book.resources.insert(
+        "list_fig.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "list_fig.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: png_vec,
+        },
+    );
+    book.footnotes.insert(
+        "fn_img_orphan".to_string(),
+        "Orphan endnote reached from list image link.".to_string(),
+    );
+
+    // sec1: image-only-link section (verifies $419 $255 optional_dependencies even with zero text links!)
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Image Only Link".to_string(),
+        blocks: vec![Block::Image {
+            id: "img_only_link".to_string(),
+            resource_id: "fig1.png".to_string(),
+            alt: Some("Long descriptive alt ".repeat(20)),
+            width: Some(16),
+            height: Some(16),
+            href: Some("sec3#target_p".to_string()),
+        }],
+    });
+
+    // sec2: missing-resource fallback with non-BMP emoji + list-nested image + broken/blocked image links + WordWise paragraph
+    let missing_alt = "Missing \u{1F680} alt"; // 14 UTF-16 code units, 13 chars
+    book.sections.push(Section {
+        id: "sec2".to_string(),
+        title: "Mixed Images".to_string(),
+        blocks: vec![
+            Block::Image {
+                id: "img_missing".to_string(),
+                resource_id: "does_not_exist.png".to_string(),
+                alt: Some(missing_alt.to_string()),
+                width: None,
+                height: None,
+                href: Some("https://example.com/missing-fig".to_string()),
+            },
+            Block::List {
+                id: "list_imgs".to_string(),
+                ordered: false,
+                items: vec![
+                    vec![Block::Image {
+                        id: "img_in_list".to_string(),
+                        resource_id: "list_fig.png".to_string(),
+                        alt: Some("List Fig".to_string()),
+                        width: Some(16),
+                        height: Some(16),
+                        href: Some("#fn_img_orphan".to_string()),
+                    }],
+                    vec![Block::Image {
+                        id: "img_broken".to_string(),
+                        resource_id: "fig1.png".to_string(),
+                        alt: None,
+                        width: Some(16),
+                        height: Some(16),
+                        href: Some("missing.xhtml#nope".to_string()),
+                    }],
+                    vec![Block::Image {
+                        id: "img_blocked".to_string(),
+                        resource_id: "fig1.png".to_string(),
+                        alt: None,
+                        width: Some(16),
+                        height: Some(16),
+                        href: Some("javascript:alert(1)".to_string()),
+                    }],
+                ],
+            },
+            Block::Paragraph {
+                id: "p_after_imgs".to_string(),
+                spans: vec![TextSpan {
+                    text: "An abstruse image epilogue.".to_string(),
+                    ..Default::default()
+                }],
+                style: None,
+            },
+        ],
+    });
+
+    // sec3: target section
+    book.sections.push(Section {
+        id: "sec3".to_string(),
+        title: "Target".to_string(),
+        blocks: vec![Block::Paragraph {
+            id: "target_p".to_string(),
+            spans: vec![TextSpan {
+                text: "Landing paragraph.".to_string(),
+                anchor_id: Some("target_p".to_string()),
+                ..Default::default()
+            }],
+            style: None,
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("Stage 3B image link packaging must succeed");
+    let raw_kfx = buf.into_inner();
+    let local_symbols = decode_local_symbols_from_kfx_bytes(&raw_kfx);
+
+    crate::validator::KfxPreflightValidator::new(&packager.entities, Some(&local_symbols))
+        .validate_container()
+        .expect("Stage 3B container must pass preflight validation");
+
+    // 1. Cover detection preserved: cover_image in $490 + cover section prepended
+    let cover_meta = extract_kindle_title_metadata_string(&packager.entities, "cover_image");
+    assert!(
+        cover_meta.is_some(),
+        "Cover metadata must remain intact with Stage 3B linked images"
+    );
+
+    // Storylines: [0]=cover, [1]=sec1 (image-only link), [2]=sec2 (missing, list_fig, broken, blocked, p), [3]=sec3, [4]=endnotes
+    let storylines: Vec<&KfxEntity> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_STORYLINE)
+        .collect();
+    assert_eq!(storylines.len(), 5);
+
+    let sym_content_list = KfxSymbol::ContentList as u32;
+    let sym_type = KfxSymbol::Type as u32;
+    let sym_image = KfxSymbol::Image as u32;
+    let sym_text = KfxSymbol::Text as u32;
+    let sym_link_to = KfxSymbol::LinkTo as u32;
+    let sym_style_events = KfxSymbol::StyleEvents as u32;
+    let sym_offset = KfxSymbol::Offset as u32;
+    let sym_length = KfxSymbol::Length as u32;
+    let sym_style = KfxSymbol::Style as u32;
+
+    // 2. sec1 image-only-link $271 image has $179 link_to AND $419 $255 optional_dependencies
+    let s1_vals = crate::ion::IonReader::new(&storylines[1].data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(s1_root) = &s1_vals[0] else {
+        panic!("sec1 storyline");
+    };
+    let (_, IonValue::List(s1_elems)) = s1_root
+        .iter()
+        .find(|(k, _)| *k == sym_content_list)
+        .unwrap()
+    else {
+        panic!("sec1 content_list");
+    };
+    assert_eq!(s1_elems.len(), 1);
+    let IonValue::Struct(s1_img) = &s1_elems[0] else {
+        panic!("s1 img");
+    };
+    assert!(
+        s1_img
+            .iter()
+            .any(|(k, v)| *k == sym_type && *v == IonValue::Symbol(sym_image))
+    );
+    let s1_anchor_sym = match s1_img
+        .iter()
+        .find(|(k, _)| *k == sym_link_to)
+        .expect("sec1 $271 image must carry $179 link_to")
+        .1
+    {
+        IonValue::Symbol(s) => s,
+        _ => panic!("link_to must be Symbol"),
+    };
+
+    let sec_eids: Vec<u32> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_SECTION)
+        .map(|e| e.entity_id)
+        .collect();
+    assert_eq!(sec_eids.len(), 5);
+    let sec1_sid = sec_eids[1];
+    let cem = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == KfxSymbol::ContainerEntityMap as u32)
+        .expect("$419 cem");
+    let cem_vals = crate::ion::IonReader::new(&cem.data).decode_all().unwrap();
+    let cem_inner = match &cem_vals[0] {
+        IonValue::Annotated(_, inner) => inner.as_ref(),
+        other => other,
+    };
+    let mut sec1_has_opt_dep = false;
+    if let IonValue::Struct(cf) = cem_inner
+        && let Some((_, IonValue::List(deps))) = cf
+            .iter()
+            .find(|(k, _)| *k == KfxSymbol::EntityDependencies as u32)
+    {
+        for dep in deps {
+            if let IonValue::Struct(df) = dep
+                && df
+                    .iter()
+                    .any(|(k, v)| *k == 155 && *v == IonValue::Symbol(sec1_sid))
+                && let Some((_, IonValue::List(opt))) = df
+                    .iter()
+                    .find(|(k, _)| *k == KfxSymbol::OptionalDependencies as u32)
+                && opt.contains(&IonValue::Symbol(s1_anchor_sym))
+            {
+                sec1_has_opt_dep = true;
+            }
+        }
+    }
+    assert!(
+        sec1_has_opt_dep,
+        "Image-only-link section must emit $419 $255 optional_dependencies for $271 link_to anchor"
+    );
+
+    // 3. sec2 elements: [0]=missing_fallback($269), [1]=list_fig($271 linked to endnote), [2]=broken($271 unlinked), [3]=blocked($271 unlinked), [4]=p_after($269)
+    let s2_vals = crate::ion::IonReader::new(&storylines[2].data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(s2_root) = &s2_vals[0] else {
+        panic!("sec2 storyline");
+    };
+    let (_, IonValue::List(s2_elems)) = s2_root
+        .iter()
+        .find(|(k, _)| *k == sym_content_list)
+        .unwrap()
+    else {
+        panic!("sec2 content_list");
+    };
+    assert_eq!(s2_elems.len(), 5);
+
+    // Missing-resource fallback $269 text carries [0, 14) $142 link run (UTF-16 len of "Missing 🚀 alt")
+    let IonValue::Struct(missing_elem) = &s2_elems[0] else {
+        panic!("missing fallback elem");
+    };
+    assert!(
+        missing_elem
+            .iter()
+            .any(|(k, v)| *k == sym_type && *v == IonValue::Symbol(sym_text))
+    );
+    let (_, IonValue::List(missing_evs)) = missing_elem
+        .iter()
+        .find(|(k, _)| *k == sym_style_events)
+        .expect("Missing-resource linked image fallback must emit $142 style_events")
+    else {
+        panic!("style_events must be IonValue::List");
+    };
+    assert_eq!(missing_evs.len(), 1);
+    let IonValue::Struct(ev_f) = &missing_evs[0] else {
+        panic!("ev struct");
+    };
+    assert!(
+        ev_f.iter()
+            .any(|(k, v)| *k == sym_offset && *v == IonValue::Int(0))
+    );
+    assert!(
+        ev_f.iter()
+            .any(|(k, v)| *k == sym_length && *v == IonValue::Int(14))
+    );
+    assert!(
+        ev_f.iter()
+            .any(|(k, v)| *k == sym_style && *v == IonValue::Symbol(890))
+    );
+    assert!(ev_f.iter().any(|(k, _)| *k == sym_link_to));
+
+    // List-nested image linking to orphan footnote emits $271 image with $179 link_to + endnote anchor target
+    let IonValue::Struct(list_img_elem) = &s2_elems[1] else {
+        panic!("list_img_elem");
+    };
+    assert!(
+        list_img_elem
+            .iter()
+            .any(|(k, v)| *k == sym_type && *v == IonValue::Symbol(sym_image))
+    );
+    assert!(list_img_elem.iter().any(|(k, _)| *k == sym_link_to));
+    assert!(
+        packager
+            .anchor_targets
+            .contains_key(&("endnotes".to_string(), "fn_img_orphan".to_string())),
+        "Orphan footnote linked from list image must synthesize endnotes target"
+    );
+
+    // Broken & blocked image links degrade cleanly to unlinked $271 image elements (no $179 link_to)
+    for idx in [2usize, 3usize] {
+        let IonValue::Struct(unlinked_img) = &s2_elems[idx] else {
+            panic!("unlinked_img");
+        };
+        assert!(
+            unlinked_img
+                .iter()
+                .any(|(k, v)| *k == sym_type && *v == IonValue::Symbol(sym_image))
+        );
+        assert!(
+            !unlinked_img.iter().any(|(k, _)| *k == sym_link_to),
+            "Broken/blocked image link at elem {} must NOT emit $179 link_to",
+            idx
+        );
+    }
+
+    // 4. Verify $550 location_map clamps all image_block_eids offsets to 0
+    let loc_map = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == 550)
+        .expect("$550 missing");
+    let loc_vals = crate::ion::IonReader::new(&loc_map.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::List(l_wrap) = &loc_vals[0] else {
+        panic!("$550 list");
+    };
+    let IonValue::Struct(lf) = &l_wrap[0] else {
+        panic!("$550 struct");
+    };
+    let Some((_, IonValue::List(entries))) = lf.iter().find(|(k, _)| *k == 182) else {
+        panic!("$550 entries");
+    };
+    for entry in entries {
+        if let IonValue::Struct(ef) = entry
+            && let Some((_, IonValue::Int(eid))) = ef.iter().find(|(k, _)| *k == 155)
+            && packager.image_block_eids.contains(&(*eid as u32))
+        {
+            let off = ef.iter().find(|(k, _)| *k == 143).map(|(_, v)| v);
+            assert_eq!(
+                off,
+                Some(&IonValue::Int(0)),
+                "Image block EID {} in $550 must clamp offset to 0",
+                eid
+            );
+        }
+    }
+
+    // 5. Verify WordWiseBuilder PID parity after resolved 1-PID image & 14-PID missing fallback
+    let mut ww =
+        crate::enhancements::WordWiseBuilder::new("TESTASIN3B", "CR!STAGE3B", "en", "en", "rev1")
+            .with_pacing(crate::enhancements::WordWisePacingConfig {
+                max_difficulty_level: 1,
+                min_distance: 0,
+                max_glosses_per_window: 100,
+                frontmatter_skip_chars: 0,
+                max_total_glosses: 1000,
+                window_size: 800,
+            });
+    let gloss_count = ww.generate_from_book(&book);
+    assert_eq!(gloss_count, 1);
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    ww.populate_connection(&mut conn).unwrap();
+    let start: usize = conn
+        .query_row("SELECT start FROM glosses", [], |r| {
+            r.get::<_, i64>(0).map(|v| v as usize)
+        })
+        .unwrap();
+    // Cover section: 1 (root) + 1 (cover img) = 2
+    // sec1: 1 (root) + 1 (img_only_link, 1 PID despite 420-char alt) = 2
+    // sec2: 1 (root) + 14 (img_missing UTF-16) + 3 (3x resolved $271 in list_imgs) + "An " (3) = 21 => total = 2 + 2 + 21 = 25
+    assert_eq!(start, 25);
+}
+
+#[test]
+fn test_stage3c_link_state_styles_dynamic_sid_891_coalescing_dedup_and_broken_suppression() {
+    let css_src = r#"
+        a:link { color: #114488; text-decoration: none; }
+        a:visited { color: #800080; font-style: italic; }
+        .ext:link { color: #114488; text-decoration: none; }
+        a.btn:visited { color: #226633; font-weight: bold; }
+        a.nearblack:link { color: #000000; font-weight: bold; }
+        a.broken_only:link { color: #AA2211; text-decoration: underline; }
+    "#;
+    let mut css = crate::css::CssStylesheet::new();
+    css.add_css(css_src);
+    let href_to_id = std::collections::HashMap::new();
+
+    let xhtml = r##"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <p id="p_links"><a href="#target_anchor">One</a><a class="ext" href="#target_anchor">Two</a><a class="btn" href="#target_anchor">Btn</a> <a class="nearblack" href="https://example.org">Blk</a> <a class="broken_only" href="missing.xhtml#bad">Dead</a></p>
+  <p id="target_anchor">Target destination.</p>
+</body>
+</html>"##;
+
+    let (blocks, footnotes) =
+        crate::epub::EpubReader::parse_xhtml_with_css(xhtml, &href_to_id, &css);
+    let mut book = BookIR::default();
+    book.metadata.title = "Stage 3C Link Styles".to_string();
+    book.footnotes = footnotes;
+    book.sections.push(Section {
+        id: "sec1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks,
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager
+        .package(&mut buf)
+        .expect("Stage 3C packaging must succeed");
+    let raw_kfx = buf.into_inner();
+    let local_symbols = decode_local_symbols_from_kfx_bytes(&raw_kfx);
+
+    crate::validator::KfxPreflightValidator::new(&packager.entities, Some(&local_symbols))
+        .validate_container()
+        .expect("Stage 3C container must pass preflight validation");
+
+    // 1. Verify hardcoded SIDs 852..=890 intact (style_ruby == 872, style_link == 890)
+    assert_eq!(local_symbols.get_id("style_ruby"), Some(872));
+    assert_eq!(local_symbols.get_id("style_link"), Some(890));
+    assert!(
+        packager
+            .entities
+            .iter()
+            .any(|e| e.chunk_type == SYM_STYLE && e.entity_id == 890)
+    );
+
+    // 2. Inspect dynamic >= 891 $157 style entities
+    let sym_style_name = KfxSymbol::StyleName as u32;
+    let sym_name = KfxSymbol::Name as u32;
+    let sym_text_color = KfxSymbol::TextColor as u32;
+    let sym_underline = KfxSymbol::Underline as u32;
+    let sym_font_weight = KfxSymbol::FontWeight as u32;
+    let sym_font_style = KfxSymbol::FontStyle as u32;
+    let sym_bold = KfxSymbol::Bold as u32;
+    let sym_italic = KfxSymbol::Italic as u32;
+
+    let dynamic_styles: Vec<(u32, Vec<(u32, IonValue)>)> = packager
+        .entities
+        .iter()
+        .filter(|e| e.chunk_type == SYM_STYLE && e.entity_id >= 891)
+        .map(|e| {
+            let vals = crate::ion::IonReader::new(&e.data).decode_all().unwrap();
+            let IonValue::Struct(fields) = &vals[0] else {
+                panic!("Dynamic style must be Struct");
+            };
+            (e.entity_id, fields.clone())
+        })
+        .collect();
+
+    // Expected deduplicated dynamic styles (4 total):
+    //   unvisited: (underline=false, color=0x114488) [shared by a:link and .ext:link!]
+    //   unvisited: (bold=true, no text_color because #000000 filtered!) [a.nearblack:link]
+    //   visited:   (italic=true, color=0x800080) [a:visited]
+    //   visited:   (bold=true, italic=true, color=0x226633) [a.btn:visited]
+    //   broken_only (#AA2211) MUST NOT be emitted!
+    assert_eq!(
+        dynamic_styles.len(),
+        4,
+        "Expected 4 deduplicated dynamic >=891 styles (and zero orphaned broken-link styles), got {:?}",
+        dynamic_styles
+    );
+
+    let mut colors_seen = Vec::new();
+    let mut saw_nearblack_bold_only = false;
+    for (eid, fields) in &dynamic_styles {
+        let sym_name_str = local_symbols
+            .names
+            .get((*eid as usize).saturating_sub(crate::symbols::FIRST_LOCAL_SYMBOL_ID as usize))
+            .expect("symbol name for >=891");
+        assert!(
+            sym_name_str.starts_with("style_link_unvisited_")
+                || sym_name_str.starts_with("style_link_visited_"),
+            "Unexpected dynamic style name {}",
+            sym_name_str
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| *k == sym_style_name && *v == IonValue::Symbol(*eid)),
+            "Dynamic $157 style {} must use $173 style_name",
+            eid
+        );
+        assert!(
+            !fields.iter().any(|(k, _)| *k == sym_name),
+            "Dynamic $157 style {} must NEVER emit $4 name",
+            eid
+        );
+        if let Some((_, v)) = fields.iter().find(|(k, _)| *k == sym_text_color) {
+            let IonValue::Int(rgb) = v else {
+                panic!("$19 text_color must be IonValue::Int");
+            };
+            assert!(*rgb != 0x000000, "Near-black #000000 must be filtered out");
+            assert!(
+                *rgb != 0xAA2211,
+                "Broken link color #AA2211 must NEVER be emitted"
+            );
+            colors_seen.push(*rgb);
+        } else if fields
+            .iter()
+            .any(|(k, v)| *k == sym_font_weight && *v == IonValue::Symbol(sym_bold))
+            && !fields
+                .iter()
+                .any(|(k, v)| *k == sym_font_style && *v == IonValue::Symbol(sym_italic))
+        {
+            saw_nearblack_bold_only = true;
+            assert!(
+                fields
+                    .iter()
+                    .any(|(k, v)| *k == sym_underline && *v == IonValue::Bool(false)),
+                "a.nearblack:link inherits text-decoration: none ($23: false) from a:link"
+            );
+        }
+    }
+    colors_seen.sort_unstable();
+    assert_eq!(colors_seen, vec![0x114488, 0x226633, 0x800080]);
+    assert!(
+        saw_nearblack_bold_only,
+        "a.nearblack:link must preserve bold while omitting filtered #000000 text_color"
+    );
+
+    // 3. Inspect $142 style_events coalescing & $576/$577 attachment on p_links
+    // "One" (0..3) + "Two" (3..6) share identical (anchor, unvisited, visited) -> coalesced to (0, 6)!
+    // "Btn" (6..9) shares same anchor but has different visited style -> separate event (6, 3)!
+    // "Blk" (10..13) -> separate event (10, 3)!
+    // "Dead" (14..18) -> broken link, NO $142 link event!
+    let story = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .unwrap();
+    let s_vals = crate::ion::IonReader::new(&story.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(s_root) = &s_vals[0] else {
+        panic!("storyline");
+    };
+    let (_, IonValue::List(elems)) = s_root.iter().find(|(k, _)| *k == 146).unwrap() else {
+        panic!("content_list");
+    };
+    let IonValue::Struct(p_links) = &elems[0] else {
+        panic!("p_links");
+    };
+    let (_, IonValue::List(evs)) = p_links.iter().find(|(k, _)| *k == 142).unwrap() else {
+        panic!("style_events");
+    };
+
+    #[derive(Debug)]
+    struct LinkRun {
+        off: i64,
+        len: i64,
+        anchor: u32,
+        unvisited: Option<u32>,
+        visited: Option<u32>,
+    }
+
+    let sym_link_visited = KfxSymbol::LinkVisitedStyle as u32;
+    let sym_link_unvisited = KfxSymbol::LinkUnvisitedStyle as u32;
+    let link_runs: Vec<LinkRun> = evs
+        .iter()
+        .filter_map(|ev| {
+            let IonValue::Struct(f) = ev else {
+                return None;
+            };
+            let anchor = match f.iter().find(|(k, _)| *k == 179)?.1 {
+                IonValue::Symbol(s) => s,
+                _ => return None,
+            };
+            let off = match f.iter().find(|(k, _)| *k == 143)?.1 {
+                IonValue::Int(n) => n,
+                _ => return None,
+            };
+            let len = match f.iter().find(|(k, _)| *k == 144)?.1 {
+                IonValue::Int(n) => n,
+                _ => return None,
+            };
+            let unvisited = f
+                .iter()
+                .find(|(k, _)| *k == sym_link_unvisited)
+                .and_then(|(_, v)| match v {
+                    IonValue::Symbol(s) => Some(*s),
+                    _ => None,
+                });
+            let visited =
+                f.iter()
+                    .find(|(k, _)| *k == sym_link_visited)
+                    .and_then(|(_, v)| match v {
+                        IonValue::Symbol(s) => Some(*s),
+                        _ => None,
+                    });
+            Some(LinkRun {
+                off,
+                len,
+                anchor,
+                unvisited,
+                visited,
+            })
+        })
+        .collect();
+
+    assert_eq!(
+        link_runs.len(),
+        3,
+        "Expected 3 link runs ([OneTwo], [Btn], [Blk]), got {:?}",
+        link_runs
+    );
+    assert_eq!((link_runs[0].off, link_runs[0].len), (0, 6)); // Coalesced "OneTwo"
+    assert_eq!((link_runs[1].off, link_runs[1].len), (6, 3)); // Separate "Btn"
+    assert_eq!((link_runs[2].off, link_runs[2].len), (10, 3)); // "Blk"
+    assert_eq!(link_runs[0].anchor, link_runs[1].anchor); // "OneTwo" & "Btn" share target anchor
+    assert_eq!(link_runs[0].unvisited, link_runs[1].unvisited); // Share unvisited style
+    assert_ne!(
+        link_runs[0].visited, link_runs[1].visited,
+        "Adjacent same-target links with distinct :visited classes must keep distinct $576 styles"
+    );
+    assert!(link_runs[0].unvisited.is_some_and(|s| s >= 891));
+    assert!(link_runs[0].visited.is_some_and(|s| s >= 891));
+    assert!(link_runs[1].visited.is_some_and(|s| s >= 891));
+    assert!(link_runs[2].unvisited.is_some_and(|s| s >= 891));
+}
+
+#[test]
+fn test_stage3c_zero_link_and_no_pseudo_css_stability() {
+    // 1. Zero-link book with :link/:visited CSS and <a id="anc1">NoHref</a> must emit zero anchors, zero >=891, zero $576/$577
+    let mut css_pseudo = crate::css::CssStylesheet::new();
+    css_pseudo.add_css("a:link { color: #114488; } a:visited { color: #800080; }");
+    let xhtml_no_href = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p><a id="anc1">NoHref</a> plain text.</p></body></html>"#;
+    let (blocks_zero, _) = crate::epub::EpubReader::parse_xhtml_with_css(
+        xhtml_no_href,
+        &std::collections::HashMap::new(),
+        &css_pseudo,
+    );
+    let mut zero_book = BookIR::default();
+    zero_book.metadata.title = "Zero Link Pseudo CSS".to_string();
+    zero_book.sections.push(Section {
+        id: "z1".to_string(),
+        title: "Ch 1".to_string(),
+        blocks: blocks_zero,
+    });
+    let mut zero_pkg = KfxPackager::new(&zero_book, "EBOK");
+    let mut zero_buf = Cursor::new(Vec::new());
+    zero_pkg.package(&mut zero_buf).unwrap();
+    let zero_syms = decode_local_symbols_from_kfx_bytes(&zero_buf.into_inner());
+    crate::validator::KfxPreflightValidator::new(&zero_pkg.entities, Some(&zero_syms))
+        .validate_container()
+        .unwrap();
+    assert!(!zero_pkg.entities.iter().any(|e| e.chunk_type == SYM_ANCHOR));
+    assert!(
+        !zero_pkg
+            .entities
+            .iter()
+            .any(|e| e.chunk_type == SYM_STYLE && e.entity_id >= 890)
+    );
+
+    // 2. Book with links but NO :link/:visited CSS must emit style_link (890), zero >= 891 styles, zero $576/$577
+    let mut css_plain = crate::css::CssStylesheet::new();
+    css_plain.add_css("p { font-style: italic; }");
+    let xhtml_links = r##"<html xmlns="http://www.w3.org/1999/xhtml"><body><p id="t">Go <a href="#t">back</a>.</p></body></html>"##;
+    let (blocks_plain, _) = crate::epub::EpubReader::parse_xhtml_with_css(
+        xhtml_links,
+        &std::collections::HashMap::new(),
+        &css_plain,
+    );
+    let mut plain_book = BookIR::default();
+    plain_book.metadata.title = "Links Without Pseudo CSS".to_string();
+    plain_book.sections.push(Section {
+        id: "p1".to_string(),
+        title: "Ch 1".to_string(),
+        blocks: blocks_plain,
+    });
+    let mut plain_pkg = KfxPackager::new(&plain_book, "EBOK");
+    let mut plain_buf = Cursor::new(Vec::new());
+    plain_pkg.package(&mut plain_buf).unwrap();
+    let plain_syms = decode_local_symbols_from_kfx_bytes(&plain_buf.into_inner());
+    crate::validator::KfxPreflightValidator::new(&plain_pkg.entities, Some(&plain_syms))
+        .validate_container()
+        .unwrap();
+
+    assert!(
+        plain_pkg
+            .entities
+            .iter()
+            .any(|e| e.chunk_type == SYM_STYLE && e.entity_id == 890)
+    );
+    assert!(
+        !plain_pkg
+            .entities
+            .iter()
+            .any(|e| e.chunk_type == SYM_STYLE && e.entity_id >= 891),
+        "Links without :link/:visited CSS must emit zero >= 891 dynamic styles"
+    );
+    let story = plain_pkg
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_STORYLINE)
+        .unwrap();
+    let s_vals = crate::ion::IonReader::new(&story.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(s_root) = &s_vals[0] else {
+        panic!("story");
+    };
+    let (_, IonValue::List(elems)) = s_root.iter().find(|(k, _)| *k == 146).unwrap() else {
+        panic!("elems");
+    };
+    let IonValue::Struct(ef) = &elems[0] else {
+        panic!("elem0");
+    };
+    let (_, IonValue::List(evs)) = ef.iter().find(|(k, _)| *k == 142).unwrap() else {
+        panic!("evs");
+    };
+    for ev in evs {
+        if let IonValue::Struct(f) = ev {
+            assert!(
+                !f.iter().any(|(k, _)| *k == 576 || *k == 577),
+                "Links without :link/:visited CSS must emit zero $576/$577 fields"
+            );
+        }
+    }
+}

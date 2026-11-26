@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::css::CssStylesheet;
 use crate::epub::archive::{decode_percent, resolve_zip_path};
+use crate::epub::css_style::sanitize_link_state_css;
 use crate::epub::ruby::RubyState;
 use crate::ir::{Block, TextSpan, UriKind, classify_uri, sanitize_href_whitespace};
 
@@ -31,10 +32,68 @@ enum AnchorScope {
 struct TableFrame {
     id: Option<String>,
     anchor_mark: usize,
+    row_anchor_mark: Option<usize>,
+    cell_anchor_mark: Option<usize>,
     rows: Vec<Vec<String>>,
+    row_spans: Vec<Vec<Vec<TextSpan>>>,
     current_row: Vec<String>,
-    current_cell: String,
+    current_row_spans: Vec<Vec<TextSpan>>,
+    current_cell_text: String,
+    current_cell_spans: Vec<TextSpan>,
     in_cell: bool,
+}
+
+fn trim_cell_spans(spans: &mut Vec<TextSpan>) {
+    for span in spans.iter_mut() {
+        if span.text.is_empty() {
+            continue;
+        }
+        let trimmed = span.text.trim_start();
+        if trimmed.is_empty() {
+            span.text.clear();
+            if span.anchor_id.is_some() {
+                span.href = None;
+                span.style = None;
+            }
+        } else {
+            if trimmed.len() != span.text.len() {
+                span.text = trimmed.to_string();
+            }
+            break;
+        }
+    }
+    for span in spans.iter_mut().rev() {
+        if span.text.is_empty() {
+            continue;
+        }
+        let trimmed = span.text.trim_end();
+        if trimmed.is_empty() {
+            span.text.clear();
+            if span.anchor_id.is_some() {
+                span.href = None;
+                span.style = None;
+            }
+        } else {
+            if trimmed.len() != span.text.len() {
+                span.text = trimmed.to_string();
+            }
+            break;
+        }
+    }
+    spans.retain(|s| !s.text.is_empty() || s.anchor_id.is_some());
+}
+
+#[inline]
+fn cell_has_trailing_non_whitespace(spans: &[TextSpan], pending_text: &str) -> bool {
+    if let Some(ch) = pending_text.chars().last() {
+        return !ch.is_whitespace();
+    }
+    for span in spans.iter().rev() {
+        if let Some(ch) = span.text.chars().last() {
+            return !ch.is_whitespace();
+        }
+    }
+    false
 }
 
 struct BoundedTagStack<T> {
@@ -383,6 +442,8 @@ fn resolve_active_span_attrs(style_stack: &[StyleFrameKind]) -> ActiveSpanAttrs 
                         extra_tokens.retain(|t| !t.starts_with("font_size_"));
                     } else if other.starts_with("color_") {
                         extra_tokens.retain(|t| !t.starts_with("color_"));
+                    } else {
+                        retain_link_state_mutual_exclusion(&mut extra_tokens, other);
                     }
                     if !extra_tokens.iter().any(|t| t == other) {
                         extra_tokens.push(other.to_string());
@@ -443,6 +504,38 @@ fn resolve_active_span_attrs(style_stack: &[StyleFrameKind]) -> ActiveSpanAttrs 
     }
 }
 
+fn retain_link_state_mutual_exclusion(dst: &mut Vec<String>, tok: &str) {
+    for prefix in ["link_unvisited_", "link_visited_"] {
+        if let Some(rest) = tok.strip_prefix(prefix) {
+            match rest {
+                "underline" | "underline_none" => {
+                    dst.retain(|t| {
+                        !matches!(t.strip_prefix(prefix), Some("underline" | "underline_none"))
+                    });
+                }
+                "bold" | "weight_normal" => {
+                    dst.retain(|t| {
+                        !matches!(t.strip_prefix(prefix), Some("bold" | "weight_normal"))
+                    });
+                }
+                "italic" | "style_normal" => {
+                    dst.retain(|t| {
+                        !matches!(t.strip_prefix(prefix), Some("italic" | "style_normal"))
+                    });
+                }
+                r if r.starts_with("color_") => {
+                    dst.retain(|t| {
+                        !t.strip_prefix(prefix)
+                            .is_some_and(|tr| tr.starts_with("color_"))
+                    });
+                }
+                _ => {}
+            }
+            break;
+        }
+    }
+}
+
 fn push_unique_tokens(dst: &mut Vec<String>, tokens: Vec<String>) {
     for tok in tokens {
         if tok.starts_with("align_") {
@@ -453,6 +546,8 @@ fn push_unique_tokens(dst: &mut Vec<String>, tokens: Vec<String>) {
             dst.retain(|t| t != "bold" && t != "font_weight_normal");
         } else if tok == "italic" || tok == "font_style_normal" {
             dst.retain(|t| t != "italic" && t != "font_style_normal");
+        } else {
+            retain_link_state_mutual_exclusion(dst, &tok);
         }
         if !dst.iter().any(|t| t == &tok) {
             dst.push(tok);
@@ -989,53 +1084,182 @@ fn parse_xhtml_core(
         }
     };
 
+    let finish_open_cell = |frame: &mut TableFrame,
+                            style_stack: &mut Vec<StyleFrameKind>,
+                            style_overflow_depth: &mut usize,
+                            pending_anchors: &mut VecDeque<String>| {
+        flush_current_span(
+            &mut frame.current_cell_text,
+            &mut frame.current_cell_spans,
+            style_stack,
+            pending_anchors,
+        );
+        if let Some(mark) = frame.cell_anchor_mark.take()
+            && pending_anchors.len() > mark
+        {
+            let mut rest = pending_anchors.split_off(mark);
+            while let Some(pa) = rest.pop_front() {
+                frame.current_cell_spans.push(TextSpan {
+                    text: String::new(),
+                    style: None,
+                    anchor_id: Some(pa),
+                    href: None,
+                    ruby: None,
+                });
+            }
+        }
+        if let Some(pos) = style_stack.iter().rposition(|f| {
+            matches!(
+                f,
+                StyleFrameKind::BlockBoundary { tag }
+                    if tag.as_slice() == b"td" || tag.as_slice() == b"th"
+            )
+        }) {
+            style_stack.truncate(pos);
+            *style_overflow_depth = 0;
+        }
+        trim_cell_spans(&mut frame.current_cell_spans);
+        let cell_plain: String = frame
+            .current_cell_spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        frame.current_row.push(cell_plain);
+        frame
+            .current_row_spans
+            .push(std::mem::take(&mut frame.current_cell_spans));
+        frame.current_cell_text.clear();
+        frame.in_cell = false;
+        frame.cell_anchor_mark = None;
+    };
+
     let finalize_table_frame = |table_stack: &mut Vec<TableFrame>,
+                                style_stack: &mut Vec<StyleFrameKind>,
+                                style_overflow_depth: &mut usize,
                                 pending_anchors: &mut VecDeque<String>,
                                 in_li: bool,
                                 current_list_item_blocks: &mut Vec<Block>,
                                 blocks: &mut Vec<Block>| {
         if let Some(mut frame) = table_stack.pop() {
             if frame.in_cell {
-                frame
-                    .current_row
-                    .push(frame.current_cell.trim().to_string());
-                frame.current_cell.clear();
-                frame.in_cell = false;
+                finish_open_cell(
+                    &mut frame,
+                    style_stack,
+                    style_overflow_depth,
+                    pending_anchors,
+                );
             }
             if !frame.current_row.is_empty() {
                 frame.rows.push(std::mem::take(&mut frame.current_row));
+                frame
+                    .row_spans
+                    .push(std::mem::take(&mut frame.current_row_spans));
             }
-            // Anchor containment: discard <td id>/<th id>/<tr id> and inner IDs so they never leak out.
-            pending_anchors.truncate(frame.anchor_mark.min(pending_anchors.len()));
+            // Anchor containment: attach remaining table/row/cell IDs to last cell if non-empty,
+            // or discard so they never leak out of the table.
+            let mark = frame.anchor_mark.min(pending_anchors.len());
+            if pending_anchors.len() > mark {
+                let mut rest = pending_anchors.split_off(mark);
+                if let Some(last_cell) = frame.row_spans.last_mut().and_then(|r| r.last_mut()) {
+                    while let Some(pa) = rest.pop_front() {
+                        last_cell.push(TextSpan {
+                            text: String::new(),
+                            style: None,
+                            anchor_id: Some(pa),
+                            href: None,
+                            ruby: None,
+                        });
+                    }
+                }
+            }
+            frame.row_anchor_mark = None;
+            pending_anchors.truncate(mark);
 
             if let Some(parent) = table_stack.last_mut() {
                 if parent.in_cell {
-                    let flattened: String = frame
-                        .rows
+                    flush_current_span(
+                        &mut parent.current_cell_text,
+                        &mut parent.current_cell_spans,
+                        style_stack,
+                        pending_anchors,
+                    );
+                    if let Some(child_id) = frame.id {
+                        parent.current_cell_spans.push(TextSpan {
+                            text: String::new(),
+                            style: None,
+                            anchor_id: Some(child_id),
+                            href: None,
+                            ruby: None,
+                        });
+                    }
+                    let has_non_empty_text = frame
+                        .row_spans
                         .iter()
-                        .map(|row| {
-                            row.iter()
-                                .map(|c| c.trim())
-                                .filter(|c| !c.is_empty())
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        })
-                        .filter(|line| !line.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !flattened.is_empty() {
-                        if !parent.current_cell.is_empty()
-                            && !parent.current_cell.ends_with(char::is_whitespace)
-                        {
-                            parent.current_cell.push(' ');
+                        .any(|r| r.iter().any(|c| c.iter().any(|s| !s.text.is_empty())));
+                    if has_non_empty_text
+                        && cell_has_trailing_non_whitespace(
+                            &parent.current_cell_spans,
+                            &parent.current_cell_text,
+                        )
+                    {
+                        parent.current_cell_spans.push(TextSpan {
+                            text: " ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        });
+                    }
+                    let mut emitted_non_empty_row = false;
+                    for row in frame.row_spans {
+                        let row_has_text = row.iter().any(|c| c.iter().any(|s| !s.text.is_empty()));
+                        if row_has_text && emitted_non_empty_row {
+                            parent.current_cell_spans.push(TextSpan {
+                                text: "\n".to_string(),
+                                style: None,
+                                anchor_id: None,
+                                href: None,
+                                ruby: None,
+                            });
                         }
-                        parent.current_cell.push_str(&flattened);
-                        if !parent.current_cell.ends_with(char::is_whitespace) {
-                            parent.current_cell.push(' ');
+                        let mut emitted_non_empty_cell = false;
+                        for cell in row {
+                            let cell_has_text = cell.iter().any(|s| !s.text.is_empty());
+                            if cell_has_text && emitted_non_empty_cell {
+                                parent.current_cell_spans.push(TextSpan {
+                                    text: " ".to_string(),
+                                    style: None,
+                                    anchor_id: None,
+                                    href: None,
+                                    ruby: None,
+                                });
+                            }
+                            parent.current_cell_spans.extend(cell);
+                            if cell_has_text {
+                                emitted_non_empty_cell = true;
+                            }
                         }
+                        if row_has_text {
+                            emitted_non_empty_row = true;
+                        }
+                    }
+                    if emitted_non_empty_row
+                        && cell_has_trailing_non_whitespace(
+                            &parent.current_cell_spans,
+                            &parent.current_cell_text,
+                        )
+                    {
+                        parent.current_cell_spans.push(TextSpan {
+                            text: " ".to_string(),
+                            style: None,
+                            anchor_id: None,
+                            href: None,
+                            ruby: None,
+                        });
                     }
                 } else {
                     parent.rows.extend(frame.rows);
+                    parent.row_spans.extend(frame.row_spans);
                 }
             } else if !frame.rows.is_empty() {
                 let tbl = Block::Table {
@@ -1043,6 +1267,7 @@ fn parse_xhtml_core(
                         .id
                         .unwrap_or_else(|| format!("table_{}", blocks.len() + 1)),
                     rows: frame.rows,
+                    cell_spans: frame.row_spans,
                 };
                 if in_li {
                     current_list_item_blocks.push(tbl);
@@ -1055,7 +1280,8 @@ fn parse_xhtml_core(
 
     let parse_image_block = |e: &quick_xml::events::BytesStart,
                              total_blocks: usize,
-                             explicit_id: Option<String>|
+                             explicit_id: Option<String>,
+                             link_href: Option<String>|
      -> Option<Block> {
         let mut src = String::new();
         let mut alt = None;
@@ -1103,6 +1329,7 @@ fn parse_xhtml_core(
                 alt,
                 width: None,
                 height: None,
+                href: link_href,
             })
         } else {
             None
@@ -1188,7 +1415,7 @@ fn parse_xhtml_core(
             } else if let Some(top) = table_stack.last_mut()
                 && top.in_cell
             {
-                top.current_cell.push_str(text);
+                top.current_cell_text.push_str(text);
             } else if *in_p || in_heading || in_li {
                 current_span_text.push_str(text);
             } else if !text.trim().is_empty() {
@@ -1229,70 +1456,119 @@ fn parse_xhtml_core(
                             && let Some(top) = table_stack.last_mut()
                         {
                             if top.in_cell {
-                                top.current_row.push(top.current_cell.trim().to_string());
-                                top.current_cell.clear();
-                                top.in_cell = false;
+                                finish_open_cell(
+                                    top,
+                                    &mut style_stack,
+                                    &mut style_overflow_depth,
+                                    &mut pending_anchors,
+                                );
+                            }
+                            let cell_mark = top
+                                .row_anchor_mark
+                                .take()
+                                .map(|rm| rm.min(pending_anchors.len()))
+                                .unwrap_or(pending_anchors.len());
+                            push_pending_anchor(&mut pending_anchors, extract_id_attr(e));
+                            let mut empty_cell_spans = Vec::new();
+                            if pending_anchors.len() > cell_mark {
+                                let mut rest = pending_anchors.split_off(cell_mark);
+                                while let Some(pa) = rest.pop_front() {
+                                    empty_cell_spans.push(TextSpan {
+                                        text: String::new(),
+                                        style: None,
+                                        anchor_id: Some(pa),
+                                        href: None,
+                                        ruby: None,
+                                    });
+                                }
                             }
                             top.current_row.push(String::new());
+                            top.current_row_spans.push(empty_cell_spans);
                         }
                     }
                     b"hr" | b"div" | b"section" => {
-                        if is_anchor_target_tag(local_bytes) {
-                            push_pending_anchor(&mut pending_anchors, extract_id_attr(e));
-                        }
-                        if !inside_cell {
-                            let mut is_page_break = false;
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"class" {
-                                    let val = crate::epub::unescape_attr_value(&attr)
-                                        .to_ascii_lowercase();
-                                    if val.contains("pagebreak") || val.contains("page-break") {
-                                        is_page_break = true;
+                        if !inside_cell || table_overflow_depth == 0 {
+                            if is_anchor_target_tag(local_bytes) {
+                                push_pending_anchor(&mut pending_anchors, extract_id_attr(e));
+                            }
+                            if inside_cell {
+                                if local_bytes == b"hr"
+                                    && let Some(top) = table_stack.last_mut()
+                                {
+                                    flush_current_span(
+                                        &mut top.current_cell_text,
+                                        &mut top.current_cell_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    if cell_has_trailing_non_whitespace(
+                                        &top.current_cell_spans,
+                                        &top.current_cell_text,
+                                    ) {
+                                        top.current_cell_spans.push(TextSpan {
+                                            text: " ".to_string(),
+                                            style: None,
+                                            anchor_id: None,
+                                            href: None,
+                                            ruby: None,
+                                        });
                                     }
-                                } else if attr.key.as_ref() == b"style" {
-                                    let val = crate::epub::unescape_attr_value(&attr);
-                                    let tokens = sanitize_css_style(&val);
-                                    if tokens.iter().any(|t| {
-                                        t == "page_break_before" || t == "page_break_after"
-                                    }) {
-                                        is_page_break = true;
+                                    top.current_cell_text.push_str("---");
+                                }
+                            } else {
+                                let mut is_page_break = false;
+                                for attr in e.attributes().flatten() {
+                                    if attr.key.as_ref() == b"class" {
+                                        let val = crate::epub::unescape_attr_value(&attr)
+                                            .to_ascii_lowercase();
+                                        if val.contains("pagebreak") || val.contains("page-break") {
+                                            is_page_break = true;
+                                        }
+                                    } else if attr.key.as_ref() == b"style" {
+                                        let val = crate::epub::unescape_attr_value(&attr);
+                                        let tokens = sanitize_css_style(&val);
+                                        if tokens.iter().any(|t| {
+                                            t == "page_break_before" || t == "page_break_after"
+                                        }) {
+                                            is_page_break = true;
+                                        }
                                     }
                                 }
-                            }
-                            if is_page_break {
-                                pending_page_break = true;
-                            } else if local_bytes == b"hr" {
-                                flush_open_paragraph(
-                                    &mut in_p,
-                                    &mut p_style,
-                                    &mut p_has_dropcap,
-                                    &mut p_dropcap_l2,
-                                    &mut current_span_text,
-                                    &mut current_spans,
-                                    &mut style_stack,
-                                    &mut pending_anchors,
-                                    &mut block_anchor_marks,
-                                    in_li,
-                                    &mut current_list_item_blocks,
-                                    &mut blocks,
-                                );
-                                flush_open_heading(
-                                    &mut in_heading,
-                                    heading_level,
-                                    &mut heading_style,
-                                    &mut current_span_text,
-                                    &mut current_spans,
-                                    &mut style_stack,
-                                    &mut pending_anchors,
-                                    &mut block_anchor_marks,
-                                    in_li,
-                                    &mut current_list_item_blocks,
-                                    &mut blocks,
-                                );
-                                if in_li {
-                                    current_list_item_blocks.push(Block::HorizontalRule);
-                                } else {
-                                    blocks.push(Block::HorizontalRule);
+                                if is_page_break {
+                                    pending_page_break = true;
+                                } else if local_bytes == b"hr" {
+                                    flush_open_paragraph(
+                                        &mut in_p,
+                                        &mut p_style,
+                                        &mut p_has_dropcap,
+                                        &mut p_dropcap_l2,
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                        &mut block_anchor_marks,
+                                        in_li,
+                                        &mut current_list_item_blocks,
+                                        &mut blocks,
+                                    );
+                                    flush_open_heading(
+                                        &mut in_heading,
+                                        heading_level,
+                                        &mut heading_style,
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                        &mut block_anchor_marks,
+                                        in_li,
+                                        &mut current_list_item_blocks,
+                                        &mut blocks,
+                                    );
+                                    if in_li {
+                                        current_list_item_blocks.push(Block::HorizontalRule);
+                                    } else {
+                                        blocks.push(Block::HorizontalRule);
+                                    }
                                 }
                             }
                         }
@@ -1309,39 +1585,56 @@ fn parse_xhtml_core(
                             && let Some(top) = table_stack.last_mut()
                             && top.in_cell
                         {
-                            top.current_cell.push('\n');
+                            top.current_cell_text.push('\n');
                         } else if !inside_cell {
                             current_span_text.push('\n');
                         }
                     }
                     b"a" => {
-                        if !inside_cell {
+                        if !inside_cell || table_overflow_depth == 0 {
                             let mut anchor = None;
-                            let mut href = None;
+                            let mut raw_href = None;
+                            let mut raw_xlink_href = None;
                             for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name" {
+                                let key = attr.key.as_ref();
+                                if key == b"id" || key == b"name" {
                                     let v =
                                         crate::epub::unescape_attr_value(&attr).trim().to_string();
                                     if !v.is_empty() {
                                         anchor = Some(v);
                                     }
-                                } else if attr.key.as_ref() == b"href" {
+                                } else if key == b"href" {
                                     let v = crate::epub::unescape_attr_value(&attr);
                                     if !v.is_empty() {
-                                        href = Some(v);
+                                        raw_href = Some(v);
+                                    }
+                                } else if key == b"xlink:href" {
+                                    let v = crate::epub::unescape_attr_value(&attr);
+                                    if !v.is_empty() {
+                                        raw_xlink_href = Some(v);
                                     }
                                 }
                             }
                             if anchor.is_some() {
-                                let norm_href =
-                                    href.and_then(|h| normalize_span_href(&h, link_ctx));
+                                let norm_href = raw_href
+                                    .or(raw_xlink_href)
+                                    .and_then(|h| normalize_span_href(&h, link_ctx));
+                                let (target_text, target_spans) = if inside_cell {
+                                    if let Some(top) = table_stack.last_mut() {
+                                        (&mut top.current_cell_text, &mut top.current_cell_spans)
+                                    } else {
+                                        (&mut current_span_text, &mut current_spans)
+                                    }
+                                } else {
+                                    (&mut current_span_text, &mut current_spans)
+                                };
                                 flush_current_span(
-                                    &mut current_span_text,
-                                    &mut current_spans,
+                                    target_text,
+                                    target_spans,
                                     &mut style_stack,
                                     &mut pending_anchors,
                                 );
-                                current_spans.push(TextSpan {
+                                target_spans.push(TextSpan {
                                     text: String::new(),
                                     style: None,
                                     anchor_id: anchor,
@@ -1353,28 +1646,99 @@ fn parse_xhtml_core(
                     }
                     b"img" | b"image" => {
                         if inside_cell {
-                            if table_overflow_depth == 0
-                                && let Some(top) = table_stack.last_mut()
-                            {
+                            if table_overflow_depth == 0 {
+                                let mut alt_trimmed: Option<String> = None;
                                 for attr in e.attributes().flatten() {
                                     if attr.key.as_ref() == b"alt" {
                                         let alt_val = crate::epub::unescape_attr_value(&attr);
                                         let trimmed = alt_val.trim();
                                         if !trimmed.is_empty() {
-                                            if !top.current_cell.is_empty()
-                                                && !top.current_cell.ends_with(char::is_whitespace)
-                                            {
-                                                top.current_cell.push(' ');
-                                            }
-                                            top.current_cell.push_str(trimmed);
+                                            alt_trimmed = Some(trimmed.to_string());
                                         }
                                     }
                                 }
+                                let img_id = extract_id_attr(e);
+                                if let Some(top) = table_stack.last_mut() {
+                                    flush_current_span(
+                                        &mut top.current_cell_text,
+                                        &mut top.current_cell_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    if let Some(alt_text) = alt_trimmed {
+                                        if cell_has_trailing_non_whitespace(
+                                            &top.current_cell_spans,
+                                            &top.current_cell_text,
+                                        ) {
+                                            top.current_cell_spans.push(TextSpan {
+                                                text: " ".to_string(),
+                                                style: None,
+                                                anchor_id: None,
+                                                href: None,
+                                                ruby: None,
+                                            });
+                                        }
+                                        let attrs = resolve_active_span_attrs(&style_stack);
+                                        if attrs.anchor.is_some() {
+                                            for frame in style_stack.iter_mut().rev() {
+                                                if let StyleFrameKind::Inline {
+                                                    tag,
+                                                    emitted_span,
+                                                    ..
+                                                } = frame
+                                                    && tag.as_slice() == b"a"
+                                                {
+                                                    *emitted_span = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if let Some(id_val) = img_id {
+                                            push_pending_anchor(&mut pending_anchors, Some(id_val));
+                                        }
+                                        let anchor_id = if attrs.anchor.is_some() {
+                                            while let Some(pa) = pending_anchors.pop_front() {
+                                                top.current_cell_spans.push(TextSpan {
+                                                    text: String::new(),
+                                                    style: None,
+                                                    anchor_id: Some(pa),
+                                                    href: None,
+                                                    ruby: None,
+                                                });
+                                            }
+                                            attrs.anchor
+                                        } else {
+                                            while pending_anchors.len() > 1 {
+                                                if let Some(pa) = pending_anchors.pop_front() {
+                                                    top.current_cell_spans.push(TextSpan {
+                                                        text: String::new(),
+                                                        style: None,
+                                                        anchor_id: Some(pa),
+                                                        href: None,
+                                                        ruby: None,
+                                                    });
+                                                }
+                                            }
+                                            pending_anchors.pop_front()
+                                        };
+                                        top.current_cell_spans.push(TextSpan {
+                                            text: alt_text,
+                                            style: attrs.style,
+                                            anchor_id,
+                                            href: attrs.href,
+                                            ruby: None,
+                                        });
+                                    } else if let Some(id_val) = img_id {
+                                        push_pending_anchor(&mut pending_anchors, Some(id_val));
+                                    }
+                                }
                             }
-                            push_pending_anchor(&mut pending_anchors, extract_id_attr(e));
                         } else {
                             let img_own_id = extract_id_attr(e);
-                            if let Some(mut img_block) = parse_image_block(e, blocks.len(), None) {
+                            let attrs = resolve_active_span_attrs(&style_stack);
+                            if let Some(mut img_block) =
+                                parse_image_block(e, blocks.len(), None, attrs.href)
+                            {
                                 if in_heading {
                                     flush_current_span(
                                         &mut current_span_text,
@@ -1425,6 +1789,26 @@ fn parse_xhtml_core(
 
                                 let resolved_img_id = if let Some(own_id) = img_own_id {
                                     own_id
+                                } else if let Some(a_id) =
+                                    style_stack.iter_mut().rev().find_map(|frame| {
+                                        if let StyleFrameKind::Inline {
+                                            tag,
+                                            anchor,
+                                            emitted_span,
+                                            ..
+                                        } = frame
+                                            && tag.as_slice() == b"a"
+                                            && anchor.is_some()
+                                            && !*emitted_span
+                                        {
+                                            *emitted_span = true;
+                                            anchor.clone()
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                {
+                                    a_id
                                 } else if let Some(pa) = pending_anchors.pop_back() {
                                     pa
                                 } else {
@@ -1468,7 +1852,9 @@ fn parse_xhtml_core(
                         }
                     }
                     _ => {
-                        if is_anchor_target_tag(local_bytes) {
+                        if (!inside_cell || table_overflow_depth == 0)
+                            && is_anchor_target_tag(local_bytes)
+                        {
                             push_pending_anchor(&mut pending_anchors, extract_id_attr(e));
                         }
                     }
@@ -1582,6 +1968,30 @@ fn parse_xhtml_core(
                                         current_spans.clear();
                                     }
                                 }
+                            } else if table_overflow_depth == 0
+                                && let Some(parent) = table_stack.last_mut()
+                                && parent.in_cell
+                            {
+                                flush_current_span(
+                                    &mut parent.current_cell_text,
+                                    &mut parent.current_cell_spans,
+                                    &mut style_stack,
+                                    &mut pending_anchors,
+                                );
+                                if let Some(mark) = parent.cell_anchor_mark
+                                    && pending_anchors.len() > mark
+                                {
+                                    let mut rest = pending_anchors.split_off(mark);
+                                    while let Some(pa) = rest.pop_front() {
+                                        parent.current_cell_spans.push(TextSpan {
+                                            text: String::new(),
+                                            style: None,
+                                            anchor_id: Some(pa),
+                                            href: None,
+                                            ruby: None,
+                                        });
+                                    }
+                                }
                             }
                             if table_stack.len() >= MAX_TABLE_DEPTH {
                                 table_overflow_depth += 1;
@@ -1589,9 +1999,14 @@ fn parse_xhtml_core(
                                 table_stack.push(TableFrame {
                                     id: element_anchor_id,
                                     anchor_mark: pending_anchors.len(),
+                                    row_anchor_mark: None,
+                                    cell_anchor_mark: None,
                                     rows: Vec::new(),
+                                    row_spans: Vec::new(),
                                     current_row: Vec::new(),
-                                    current_cell: String::new(),
+                                    current_row_spans: Vec::new(),
+                                    current_cell_text: String::new(),
+                                    current_cell_spans: Vec::new(),
                                     in_cell: false,
                                 });
                             }
@@ -1601,13 +2016,19 @@ fn parse_xhtml_core(
                                 && let Some(top) = table_stack.last_mut()
                             {
                                 if top.in_cell {
-                                    top.current_row.push(top.current_cell.trim().to_string());
-                                    top.current_cell.clear();
-                                    top.in_cell = false;
+                                    finish_open_cell(
+                                        top,
+                                        &mut style_stack,
+                                        &mut style_overflow_depth,
+                                        &mut pending_anchors,
+                                    );
                                 }
                                 if !top.current_row.is_empty() {
                                     top.rows.push(std::mem::take(&mut top.current_row));
+                                    top.row_spans
+                                        .push(std::mem::take(&mut top.current_row_spans));
                                 }
+                                top.row_anchor_mark = Some(pending_anchors.len());
                                 push_pending_anchor(&mut pending_anchors, element_anchor_id);
                             }
                         }
@@ -1616,40 +2037,48 @@ fn parse_xhtml_core(
                                 && let Some(top) = table_stack.last_mut()
                             {
                                 if top.in_cell {
-                                    top.current_row.push(top.current_cell.trim().to_string());
-                                    top.current_cell.clear();
+                                    finish_open_cell(
+                                        top,
+                                        &mut style_stack,
+                                        &mut style_overflow_depth,
+                                        &mut pending_anchors,
+                                    );
                                 }
+                                push_style_frame(
+                                    &mut style_stack,
+                                    &mut style_overflow_depth,
+                                    StyleFrameKind::BlockBoundary {
+                                        tag: local_bytes.to_vec(),
+                                    },
+                                );
+                                top.cell_anchor_mark = Some(
+                                    top.row_anchor_mark
+                                        .take()
+                                        .map(|rm| rm.min(pending_anchors.len()))
+                                        .unwrap_or(pending_anchors.len()),
+                                );
                                 push_pending_anchor(&mut pending_anchors, element_anchor_id);
                                 top.in_cell = true;
-                                top.current_cell.clear();
+                                top.current_cell_text.clear();
+                                top.current_cell_spans.clear();
                             }
                         }
-                        _ if inside_cell => {
-                            // Inside <td>/<th>, block/list/inline tags must not mutate outer parser state.
-                            if table_overflow_depth == 0
-                                && matches!(
-                                    local_bytes,
-                                    b"p" | b"div"
-                                        | b"li"
-                                        | b"h1"
-                                        | b"h2"
-                                        | b"h3"
-                                        | b"h4"
-                                        | b"h5"
-                                        | b"h6"
-                                )
-                                && let Some(top) = table_stack.last_mut()
-                                && !top.current_cell.is_empty()
-                                && !top.current_cell.ends_with(char::is_whitespace)
-                            {
-                                top.current_cell.push(' ');
-                            }
-                            push_pending_anchor(&mut pending_anchors, element_anchor_id);
+                        _ if inside_cell && table_overflow_depth > 0 => {
+                            // Ignore elements inside overflow-depth nested tables
                         }
                         b"ruby" => {
+                            let (target_text, target_spans) = if inside_cell {
+                                if let Some(top) = table_stack.last_mut() {
+                                    (&mut top.current_cell_text, &mut top.current_cell_spans)
+                                } else {
+                                    (&mut current_span_text, &mut current_spans)
+                                }
+                            } else {
+                                (&mut current_span_text, &mut current_spans)
+                            };
                             flush_current_span(
-                                &mut current_span_text,
-                                &mut current_spans,
+                                target_text,
+                                target_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
                             );
@@ -1657,6 +2086,306 @@ fn parse_xhtml_core(
                         }
                         b"rb" | b"rt" | b"rtc" | b"rp" => {
                             ruby.on_start_tag(local_bytes);
+                        }
+                        b"b" | b"strong" | b"i" | b"em" | b"u" | b"del" | b"s" | b"strike"
+                        | b"sup" | b"sub" | b"code" | b"tt" | b"kbd" | b"samp" | b"pre" => {
+                            let (target_text, target_spans) = if inside_cell {
+                                if let Some(top) = table_stack.last_mut() {
+                                    (&mut top.current_cell_text, &mut top.current_cell_spans)
+                                } else {
+                                    (&mut current_span_text, &mut current_spans)
+                                }
+                            } else {
+                                (&mut current_span_text, &mut current_spans)
+                            };
+                            flush_current_span(
+                                target_text,
+                                target_spans,
+                                &mut style_stack,
+                                &mut pending_anchors,
+                            );
+                            let css_tokens = element_style_tokens(local_bytes, e);
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::Inline {
+                                    tag: local_bytes.to_vec(),
+                                    bold: matches!(local_bytes, b"b" | b"strong"),
+                                    italic: matches!(local_bytes, b"i" | b"em"),
+                                    underline: local_bytes == b"u",
+                                    strike: matches!(local_bytes, b"del" | b"s" | b"strike"),
+                                    sup: local_bytes == b"sup",
+                                    sub: local_bytes == b"sub",
+                                    code: matches!(
+                                        local_bytes,
+                                        b"code" | b"tt" | b"kbd" | b"samp" | b"pre"
+                                    ),
+                                    css_tokens,
+                                    href: None,
+                                    anchor: None,
+                                    is_noteref: false,
+                                    emitted_span: false,
+                                },
+                            );
+                        }
+                        b"a" => {
+                            let (target_text, target_spans) = if inside_cell {
+                                if let Some(top) = table_stack.last_mut() {
+                                    (&mut top.current_cell_text, &mut top.current_cell_spans)
+                                } else {
+                                    (&mut current_span_text, &mut current_spans)
+                                }
+                            } else {
+                                (&mut current_span_text, &mut current_spans)
+                            };
+                            flush_current_span(
+                                target_text,
+                                target_spans,
+                                &mut style_stack,
+                                &mut pending_anchors,
+                            );
+                            let mut raw_href: Option<String> = None;
+                            let mut raw_xlink_href: Option<String> = None;
+                            let mut anchor = None;
+                            let mut is_noteref = false;
+                            let mut is_backlink_a = false;
+                            let mut class_attr: Option<String> = None;
+                            for attr in e.attributes().flatten() {
+                                let key = attr.key.as_ref();
+                                if key == b"href" {
+                                    raw_href = Some(crate::epub::unescape_attr_value(&attr));
+                                } else if key == b"xlink:href" {
+                                    raw_xlink_href = Some(crate::epub::unescape_attr_value(&attr));
+                                } else if key == b"id" || key == b"name" {
+                                    let v =
+                                        crate::epub::unescape_attr_value(&attr).trim().to_string();
+                                    if !v.is_empty() {
+                                        anchor = Some(v);
+                                    }
+                                } else if key == b"class" {
+                                    let raw_cls = crate::epub::unescape_attr_value(&attr);
+                                    let val = raw_cls.to_ascii_lowercase();
+                                    if val.contains("backlink")
+                                        || val.contains("footnote-back")
+                                        || val.contains("footnote_back")
+                                    {
+                                        is_backlink_a = true;
+                                    } else if val.contains("noteref")
+                                        || val.contains("footnote-ref")
+                                        || val.contains("footnote_ref")
+                                        || val.contains("fnref")
+                                    {
+                                        is_noteref = true;
+                                    }
+                                    class_attr = Some(raw_cls);
+                                } else if key == b"epub:type" || key == b"role" {
+                                    let val = crate::epub::unescape_attr_value(&attr)
+                                        .to_ascii_lowercase();
+                                    if val.contains("backlink")
+                                        || val.contains("footnote-back")
+                                        || val.contains("footnote_back")
+                                    {
+                                        is_backlink_a = true;
+                                    } else if val.contains("noteref")
+                                        || val.contains("footnote-ref")
+                                        || val.contains("footnote_ref")
+                                        || val.contains("fnref")
+                                    {
+                                        is_noteref = true;
+                                    }
+                                }
+                            }
+                            let href = raw_href
+                                .or(raw_xlink_href)
+                                .and_then(|v| normalize_span_href(&v, link_ctx));
+                            let mut css_tokens = element_style_tokens(local_bytes, e);
+                            if href.is_some() && css.has_link_pseudo() {
+                                let unvisited =
+                                    css.link_unvisited_declarations_for("a", class_attr.as_deref());
+                                if !unvisited.is_empty() {
+                                    push_unique_tokens(
+                                        &mut css_tokens,
+                                        sanitize_link_state_css(&unvisited, "link_unvisited_"),
+                                    );
+                                }
+                                let visited =
+                                    css.link_visited_declarations_for("a", class_attr.as_deref());
+                                if !visited.is_empty() {
+                                    push_unique_tokens(
+                                        &mut css_tokens,
+                                        sanitize_link_state_css(&visited, "link_visited_"),
+                                    );
+                                }
+                            }
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::Inline {
+                                    tag: local_bytes.to_vec(),
+                                    bold: false,
+                                    italic: false,
+                                    underline: false,
+                                    strike: false,
+                                    sup: false,
+                                    sub: false,
+                                    code: false,
+                                    css_tokens,
+                                    href,
+                                    anchor,
+                                    is_noteref: is_noteref && !is_backlink_a,
+                                    emitted_span: false,
+                                },
+                            );
+                        }
+                        b"span" | b"abbr" | b"acronym" => {
+                            let (target_text, target_spans) = if inside_cell {
+                                if let Some(top) = table_stack.last_mut() {
+                                    (&mut top.current_cell_text, &mut top.current_cell_spans)
+                                } else {
+                                    (&mut current_span_text, &mut current_spans)
+                                }
+                            } else {
+                                (&mut current_span_text, &mut current_spans)
+                            };
+                            flush_current_span(
+                                target_text,
+                                target_spans,
+                                &mut style_stack,
+                                &mut pending_anchors,
+                            );
+                            push_pending_anchor(&mut pending_anchors, element_anchor_id);
+                            let mut span_tokens = Vec::new();
+                            if local_bytes == b"abbr" || local_bytes == b"acronym" {
+                                span_tokens.push("small_caps".to_string());
+                            }
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"class" {
+                                    let val = crate::epub::unescape_attr_value(&attr)
+                                        .to_ascii_lowercase();
+                                    for cls in val.split_whitespace() {
+                                        if cls == "small-caps" || cls == "smallcaps" {
+                                            push_unique_tokens(
+                                                &mut span_tokens,
+                                                vec!["small_caps".to_string()],
+                                            );
+                                        } else if cls == "dropcap"
+                                            || cls == "drop-cap"
+                                            || cls == "drop_cap"
+                                            || cls == "initial"
+                                            || cls == "first-letter"
+                                            || cls == "initial-letter"
+                                            || cls == "dc"
+                                            || cls.contains("dropcap")
+                                            || cls.contains("drop-cap")
+                                        {
+                                            // `contains` covers InDesign-generated classes such as `_idGenDropcap-1`
+                                            push_unique_tokens(
+                                                &mut span_tokens,
+                                                vec!["dropcap".to_string()],
+                                            );
+                                        } else if cls == "uppercase"
+                                            || cls == "all-caps"
+                                            || cls == "allcaps"
+                                            || cls == "caps"
+                                        {
+                                            push_unique_tokens(
+                                                &mut span_tokens,
+                                                vec!["uppercase".to_string()],
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            // Apply cascaded stylesheet + inline style last so inline overrides win.
+                            push_unique_tokens(
+                                &mut span_tokens,
+                                element_style_tokens(local_bytes, e),
+                            );
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::Inline {
+                                    tag: local_bytes.to_vec(),
+                                    bold: false,
+                                    italic: false,
+                                    underline: false,
+                                    strike: false,
+                                    sup: false,
+                                    sub: false,
+                                    code: false,
+                                    css_tokens: span_tokens,
+                                    href: None,
+                                    anchor: None,
+                                    is_noteref: false,
+                                    emitted_span: false,
+                                },
+                            );
+                        }
+                        _ if inside_cell => {
+                            // Inside <td>/<th>, block/list tags must not mutate outer parser state.
+                            if matches!(
+                                local_bytes,
+                                b"div"
+                                    | b"section"
+                                    | b"article"
+                                    | b"main"
+                                    | b"aside"
+                                    | b"figure"
+                                    | b"figcaption"
+                                    | b"blockquote"
+                                    | b"center"
+                                    | b"p"
+                                    | b"h1"
+                                    | b"h2"
+                                    | b"h3"
+                                    | b"h4"
+                                    | b"h5"
+                                    | b"h6"
+                                    | b"ul"
+                                    | b"ol"
+                                    | b"li"
+                            ) {
+                                if let Some(top) = table_stack.last_mut() {
+                                    flush_current_span(
+                                        &mut top.current_cell_text,
+                                        &mut top.current_cell_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    if matches!(
+                                        local_bytes,
+                                        b"p" | b"div"
+                                            | b"li"
+                                            | b"h1"
+                                            | b"h2"
+                                            | b"h3"
+                                            | b"h4"
+                                            | b"h5"
+                                            | b"h6"
+                                    ) && cell_has_trailing_non_whitespace(
+                                        &top.current_cell_spans,
+                                        &top.current_cell_text,
+                                    ) {
+                                        top.current_cell_spans.push(TextSpan {
+                                            text: " ".to_string(),
+                                            style: None,
+                                            anchor_id: None,
+                                            href: None,
+                                            ruby: None,
+                                        });
+                                    }
+                                }
+                                push_pending_anchor(&mut pending_anchors, element_anchor_id);
+                                push_style_frame(
+                                    &mut style_stack,
+                                    &mut style_overflow_depth,
+                                    StyleFrameKind::BlockBoundary {
+                                        tag: local_bytes.to_vec(),
+                                    },
+                                );
+                            } else {
+                                push_pending_anchor(&mut pending_anchors, element_anchor_id);
+                            }
                         }
                         b"div" | b"section" | b"article" | b"main" | b"aside" | b"figure"
                         | b"figcaption" => {
@@ -2071,176 +2800,6 @@ fn parse_xhtml_core(
                             current_span_text.clear();
                             current_spans.clear();
                         }
-                        b"b" | b"strong" | b"i" | b"em" | b"u" | b"del" | b"s" | b"strike"
-                        | b"sup" | b"sub" | b"code" | b"tt" | b"kbd" | b"samp" | b"pre" => {
-                            flush_current_span(
-                                &mut current_span_text,
-                                &mut current_spans,
-                                &mut style_stack,
-                                &mut pending_anchors,
-                            );
-                            let css_tokens = element_style_tokens(local_bytes, e);
-                            push_style_frame(
-                                &mut style_stack,
-                                &mut style_overflow_depth,
-                                StyleFrameKind::Inline {
-                                    tag: local_bytes.to_vec(),
-                                    bold: matches!(local_bytes, b"b" | b"strong"),
-                                    italic: matches!(local_bytes, b"i" | b"em"),
-                                    underline: local_bytes == b"u",
-                                    strike: matches!(local_bytes, b"del" | b"s" | b"strike"),
-                                    sup: local_bytes == b"sup",
-                                    sub: local_bytes == b"sub",
-                                    code: matches!(
-                                        local_bytes,
-                                        b"code" | b"tt" | b"kbd" | b"samp" | b"pre"
-                                    ),
-                                    css_tokens,
-                                    href: None,
-                                    anchor: None,
-                                    is_noteref: false,
-                                    emitted_span: false,
-                                },
-                            );
-                        }
-                        b"a" => {
-                            flush_current_span(
-                                &mut current_span_text,
-                                &mut current_spans,
-                                &mut style_stack,
-                                &mut pending_anchors,
-                            );
-                            let mut href = None;
-                            let mut anchor = None;
-                            let mut is_noteref = false;
-                            let mut is_backlink_a = false;
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"href" {
-                                    let v = crate::epub::unescape_attr_value(&attr);
-                                    href = normalize_span_href(&v, link_ctx);
-                                } else if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name"
-                                {
-                                    let v =
-                                        crate::epub::unescape_attr_value(&attr).trim().to_string();
-                                    if !v.is_empty() {
-                                        anchor = Some(v);
-                                    }
-                                } else if attr.key.as_ref() == b"epub:type"
-                                    || attr.key.as_ref() == b"role"
-                                    || attr.key.as_ref() == b"class"
-                                {
-                                    let val = crate::epub::unescape_attr_value(&attr)
-                                        .to_ascii_lowercase();
-                                    if val.contains("backlink")
-                                        || val.contains("footnote-back")
-                                        || val.contains("footnote_back")
-                                    {
-                                        is_backlink_a = true;
-                                    } else if val.contains("noteref")
-                                        || val.contains("footnote-ref")
-                                        || val.contains("footnote_ref")
-                                        || val.contains("fnref")
-                                    {
-                                        is_noteref = true;
-                                    }
-                                }
-                            }
-                            let css_tokens = element_style_tokens(local_bytes, e);
-                            push_style_frame(
-                                &mut style_stack,
-                                &mut style_overflow_depth,
-                                StyleFrameKind::Inline {
-                                    tag: local_bytes.to_vec(),
-                                    bold: false,
-                                    italic: false,
-                                    underline: false,
-                                    strike: false,
-                                    sup: false,
-                                    sub: false,
-                                    code: false,
-                                    css_tokens,
-                                    href,
-                                    anchor,
-                                    is_noteref: is_noteref && !is_backlink_a,
-                                    emitted_span: false,
-                                },
-                            );
-                        }
-                        b"span" | b"abbr" | b"acronym" => {
-                            flush_current_span(
-                                &mut current_span_text,
-                                &mut current_spans,
-                                &mut style_stack,
-                                &mut pending_anchors,
-                            );
-                            push_pending_anchor(&mut pending_anchors, element_anchor_id);
-                            let mut span_tokens = Vec::new();
-                            if local_bytes == b"abbr" || local_bytes == b"acronym" {
-                                span_tokens.push("small_caps".to_string());
-                            }
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"class" {
-                                    let val = crate::epub::unescape_attr_value(&attr)
-                                        .to_ascii_lowercase();
-                                    for cls in val.split_whitespace() {
-                                        if cls == "small-caps" || cls == "smallcaps" {
-                                            push_unique_tokens(
-                                                &mut span_tokens,
-                                                vec!["small_caps".to_string()],
-                                            );
-                                        } else if cls == "dropcap"
-                                            || cls == "drop-cap"
-                                            || cls == "drop_cap"
-                                            || cls == "initial"
-                                            || cls == "first-letter"
-                                            || cls == "initial-letter"
-                                            || cls == "dc"
-                                            || cls.contains("dropcap")
-                                            || cls.contains("drop-cap")
-                                        {
-                                            // `contains` covers InDesign-generated classes such as `_idGenDropcap-1`
-                                            push_unique_tokens(
-                                                &mut span_tokens,
-                                                vec!["dropcap".to_string()],
-                                            );
-                                        } else if cls == "uppercase"
-                                            || cls == "all-caps"
-                                            || cls == "allcaps"
-                                            || cls == "caps"
-                                        {
-                                            push_unique_tokens(
-                                                &mut span_tokens,
-                                                vec!["uppercase".to_string()],
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            // Apply cascaded stylesheet + inline style last so inline overrides win.
-                            push_unique_tokens(
-                                &mut span_tokens,
-                                element_style_tokens(local_bytes, e),
-                            );
-                            push_style_frame(
-                                &mut style_stack,
-                                &mut style_overflow_depth,
-                                StyleFrameKind::Inline {
-                                    tag: local_bytes.to_vec(),
-                                    bold: false,
-                                    italic: false,
-                                    underline: false,
-                                    strike: false,
-                                    sup: false,
-                                    sub: false,
-                                    code: false,
-                                    css_tokens: span_tokens,
-                                    href: None,
-                                    anchor: None,
-                                    is_noteref: false,
-                                    emitted_span: false,
-                                },
-                            );
-                        }
                         b"dt" | b"dd" => {
                             push_pending_anchor(&mut pending_anchors, element_anchor_id);
                         }
@@ -2428,15 +2987,19 @@ fn parse_xhtml_core(
                         footnote_wrapper_stack.pop_matching(|t| t.as_slice() == local_bytes);
                     }
 
+                    let inside_cell = in_table_cell(&table_stack);
                     match local_bytes {
                         b"th" | b"td" => {
                             if table_overflow_depth == 0
                                 && let Some(top) = table_stack.last_mut()
                                 && top.in_cell
                             {
-                                top.in_cell = false;
-                                top.current_row.push(top.current_cell.trim().to_string());
-                                top.current_cell.clear();
+                                finish_open_cell(
+                                    top,
+                                    &mut style_stack,
+                                    &mut style_overflow_depth,
+                                    &mut pending_anchors,
+                                );
                             }
                         }
                         b"tr" => {
@@ -2444,12 +3007,17 @@ fn parse_xhtml_core(
                                 && let Some(top) = table_stack.last_mut()
                             {
                                 if top.in_cell {
-                                    top.in_cell = false;
-                                    top.current_row.push(top.current_cell.trim().to_string());
-                                    top.current_cell.clear();
+                                    finish_open_cell(
+                                        top,
+                                        &mut style_stack,
+                                        &mut style_overflow_depth,
+                                        &mut pending_anchors,
+                                    );
                                 }
                                 if !top.current_row.is_empty() {
                                     top.rows.push(std::mem::take(&mut top.current_row));
+                                    top.row_spans
+                                        .push(std::mem::take(&mut top.current_row_spans));
                                 }
                             }
                         }
@@ -2459,6 +3027,8 @@ fn parse_xhtml_core(
                             } else {
                                 finalize_table_frame(
                                     &mut table_stack,
+                                    &mut style_stack,
+                                    &mut style_overflow_depth,
                                     &mut pending_anchors,
                                     in_li,
                                     &mut current_list_item_blocks,
@@ -2466,25 +3036,8 @@ fn parse_xhtml_core(
                                 );
                             }
                         }
-                        _ if in_table_cell(&table_stack) => {
-                            if table_overflow_depth == 0
-                                && matches!(
-                                    local_bytes,
-                                    b"p" | b"div"
-                                        | b"li"
-                                        | b"h1"
-                                        | b"h2"
-                                        | b"h3"
-                                        | b"h4"
-                                        | b"h5"
-                                        | b"h6"
-                                )
-                                && let Some(top) = table_stack.last_mut()
-                                && !top.current_cell.is_empty()
-                                && !top.current_cell.ends_with(char::is_whitespace)
-                            {
-                                top.current_cell.push(' ');
-                            }
+                        _ if inside_cell && table_overflow_depth > 0 => {
+                            // Ignore closing tags inside overflow-depth nested tables
                         }
                         b"rt" | b"rtc" | b"rp" | b"rb" => {
                             ruby.on_end_tag(local_bytes);
@@ -2493,16 +3046,161 @@ fn parse_xhtml_core(
                             ruby.on_end_tag(b"ruby");
                             let attrs = resolve_active_span_attrs(&style_stack);
                             let effective_anchor = if attrs.anchor.is_some() {
+                                for frame in style_stack.iter_mut().rev() {
+                                    if let StyleFrameKind::Inline {
+                                        tag, emitted_span, ..
+                                    } = frame
+                                        && tag.as_slice() == b"a"
+                                    {
+                                        *emitted_span = true;
+                                        break;
+                                    }
+                                }
                                 attrs.anchor
                             } else {
                                 pending_anchors.pop_front()
+                            };
+                            let target_spans = if inside_cell {
+                                if let Some(top) = table_stack.last_mut() {
+                                    &mut top.current_cell_spans
+                                } else {
+                                    &mut current_spans
+                                }
+                            } else {
+                                &mut current_spans
                             };
                             ruby.emit_spans(
                                 attrs.style,
                                 &effective_anchor,
                                 &attrs.href,
-                                &mut current_spans,
+                                target_spans,
                             );
+                        }
+                        b"b" | b"strong" | b"i" | b"em" | b"u" | b"del" | b"s" | b"strike"
+                        | b"sup" | b"sub" | b"code" | b"tt" | b"kbd" | b"samp" | b"pre"
+                        | b"span" | b"abbr" | b"acronym" | b"a" => {
+                            if style_overflow_depth > 0 {
+                                style_overflow_depth -= 1;
+                            } else {
+                                // Only flush & pop if matching inline tag exists before any BlockBoundary
+                                let mut match_pos = None;
+                                for (idx, frame) in style_stack.iter().enumerate().rev() {
+                                    match frame {
+                                        StyleFrameKind::BlockBoundary { .. } => break,
+                                        StyleFrameKind::Inline { tag, .. }
+                                            if tag.as_slice() == local_bytes =>
+                                        {
+                                            match_pos = Some(idx);
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if let Some(pos) = match_pos {
+                                    let (target_text, target_spans) = if inside_cell {
+                                        if let Some(top) = table_stack.last_mut() {
+                                            (
+                                                &mut top.current_cell_text,
+                                                &mut top.current_cell_spans,
+                                            )
+                                        } else {
+                                            (&mut current_span_text, &mut current_spans)
+                                        }
+                                    } else {
+                                        (&mut current_span_text, &mut current_spans)
+                                    };
+                                    flush_current_span(
+                                        target_text,
+                                        target_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    // If closing <a> without having emitted any span inside, emit anchor marker
+                                    if local_bytes == b"a"
+                                        && let StyleFrameKind::Inline {
+                                            anchor: Some(a_id),
+                                            href,
+                                            emitted_span: false,
+                                            ..
+                                        } = &style_stack[pos]
+                                    {
+                                        target_spans.push(TextSpan {
+                                            text: String::new(),
+                                            style: None,
+                                            anchor_id: Some(a_id.clone()),
+                                            href: href.clone(),
+                                            ruby: None,
+                                        });
+                                    }
+                                    style_stack.truncate(pos);
+                                }
+                            }
+                        }
+                        _ if inside_cell => {
+                            if matches!(
+                                local_bytes,
+                                b"div"
+                                    | b"section"
+                                    | b"article"
+                                    | b"main"
+                                    | b"aside"
+                                    | b"figure"
+                                    | b"figcaption"
+                                    | b"blockquote"
+                                    | b"center"
+                                    | b"p"
+                                    | b"h1"
+                                    | b"h2"
+                                    | b"h3"
+                                    | b"h4"
+                                    | b"h5"
+                                    | b"h6"
+                                    | b"ul"
+                                    | b"ol"
+                                    | b"li"
+                            ) {
+                                if let Some(top) = table_stack.last_mut() {
+                                    flush_current_span(
+                                        &mut top.current_cell_text,
+                                        &mut top.current_cell_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    pop_block_boundary(
+                                        &mut style_stack,
+                                        &mut style_overflow_depth,
+                                        local_bytes,
+                                    );
+                                    if matches!(
+                                        local_bytes,
+                                        b"p" | b"div"
+                                            | b"li"
+                                            | b"h1"
+                                            | b"h2"
+                                            | b"h3"
+                                            | b"h4"
+                                            | b"h5"
+                                            | b"h6"
+                                    ) && cell_has_trailing_non_whitespace(
+                                        &top.current_cell_spans,
+                                        &top.current_cell_text,
+                                    ) {
+                                        top.current_cell_spans.push(TextSpan {
+                                            text: " ".to_string(),
+                                            style: None,
+                                            anchor_id: None,
+                                            href: None,
+                                            ruby: None,
+                                        });
+                                    }
+                                } else {
+                                    pop_block_boundary(
+                                        &mut style_stack,
+                                        &mut style_overflow_depth,
+                                        local_bytes,
+                                    );
+                                }
+                            }
                         }
                         b"p" => {
                             flush_open_paragraph(
@@ -2610,54 +3308,6 @@ fn parse_xhtml_core(
                                 &mut style_overflow_depth,
                                 local_bytes,
                             );
-                        }
-                        b"b" | b"strong" | b"i" | b"em" | b"u" | b"del" | b"s" | b"strike"
-                        | b"sup" | b"sub" | b"code" | b"tt" | b"kbd" | b"samp" | b"pre"
-                        | b"span" | b"abbr" | b"acronym" | b"a" => {
-                            if style_overflow_depth > 0 {
-                                style_overflow_depth -= 1;
-                            } else {
-                                // Only flush & pop if matching inline tag exists before any BlockBoundary
-                                let mut match_pos = None;
-                                for (idx, frame) in style_stack.iter().enumerate().rev() {
-                                    match frame {
-                                        StyleFrameKind::BlockBoundary { .. } => break,
-                                        StyleFrameKind::Inline { tag, .. }
-                                            if tag.as_slice() == local_bytes =>
-                                        {
-                                            match_pos = Some(idx);
-                                            break;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                if let Some(pos) = match_pos {
-                                    flush_current_span(
-                                        &mut current_span_text,
-                                        &mut current_spans,
-                                        &mut style_stack,
-                                        &mut pending_anchors,
-                                    );
-                                    // If closing <a> without having emitted any span inside, emit anchor marker
-                                    if local_bytes == b"a"
-                                        && let StyleFrameKind::Inline {
-                                            anchor: Some(a_id),
-                                            href,
-                                            emitted_span: false,
-                                            ..
-                                        } = &style_stack[pos]
-                                    {
-                                        current_spans.push(TextSpan {
-                                            text: String::new(),
-                                            style: None,
-                                            anchor_id: Some(a_id.clone()),
-                                            href: href.clone(),
-                                            ruby: None,
-                                        });
-                                    }
-                                    style_stack.truncate(pos);
-                                }
-                            }
                         }
                         b"li" => {
                             flush_open_paragraph(
@@ -2798,6 +3448,8 @@ fn parse_xhtml_core(
                 while !table_stack.is_empty() {
                     finalize_table_frame(
                         &mut table_stack,
+                        &mut style_stack,
+                        &mut style_overflow_depth,
                         &mut pending_anchors,
                         in_li,
                         &mut current_list_item_blocks,
@@ -3485,7 +4137,7 @@ mod tests {
         assert_eq!(blocks[0].plain_text(), "Before table");
 
         match &blocks[1] {
-            Block::Table { id, rows } => {
+            Block::Table { id, rows, .. } => {
                 assert_eq!(id, "tbl1");
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0].len(), 3);
@@ -3530,7 +4182,7 @@ mod tests {
         let eof_blocks = parse_xhtml_blocks(eof_xhtml);
         assert_eq!(eof_blocks.len(), 1, "eof_blocks: {:?}", eof_blocks);
         match &eof_blocks[0] {
-            Block::Table { id, rows } => {
+            Block::Table { id, rows, .. } => {
                 assert_eq!(id, "unclosed");
                 assert_eq!(rows, &vec![vec!["Cell A", "Cell B"]]);
             }
@@ -3719,6 +4371,462 @@ mod tests {
                 .any(|b| b.plain_text() == "Valid prefix paragraph."),
             "Valid blocks before the syntax error must be preserved: {:?}",
             err_res.blocks
+        );
+    }
+
+    #[test]
+    fn test_stage3a_table_rich_spans_formatting_isolation_and_anchor_containment() {
+        // 1. Direct trim_cell_spans test: preserves empty-text anchor markers and clears
+        //    style/href on whitespace-only anchor spans.
+        let mut raw_spans = vec![
+            TextSpan {
+                text: "   ".to_string(),
+                style: Some("bold".to_string()),
+                anchor_id: Some("lead_anc".to_string()),
+                href: Some("#x".to_string()),
+                ruby: None,
+            },
+            TextSpan {
+                text: "  Hello ".to_string(),
+                style: Some("italic".to_string()),
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            },
+            TextSpan {
+                text: "World  ".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            },
+            TextSpan {
+                text: " \n ".to_string(),
+                style: Some("underline".to_string()),
+                anchor_id: Some("trail_anc".to_string()),
+                href: Some("#y".to_string()),
+                ruby: None,
+            },
+        ];
+        trim_cell_spans(&mut raw_spans);
+        assert_eq!(raw_spans.len(), 4);
+        assert_eq!(raw_spans[0].text, "");
+        assert_eq!(raw_spans[0].anchor_id.as_deref(), Some("lead_anc"));
+        assert_eq!(raw_spans[0].style, None);
+        assert_eq!(raw_spans[0].href, None);
+        assert_eq!(raw_spans[1].text, "Hello ");
+        assert_eq!(raw_spans[2].text, "World");
+        assert_eq!(raw_spans[3].text, "");
+        assert_eq!(raw_spans[3].anchor_id.as_deref(), Some("trail_anc"));
+        assert_eq!(raw_spans[3].style, None);
+        assert_eq!(raw_spans[3].href, None);
+
+        // 2. Full XHTML table with anchors, formatting, links, ruby, <p>/<hr>, unclosed tags,
+        //    empty <td id/>, and nested <table> inside <td>.
+        let xhtml = r##"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <table id="tbl_rich">
+    <tr id="tr_hdr">
+      <th id="th_1"><b>Header</b> <a href="#ref1">Link</a></th>
+      <td id="td_empty"/>
+    </tr>
+    <tr>
+      <td id="td_unclosed"><b><a href="#bleed">Unclosed</td>
+      <td>CleanCell <ruby>漢<rt>かん</rt></ruby></td>
+    </tr>
+    <tr>
+      <td><p id="inner_p">Before</p><hr/><table id="nested_tbl"><tr><td id="nc1"><i>N1</i></td><td><a href="#n2">N2</a></td></tr></table><a id="empty_a"/>After</td>
+      <td><p>P1</p><div>P2</div></td>
+    </tr>
+  </table>
+  <p>Post table clean</p>
+</body>
+</html>"##;
+
+        let blocks = parse_xhtml_blocks(xhtml);
+        assert_eq!(blocks.len(), 2, "blocks: {:#?}", blocks);
+
+        let Block::Table {
+            id,
+            rows,
+            cell_spans,
+        } = &blocks[0]
+        else {
+            panic!("Expected Table, got {:?}", blocks[0]);
+        };
+        assert_eq!(id, "tbl_rich");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(cell_spans.len(), 3);
+
+        // 1:1 parity between rows[r][c] and cell_spans[r][c]
+        for (r_idx, (row, span_row)) in rows.iter().zip(cell_spans.iter()).enumerate() {
+            assert_eq!(row.len(), span_row.len(), "row {r_idx} column count");
+            for (c_idx, (plain, spans)) in row.iter().zip(span_row.iter()).enumerate() {
+                let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+                assert_eq!(plain, &joined, "mismatch at cell ({r_idx}, {c_idx})");
+            }
+        }
+
+        // Row 0: <tr id="tr_hdr"> and <th id="th_1"> contained in (0, 0); <td id="td_empty"/> in (0, 1)
+        let r0c0_anchors: Vec<&str> = cell_spans[0][0]
+            .iter()
+            .filter_map(|s| s.anchor_id.as_deref())
+            .collect();
+        assert_eq!(r0c0_anchors, vec!["tr_hdr", "th_1"]);
+        assert!(
+            cell_spans[0][0]
+                .iter()
+                .any(|s| s.text == "Header" && s.resolved_styles().format.bold)
+        );
+        assert!(
+            cell_spans[0][0]
+                .iter()
+                .any(|s| s.text == "Link" && s.href.as_deref() == Some("#ref1"))
+        );
+        assert_eq!(rows[0][1], "");
+        assert_eq!(
+            cell_spans[0][1]
+                .iter()
+                .filter_map(|s| s.anchor_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["td_empty"]
+        );
+
+        // Row 1: unclosed <b><a href="#bleed"> does NOT bleed into cell (1, 1)
+        assert_eq!(rows[1][0], "Unclosed");
+        assert!(
+            cell_spans[1][0]
+                .iter()
+                .any(|s| s.anchor_id.as_deref() == Some("td_unclosed"))
+        );
+        assert_eq!(rows[1][1], "CleanCell 漢");
+        assert!(
+            cell_spans[1][1]
+                .iter()
+                .all(|s| { !s.resolved_styles().format.bold && s.href.is_none() })
+        );
+        assert!(
+            cell_spans[1][1]
+                .iter()
+                .any(|s| s.text == "漢" && s.ruby.as_deref() == Some("かん"))
+        );
+
+        // Row 2: nested table preserves child styles/links/anchors and <hr/> appends ---
+        assert_eq!(rows[2][0], "Before --- N1 N2 After");
+        assert!(
+            cell_spans[2][0]
+                .iter()
+                .any(|s| s.anchor_id.as_deref() == Some("inner_p"))
+        );
+        assert!(
+            cell_spans[2][0]
+                .iter()
+                .any(|s| s.anchor_id.as_deref() == Some("nested_tbl"))
+        );
+        assert!(
+            cell_spans[2][0]
+                .iter()
+                .any(|s| s.anchor_id.as_deref() == Some("nc1")
+                    && s.text == "N1"
+                    && s.resolved_styles().format.italic)
+        );
+        assert!(
+            cell_spans[2][0]
+                .iter()
+                .any(|s| s.text == "N2" && s.href.as_deref() == Some("#n2"))
+        );
+        assert!(
+            cell_spans[2][0]
+                .iter()
+                .any(|s| s.anchor_id.as_deref() == Some("empty_a"))
+        );
+        assert_eq!(rows[2][1], "P1 P2");
+
+        // Post-table paragraph has no leaked bold, href, or table anchors
+        match &blocks[1] {
+            Block::Paragraph { spans, .. } => {
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].text, "Post table clean");
+                assert!(!spans[0].resolved_styles().format.bold);
+                assert!(spans[0].href.is_none());
+                assert!(spans[0].anchor_id.is_none());
+            }
+            other => panic!("Expected clean post-table Paragraph, got {:?}", other),
+        }
+
+        // 3. Unclosed table at EOF flushes cell_spans 1:1 with rows and contains anchors
+        let eof_blocks = parse_xhtml_blocks(r#"<html><body><table><tr><td id="eof_c"><b>A"#);
+        assert_eq!(eof_blocks.len(), 1);
+        match &eof_blocks[0] {
+            Block::Table {
+                rows, cell_spans, ..
+            } => {
+                assert_eq!(rows, &vec![vec!["A"]]);
+                assert_eq!(cell_spans[0][0][0].text, "A");
+                assert_eq!(cell_spans[0][0][0].anchor_id.as_deref(), Some("eof_c"));
+                assert!(cell_spans[0][0][0].resolved_styles().format.bold);
+            }
+            other => panic!("Expected Table at EOF, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_stage3b_image_links_svg_xlink_and_in_cell_img() {
+        let xhtml = r##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink">
+<body>
+  <p><a href="#t1"><img src="fig1.png" alt="Diagram"/></a></p>
+  <p><a id="a_img" href="ch2.xhtml#fig"><img src="fig2.png"/></a></p>
+  <svg><a xlink:href="#svg_t"><image xlink:href="vec.svg"/></a></svg>
+  <p><a href="javascript:alert(1)"><img src="blocked.png"/></a></p>
+  <table>
+    <tr>
+      <td id="c_img"><a id="cell_a" href="#cell_t"><img id="img_id" src="icon.png" alt="Cell Img"/></a></td>
+      <td><img id="no_alt_img" src="empty.png" alt=""/></td>
+    </tr>
+  </table>
+</body>
+</html>"##;
+
+        let blocks = parse_xhtml_blocks(xhtml);
+        assert_eq!(blocks.len(), 5, "blocks: {:#?}", blocks);
+
+        match &blocks[0] {
+            Block::Image {
+                resource_id,
+                alt,
+                href,
+                ..
+            } => {
+                assert_eq!(resource_id, "fig1.png");
+                assert_eq!(alt.as_deref(), Some("Diagram"));
+                assert_eq!(href.as_deref(), Some("#t1"));
+            }
+            other => panic!("Expected linked Image 1, got {:?}", other),
+        }
+
+        // <a id="a_img" href="ch2.xhtml#fig"><img src="fig2.png"/></a> adopts a_img without dangling span
+        match &blocks[1] {
+            Block::Image {
+                id,
+                resource_id,
+                href,
+                ..
+            } => {
+                assert_eq!(id, "a_img");
+                assert_eq!(resource_id, "fig2.png");
+                assert_eq!(href.as_deref(), Some("ch2.xhtml#fig"));
+            }
+            other => panic!("Expected linked Image 2, got {:?}", other),
+        }
+
+        // SVG <a xlink:href><image xlink:href/></a>
+        match &blocks[2] {
+            Block::Image {
+                resource_id, href, ..
+            } => {
+                assert_eq!(resource_id, "vec.svg");
+                assert_eq!(href.as_deref(), Some("#svg_t"));
+            }
+            other => panic!("Expected SVG linked Image 3, got {:?}", other),
+        }
+
+        // Blocked href degrades cleanly to href: None
+        match &blocks[3] {
+            Block::Image {
+                resource_id, href, ..
+            } => {
+                assert_eq!(resource_id, "blocked.png");
+                assert_eq!(*href, None);
+            }
+            other => panic!("Expected unlinked blocked Image 4, got {:?}", other),
+        }
+
+        // In-cell <img> emits linked TextSpan for alt and retains anchor when alt is empty
+        match &blocks[4] {
+            Block::Table {
+                rows, cell_spans, ..
+            } => {
+                assert_eq!(rows[0][0], "Cell Img");
+                let img_span = cell_spans[0][0]
+                    .iter()
+                    .find(|s| s.text == "Cell Img")
+                    .expect("missing Cell Img span");
+                assert_eq!(img_span.href.as_deref(), Some("#cell_t"));
+                assert_eq!(img_span.anchor_id.as_deref(), Some("cell_a"));
+                let cell0_anchors: Vec<&str> = cell_spans[0][0]
+                    .iter()
+                    .filter_map(|s| s.anchor_id.as_deref())
+                    .collect();
+                assert_eq!(cell0_anchors, vec!["c_img", "img_id", "cell_a"]);
+
+                assert_eq!(rows[0][1], "");
+                let cell1_anchors: Vec<&str> = cell_spans[0][1]
+                    .iter()
+                    .filter_map(|s| s.anchor_id.as_deref())
+                    .collect();
+                assert_eq!(cell1_anchors, vec!["no_alt_img"]);
+            }
+            other => panic!("Expected Table block 5, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_stage3c_link_pseudo_css_resolution_and_last_wins_cleanup() {
+        let mut book_css = CssStylesheet::new();
+        book_css.add_css(
+            r#"
+            a:link { color: #0044AA; text-decoration: underline; font-weight: bold; }
+            a:visited { color: purple; font-style: italic; }
+            a.plain:link { text-decoration: none; font-weight: normal; color: #006633; }
+            a.plain:visited { font-style: normal; color: navy; }
+            "#,
+        );
+
+        let xhtml = r##"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <p><a href="#ch2">Default</a> <a class="plain" href="#ch3"><span style="color: #880000">Plain</span></a> <a id="anc_only">AnchorOnly</a> <a href="javascript:void(0)">Blocked</a></p>
+</body>
+</html>"##;
+
+        let (blocks, _) = parse_xhtml_with_css(xhtml, &HashMap::new(), &book_css);
+        assert_eq!(blocks.len(), 1);
+        let Block::Paragraph { spans, .. } = &blocks[0] else {
+            panic!("Expected Paragraph, got {:?}", blocks[0]);
+        };
+
+        let def_span = spans.iter().find(|s| s.text == "Default").unwrap();
+        let def_classes = &def_span.resolved_styles().custom_classes;
+        assert!(
+            def_classes
+                .iter()
+                .any(|c| c == "link_unvisited_color_0044AA")
+        );
+        assert!(def_classes.iter().any(|c| c == "link_unvisited_underline"));
+        assert!(def_classes.iter().any(|c| c == "link_unvisited_bold"));
+        assert!(def_classes.iter().any(|c| c == "link_visited_color_800080"));
+        assert!(def_classes.iter().any(|c| c == "link_visited_italic"));
+
+        // .plain overrides replace prior unvisited/visited tokens cleanly (last-wins),
+        // while inner <span style="color: #880000"> keeps its own color token without clobbering link_state colors.
+        let plain_span = spans.iter().find(|s| s.text == "Plain").unwrap();
+        let plain_classes = &plain_span.resolved_styles().custom_classes;
+        assert!(
+            plain_classes
+                .iter()
+                .any(|c| c == "link_unvisited_underline_none")
+        );
+        assert!(
+            !plain_classes
+                .iter()
+                .any(|c| c == "link_unvisited_underline")
+        );
+        assert!(
+            plain_classes
+                .iter()
+                .any(|c| c == "link_unvisited_weight_normal")
+        );
+        assert!(!plain_classes.iter().any(|c| c == "link_unvisited_bold"));
+        assert!(
+            plain_classes
+                .iter()
+                .any(|c| c == "link_unvisited_color_006633")
+        );
+        assert!(
+            !plain_classes
+                .iter()
+                .any(|c| c == "link_unvisited_color_0044AA")
+        );
+        assert!(
+            plain_classes
+                .iter()
+                .any(|c| c == "link_visited_style_normal")
+        );
+        assert!(!plain_classes.iter().any(|c| c == "link_visited_italic"));
+        assert!(
+            plain_classes
+                .iter()
+                .any(|c| c == "link_visited_color_000080")
+        );
+        assert!(
+            !plain_classes
+                .iter()
+                .any(|c| c == "link_visited_color_800080")
+        );
+        assert!(plain_classes.iter().any(|c| c == "color__880000"));
+
+        // Non-href and blocked-href anchors must NOT receive link_unvisited_* / link_visited_* tokens
+        for label in ["AnchorOnly", "Blocked"] {
+            let s = spans.iter().find(|s| s.text == label).unwrap();
+            let classes = &s.resolved_styles().custom_classes;
+            assert!(
+                classes
+                    .iter()
+                    .all(|c| !c.starts_with("link_unvisited_") && !c.starts_with("link_visited_")),
+                "Anchor {label} unexpectedly received link-state tokens: {classes:?}"
+            );
+        }
+
+        // Direct last-wins check across stacked style_stack frames in resolve_active_span_attrs
+        let stack = vec![
+            StyleFrameKind::Inline {
+                tag: b"a".to_vec(),
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                sup: false,
+                sub: false,
+                code: false,
+                css_tokens: vec![
+                    "link_unvisited_underline".to_string(),
+                    "link_unvisited_bold".to_string(),
+                    "link_unvisited_color_0044AA".to_string(),
+                    "link_visited_italic".to_string(),
+                    "link_visited_color_800080".to_string(),
+                ],
+                href: Some("#x".to_string()),
+                anchor: None,
+                is_noteref: false,
+                emitted_span: false,
+            },
+            StyleFrameKind::Inline {
+                tag: b"span".to_vec(),
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                sup: false,
+                sub: false,
+                code: false,
+                css_tokens: vec![
+                    "link_unvisited_underline_none".to_string(),
+                    "link_unvisited_weight_normal".to_string(),
+                    "link_unvisited_color_006633".to_string(),
+                    "link_visited_style_normal".to_string(),
+                    "link_visited_color_000080".to_string(),
+                ],
+                href: None,
+                anchor: None,
+                is_noteref: false,
+                emitted_span: false,
+            },
+        ];
+        let attrs = resolve_active_span_attrs(&stack);
+        let tokens: Vec<&str> = attrs
+            .style
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        assert_eq!(
+            tokens,
+            vec![
+                "link_unvisited_underline_none",
+                "link_unvisited_weight_normal",
+                "link_unvisited_color_006633",
+                "link_visited_style_normal",
+                "link_visited_color_000080",
+            ]
         );
     }
 }

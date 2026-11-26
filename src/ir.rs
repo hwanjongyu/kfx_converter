@@ -388,11 +388,13 @@ pub enum Block {
         alt: Option<String>,
         width: Option<u32>,
         height: Option<u32>,
+        href: Option<String>,
     },
     HorizontalRule,
     Table {
         id: String,
         rows: Vec<Vec<String>>,
+        cell_spans: Vec<Vec<Vec<TextSpan>>>,
     },
     List {
         id: String,
@@ -703,17 +705,24 @@ impl Clone for Block {
                     alt,
                     width,
                     height,
+                    href,
                 } => Some(Block::Image {
                     id: id.clone(),
                     resource_id: resource_id.clone(),
                     alt: alt.clone(),
                     width: *width,
                     height: *height,
+                    href: href.clone(),
                 }),
                 Block::HorizontalRule => Some(Block::HorizontalRule),
-                Block::Table { id, rows } => Some(Block::Table {
+                Block::Table {
+                    id,
+                    rows,
+                    cell_spans,
+                } => Some(Block::Table {
                     id: id.clone(),
                     rows: rows.clone(),
+                    cell_spans: cell_spans.clone(),
                 }),
                 Block::List { .. } => None,
             }
@@ -992,27 +1001,52 @@ impl BookIR {
             }
         }
 
-        // Iteratively remap internal TextSpan.href targets across fragmented sections
+        // Iteratively remap internal TextSpan.href and Block::Image.href targets across fragmented sections
         if !anchor_part_map.is_empty() || !section_first_part_map.is_empty() {
+            let remap_spans = |spans: &mut [TextSpan], current_sec_id: &str, orig_id: &str| {
+                for span in spans {
+                    let Some(ref raw_href) = span.href else {
+                        continue;
+                    };
+                    if let Some(rewritten) = remap_internal_href(
+                        raw_href,
+                        current_sec_id,
+                        orig_id,
+                        &anchor_part_map,
+                        &section_first_part_map,
+                    ) {
+                        span.href = Some(rewritten);
+                    }
+                }
+            };
+
             for (sec, orig_id) in self.sections.iter_mut().zip(sec_orig_ids.iter()) {
                 let current_sec_id = sec.id.clone();
                 let mut stack: Vec<&mut Block> = sec.blocks.iter_mut().rev().collect();
                 while let Some(block) = stack.pop() {
                     match block {
                         Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
-                            for span in spans {
-                                let Some(ref raw_href) = span.href else {
-                                    continue;
-                                };
-                                if let Some(rewritten) = remap_internal_href(
-                                    raw_href,
-                                    &current_sec_id,
-                                    orig_id,
-                                    &anchor_part_map,
-                                    &section_first_part_map,
-                                ) {
-                                    span.href = Some(rewritten);
+                            remap_spans(spans, &current_sec_id, orig_id);
+                        }
+                        Block::Table { cell_spans, .. } => {
+                            for row in cell_spans {
+                                for cell in row {
+                                    remap_spans(cell, &current_sec_id, orig_id);
                                 }
+                            }
+                        }
+                        Block::Image {
+                            href: Some(raw_href),
+                            ..
+                        } => {
+                            if let Some(rewritten) = remap_internal_href(
+                                raw_href,
+                                &current_sec_id,
+                                orig_id,
+                                &anchor_part_map,
+                                &section_first_part_map,
+                            ) {
+                                *raw_href = rewritten;
                             }
                         }
                         Block::List { items, .. } => {
@@ -1022,7 +1056,7 @@ impl BookIR {
                                 }
                             }
                         }
-                        Block::Image { .. } | Block::HorizontalRule | Block::Table { .. } => {}
+                        Block::Image { href: None, .. } | Block::HorizontalRule => {}
                     }
                 }
             }
@@ -1174,6 +1208,7 @@ impl BookIR {
                         alt: Some("Cover".to_string()),
                         width: None,
                         height: None,
+                        href: None,
                     }],
                 });
                 sections.extend(self.sections.iter().cloned());
@@ -1217,6 +1252,7 @@ impl BookIR {
                         alt: Some("Cover".to_string()),
                         width: None,
                         height: None,
+                        href: None,
                     }],
                 };
                 self.sections.insert(0, cover_section);
@@ -1343,6 +1379,17 @@ fn remap_internal_href(
     section_first_part_map.get(sec_part).cloned()
 }
 
+fn push_clean_span_anchors(spans: &[TextSpan], anchors: &mut Vec<String>) {
+    for s in spans {
+        if let Some(ref anchor) = s.anchor_id {
+            let clean = anchor.trim().trim_start_matches('#');
+            if !clean.is_empty() {
+                anchors.push(clean.to_string());
+            }
+        }
+    }
+}
+
 fn collect_block_anchors(block: &Block, include_block_ids: bool) -> Vec<String> {
     let mut anchors = Vec::new();
     let mut stack = vec![block];
@@ -1352,12 +1399,15 @@ fn collect_block_anchors(block: &Block, include_block_ids: bool) -> Vec<String> 
                 if include_block_ids && !id.is_empty() {
                     anchors.push(id.clone());
                 }
-                for s in spans {
-                    if let Some(ref anchor) = s.anchor_id {
-                        let clean = anchor.trim().trim_start_matches('#');
-                        if !clean.is_empty() {
-                            anchors.push(clean.to_string());
-                        }
+                push_clean_span_anchors(spans, &mut anchors);
+            }
+            Block::Table { id, cell_spans, .. } => {
+                if include_block_ids && !id.is_empty() {
+                    anchors.push(id.clone());
+                }
+                for row in cell_spans {
+                    for cell in row {
+                        push_clean_span_anchors(cell, &mut anchors);
                     }
                 }
             }
@@ -1371,7 +1421,7 @@ fn collect_block_anchors(block: &Block, include_block_ids: bool) -> Vec<String> 
                     }
                 }
             }
-            Block::Image { id, .. } | Block::Table { id, .. } => {
+            Block::Image { id, .. } => {
                 if include_block_ids && !id.is_empty() {
                     anchors.push(id.clone());
                 }
@@ -1744,6 +1794,7 @@ mod tests {
             alt: Some("A diagram".to_string()),
             width: Some(100),
             height: Some(100),
+            href: None,
         };
         assert_eq!(image.plain_text(), "A diagram");
         assert_eq!(image.char_count(), 9);
@@ -1758,6 +1809,7 @@ mod tests {
                 vec!["Col1".to_string(), "Col2".to_string()],
                 vec!["Val1".to_string(), "Val2".to_string()],
             ],
+            cell_spans: Vec::new(),
         };
         assert_eq!(table.char_count(), 19);
         assert_eq!(table.char_count(), table.plain_text().chars().count());
@@ -1877,6 +1929,7 @@ mod tests {
             alt: None,
             width: None,
             height: None,
+            href: None,
         };
         assert_eq!(Block::image_fallback_text(None), "[Image]");
         assert_eq!(Block::image_fallback_text(Some("   ")), "[Image]");
@@ -2612,6 +2665,7 @@ mod tests {
             alt: Some("A".repeat(400)),
             width: Some(800),
             height: Some(600),
+            href: None,
         };
         assert_eq!(img_long_alt.yellowjacket_pid_len(true), 1);
         assert_eq!(img_long_alt.yellowjacket_pid_len(false), 400);
@@ -2652,5 +2706,194 @@ mod tests {
         assert_eq!(ContentType::from_lossy(""), ContentType::Ebok);
         assert_eq!(ContentType::from_lossy("../../evil"), ContentType::Ebok);
         assert_eq!(ContentType::from_lossy("PDOC2"), ContentType::Ebok);
+    }
+
+    #[test]
+    fn test_stage3_collect_block_anchors_and_clone_table_and_image() {
+        let tbl = Block::Table {
+            id: "tbl_main".to_string(),
+            rows: vec![vec!["Cell A".to_string(), "Cell B".to_string()]],
+            cell_spans: vec![vec![
+                vec![
+                    TextSpan {
+                        text: String::new(),
+                        anchor_id: Some("  #td_a  ".to_string()),
+                        ..Default::default()
+                    },
+                    TextSpan {
+                        text: "Cell A".to_string(),
+                        anchor_id: Some("   ".to_string()),
+                        href: Some("#target".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                vec![TextSpan {
+                    text: "Cell B".to_string(),
+                    anchor_id: Some("span_b".to_string()),
+                    ..Default::default()
+                }],
+            ]],
+        };
+
+        assert_eq!(
+            collect_block_anchors(&tbl, false),
+            vec!["td_a".to_string(), "span_b".to_string()]
+        );
+        assert_eq!(
+            collect_block_anchors(&tbl, true),
+            vec![
+                "tbl_main".to_string(),
+                "td_a".to_string(),
+                "span_b".to_string(),
+            ]
+        );
+
+        let img = Block::Image {
+            id: "img_link".to_string(),
+            resource_id: "fig.png".to_string(),
+            alt: Some("Fig".to_string()),
+            width: Some(10),
+            height: Some(20),
+            href: Some("sec_1#td_a".to_string()),
+        };
+        let cloned_tbl = tbl.clone();
+        let cloned_img = img.clone();
+        assert_eq!(collect_block_anchors(&cloned_tbl, true).len(), 3);
+        match &cloned_img {
+            Block::Image { href, .. } => assert_eq!(href.as_deref(), Some("sec_1#td_a")),
+            _ => panic!("Expected Block::Image"),
+        }
+    }
+
+    #[test]
+    fn test_stage3_fragment_large_sections_remaps_table_and_image_hrefs() {
+        let mut book = BookIR::default();
+        book.sections.push(Section {
+            id: "sec_1".to_string(),
+            title: "Section 1".to_string(),
+            blocks: vec![
+                Block::Paragraph {
+                    id: "p_0".to_string(),
+                    spans: vec![TextSpan {
+                        text: "a".repeat(400),
+                        href: None,
+                        ..Default::default()
+                    }],
+                    style: None,
+                },
+                Block::Table {
+                    id: "tbl_links".to_string(),
+                    rows: vec![vec![
+                        "Link to part2".to_string(),
+                        "Nested target".to_string(),
+                    ]],
+                    cell_spans: vec![vec![
+                        vec![TextSpan {
+                            text: "Link to part2".to_string(),
+                            href: Some("#cell_target".to_string()),
+                            ..Default::default()
+                        }],
+                        vec![TextSpan {
+                            text: "Nested target".to_string(),
+                            href: Some("https://example.com".to_string()),
+                            ..Default::default()
+                        }],
+                    ]],
+                },
+                Block::List {
+                    id: "list_links".to_string(),
+                    ordered: false,
+                    items: vec![
+                        vec![Block::Image {
+                            id: "img_in_list".to_string(),
+                            resource_id: "fig.png".to_string(),
+                            alt: Some("Diagram".to_string()),
+                            width: None,
+                            height: None,
+                            href: Some("#cell_target".to_string()),
+                        }],
+                        vec![Block::Table {
+                            id: "tbl_in_list".to_string(),
+                            rows: vec![vec!["To top".to_string()]],
+                            cell_spans: vec![vec![vec![TextSpan {
+                                text: "To top".to_string(),
+                                href: Some("sec_1".to_string()),
+                                ..Default::default()
+                            }]]],
+                        }],
+                    ],
+                },
+                Block::Paragraph {
+                    id: "p_1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "b".repeat(400),
+                        ..Default::default()
+                    }],
+                    style: None,
+                },
+                Block::Table {
+                    id: "tbl_anchor_holder".to_string(),
+                    rows: vec![vec!["Target cell".to_string()]],
+                    cell_spans: vec![vec![vec![TextSpan {
+                        text: "Target cell".to_string(),
+                        anchor_id: Some("cell_target".to_string()),
+                        ..Default::default()
+                    }]]],
+                },
+            ],
+        });
+
+        book.fragment_large_sections(450, 10);
+        assert!(
+            book.sections.len() >= 2,
+            "Section should fragment into multiple parts"
+        );
+
+        let target_part = book
+            .sections
+            .iter()
+            .find(|s| {
+                s.blocks
+                    .iter()
+                    .any(|b| collect_block_anchors(b, false).contains(&"cell_target".to_string()))
+            })
+            .map(|s| s.id.clone())
+            .expect("Fragmented section containing cell_target anchor");
+        assert_ne!(target_part, book.sections[0].id);
+
+        let expected_cell_href = format!("{}#cell_target", target_part);
+        match &book.sections[0].blocks[1] {
+            Block::Table { cell_spans, .. } => {
+                assert_eq!(
+                    cell_spans[0][0][0].href.as_deref(),
+                    Some(expected_cell_href.as_str())
+                );
+                assert_eq!(
+                    cell_spans[0][1][0].href.as_deref(),
+                    Some("https://example.com")
+                );
+            }
+            other => panic!("Expected top-level Table, got {:?}", other),
+        }
+        match &book.sections[0].blocks[2] {
+            Block::List { items, .. } => {
+                match &items[0][0] {
+                    Block::Image { href, .. } => {
+                        assert_eq!(href.as_deref(), Some(expected_cell_href.as_str()));
+                    }
+                    other => panic!("Expected list-nested Image, got {:?}", other),
+                }
+                match &items[1][0] {
+                    Block::Table { cell_spans, .. } => {
+                        assert_eq!(
+                            cell_spans[0][0][0].href.as_deref(),
+                            Some(book.sections[0].id.as_str())
+                        );
+                    }
+                    other => panic!("Expected list-nested Table, got {:?}", other),
+                }
+            }
+            other => panic!("Expected List block, got {:?}", other),
+        }
     }
 }

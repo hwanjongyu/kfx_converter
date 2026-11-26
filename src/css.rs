@@ -202,6 +202,15 @@ pub fn intern_css_property(prop: &str) -> Cow<'static, str> {
     }
 }
 
+/// Pseudo-element or link-state pseudo-class attached to a [`CssRule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectorPseudo {
+    None,
+    FirstLetter,
+    Link,
+    Visited,
+}
+
 /// A single simple-selector rule.
 #[derive(Debug, Clone)]
 struct CssRule {
@@ -214,8 +223,8 @@ struct CssRule {
     decls: Arc<[(Cow<'static, str>, String)]>,
     /// Source order, used as tiebreaker after specificity.
     order: usize,
-    /// Whether this rule matches a `::first-letter` or `:first-letter` pseudo-element.
-    is_first_letter: bool,
+    /// Pseudo-element / link-state pseudo-class matched by this rule.
+    pseudo: SelectorPseudo,
 }
 
 impl CssRule {
@@ -229,6 +238,7 @@ impl CssRule {
 pub struct CssStylesheet {
     rules: Vec<CssRule>,
     has_first_letter: bool,
+    has_link_pseudo: bool,
     total_parsed_decls: usize,
     by_class: HashMap<String, Vec<usize>>,
     by_tag: HashMap<String, Vec<usize>>,
@@ -416,17 +426,35 @@ impl CssStylesheet {
                     break;
                 }
                 let s = raw_sel.trim();
-                let (target_sel, is_first_letter) =
-                    if let Some(stripped) = s.strip_suffix("::first-letter") {
-                        (stripped.trim(), true)
-                    } else if let Some(stripped) = s.strip_suffix(":first-letter") {
-                        (stripped.trim(), true)
-                    } else {
-                        (s, false)
-                    };
-                if let Some((tag, classes)) = parse_simple_selector(target_sel) {
-                    if is_first_letter {
-                        self.has_first_letter = true;
+                let (target_sel, pseudo) = if let Some(stripped) = s.strip_suffix("::first-letter")
+                {
+                    (stripped.trim(), SelectorPseudo::FirstLetter)
+                } else if let Some(stripped) = s.strip_suffix(":first-letter") {
+                    (stripped.trim(), SelectorPseudo::FirstLetter)
+                } else if s.len() >= 5 && s.as_bytes()[s.len() - 5..].eq_ignore_ascii_case(b":link")
+                {
+                    (s[..s.len() - 5].trim(), SelectorPseudo::Link)
+                } else if s.len() >= 8
+                    && s.as_bytes()[s.len() - 8..].eq_ignore_ascii_case(b":visited")
+                {
+                    (s[..s.len() - 8].trim(), SelectorPseudo::Visited)
+                } else {
+                    (s, SelectorPseudo::None)
+                };
+                let parsed_sel = if matches!(pseudo, SelectorPseudo::Link | SelectorPseudo::Visited)
+                    && target_sel.is_empty()
+                {
+                    Some((Some("a".to_string()), Vec::new()))
+                } else {
+                    parse_simple_selector(target_sel)
+                };
+                if let Some((tag, classes)) = parsed_sel {
+                    match pseudo {
+                        SelectorPseudo::FirstLetter => self.has_first_letter = true,
+                        SelectorPseudo::Link | SelectorPseudo::Visited => {
+                            self.has_link_pseudo = true
+                        }
+                        SelectorPseudo::None => {}
                     }
                     let idx = self.rules.len();
                     if !classes.is_empty() {
@@ -444,7 +472,7 @@ impl CssStylesheet {
                         classes,
                         decls: Arc::clone(&decls),
                         order: idx,
-                        is_first_letter,
+                        pseudo,
                     });
                 }
             }
@@ -455,17 +483,21 @@ impl CssStylesheet {
         &'a self,
         tag: &str,
         class_slice: &[&str],
-        first_letter: bool,
+        pseudo: SelectorPseudo,
         tier: u8,
         out: &mut Vec<((usize, usize), u8, usize, &'a CssRule)>,
     ) {
-        if self.rules.is_empty() || (first_letter && !self.has_first_letter) {
+        if self.rules.is_empty()
+            || (pseudo == SelectorPseudo::FirstLetter && !self.has_first_letter)
+            || (matches!(pseudo, SelectorPseudo::Link | SelectorPseudo::Visited)
+                && !self.has_link_pseudo)
+        {
             return;
         }
         let mut check_bucket = |indices: &[usize]| {
             for &idx in indices {
                 let r = &self.rules[idx];
-                if r.is_first_letter == first_letter
+                if r.pseudo == pseudo
                     && r.tag.as_deref().is_none_or(|t| t.eq_ignore_ascii_case(tag))
                     && (r.classes.is_empty()
                         || (!class_slice.is_empty()
@@ -517,20 +549,35 @@ impl CssStylesheet {
         &self,
         tag: &str,
         class_attr: Option<&str>,
-        first_letter: bool,
+        pseudo: SelectorPseudo,
     ) -> String {
-        CssCascade::new(self, None).resolve_layered(tag, class_attr, first_letter)
+        CssCascade::new(self, None).resolve_layered(tag, class_attr, pseudo)
+    }
+
+    /// Returns `true` if this stylesheet contains any `:link` or `:visited` rules.
+    pub fn has_link_pseudo(&self) -> bool {
+        self.has_link_pseudo
     }
 
     /// Returns the cascaded declarations for an element as a `prop: value; ...` string,
     /// ordered so that later declarations override earlier ones (last-wins).
     pub fn declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
-        self.resolve_declarations(tag, class_attr, false)
+        self.resolve_declarations(tag, class_attr, SelectorPseudo::None)
     }
 
     /// Returns the cascaded declarations for an element's `::first-letter` pseudo-element.
     pub fn first_letter_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
-        self.resolve_declarations(tag, class_attr, true)
+        self.resolve_declarations(tag, class_attr, SelectorPseudo::FirstLetter)
+    }
+
+    /// Returns the cascaded `:link` declarations for an element.
+    pub fn link_unvisited_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        self.resolve_declarations(tag, class_attr, SelectorPseudo::Link)
+    }
+
+    /// Returns the cascaded `:visited` declarations for an element.
+    pub fn link_visited_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        self.resolve_declarations(tag, class_attr, SelectorPseudo::Visited)
     }
 }
 
@@ -547,12 +594,25 @@ impl<'a> CssCascade<'a> {
         Self { base, overlay }
     }
 
-    fn resolve_layered(&self, tag: &str, class_attr: Option<&str>, first_letter: bool) -> String {
-        let base_empty =
-            self.base.rules.is_empty() || (first_letter && !self.base.has_first_letter);
-        let overlay_empty = self
-            .overlay
-            .is_none_or(|ov| ov.rules.is_empty() || (first_letter && !ov.has_first_letter));
+    /// Returns `true` if either `base` or `overlay` contains any `:link` or `:visited` rules.
+    pub fn has_link_pseudo(&self) -> bool {
+        self.base.has_link_pseudo || self.overlay.is_some_and(|ov| ov.has_link_pseudo)
+    }
+
+    fn resolve_layered(
+        &self,
+        tag: &str,
+        class_attr: Option<&str>,
+        pseudo: SelectorPseudo,
+    ) -> String {
+        let is_empty_for_pseudo = |sheet: &CssStylesheet| {
+            sheet.rules.is_empty()
+                || (pseudo == SelectorPseudo::FirstLetter && !sheet.has_first_letter)
+                || (matches!(pseudo, SelectorPseudo::Link | SelectorPseudo::Visited)
+                    && !sheet.has_link_pseudo)
+        };
+        let base_empty = is_empty_for_pseudo(self.base);
+        let overlay_empty = self.overlay.is_none_or(is_empty_for_pseudo);
         if base_empty && overlay_empty {
             return String::new();
         }
@@ -562,10 +622,10 @@ impl<'a> CssCascade<'a> {
         let mut matched: Vec<((usize, usize), u8, usize, &CssRule)> = Vec::new();
         if !base_empty {
             self.base
-                .collect_matching_rules(tag, class_slice, first_letter, 0, &mut matched);
+                .collect_matching_rules(tag, class_slice, pseudo, 0, &mut matched);
         }
         if !overlay_empty && let Some(ov) = self.overlay {
-            ov.collect_matching_rules(tag, class_slice, first_letter, 1, &mut matched);
+            ov.collect_matching_rules(tag, class_slice, pseudo, 1, &mut matched);
         }
         if matched.is_empty() {
             return String::new();
@@ -594,12 +654,22 @@ impl<'a> CssCascade<'a> {
 
     /// Returns cascaded declarations for an element across `base` and optional `overlay`.
     pub fn declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
-        self.resolve_layered(tag, class_attr, false)
+        self.resolve_layered(tag, class_attr, SelectorPseudo::None)
     }
 
     /// Returns cascaded `::first-letter` declarations across `base` and optional `overlay`.
     pub fn first_letter_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
-        self.resolve_layered(tag, class_attr, true)
+        self.resolve_layered(tag, class_attr, SelectorPseudo::FirstLetter)
+    }
+
+    /// Returns cascaded `:link` declarations across `base` and optional `overlay`.
+    pub fn link_unvisited_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        self.resolve_layered(tag, class_attr, SelectorPseudo::Link)
+    }
+
+    /// Returns cascaded `:visited` declarations across `base` and optional `overlay`.
+    pub fn link_visited_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        self.resolve_layered(tag, class_attr, SelectorPseudo::Visited)
     }
 }
 
@@ -1602,6 +1672,117 @@ mod tests {
                 "../Styles/base%201.css?v=2".to_string(),
                 "../Styles/a&b.css".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_stage3c_css_link_and_visited_pseudo_parsing_and_cascade() {
+        let mut base = CssStylesheet::new();
+        assert!(!base.has_link_pseudo());
+
+        base.add_css(
+            r#"
+            a:link { color: #0044aa; text-decoration: none; }
+            A:VISITED { color: purple; font-style: italic; }
+            .ext:link { font-weight: bold; }
+            a.btn:visited { text-decoration: underline; }
+            :link { letter-spacing: 1px; }
+            :visited { font-weight: normal; }
+            a:hover { color: red; }
+            a:active { color: green; }
+            a:focus { color: orange; }
+            a:link:hover { color: brown; }
+            a:hover:link { color: teal; }
+            a::link { color: crimson; }
+            .한글a { color: navy; }
+            "#,
+        );
+        assert!(base.has_link_pseudo());
+
+        // Unsupported pseudos and `::link` must not match `a` in any mode
+        for decls in [
+            base.declarations_for("a", None),
+            base.link_unvisited_declarations_for("a", None),
+            base.link_visited_declarations_for("a", None),
+        ] {
+            for forbidden in ["red", "green", "orange", "brown", "teal", "crimson"] {
+                assert!(
+                    !decls.contains(forbidden),
+                    "Unsupported pseudo leaked '{}': {}",
+                    forbidden,
+                    decls
+                );
+            }
+        }
+
+        // Unvisited `a` receives `:link` (bare -> `a`) + `a:link` without `:visited` leaking
+        let a_unvisited = base.link_unvisited_declarations_for("a", None);
+        assert!(a_unvisited.contains("color:#0044aa"), "{}", a_unvisited);
+        assert!(
+            a_unvisited.contains("text-decoration:none"),
+            "{}",
+            a_unvisited
+        );
+        assert!(
+            a_unvisited.contains("letter-spacing:1px"),
+            "{}",
+            a_unvisited
+        );
+        assert!(!a_unvisited.contains("purple"), "{}", a_unvisited);
+
+        // Bare `:link` / `:visited` must target `a`, never `<p>`
+        assert!(base.link_unvisited_declarations_for("p", None).is_empty());
+        assert!(base.link_visited_declarations_for("p", None).is_empty());
+        // Normal `declarations_for("a", ...)` must not include `:link`/`:visited` rules
+        assert!(base.declarations_for("a", None).is_empty());
+
+        // Class + tag specificity on `:link` / `:visited`
+        let ext_unvisited = base.link_unvisited_declarations_for("a", Some("ext"));
+        assert!(
+            ext_unvisited.contains("font-weight:bold"),
+            "{}",
+            ext_unvisited
+        );
+        assert!(ext_unvisited.contains("color:#0044aa"), "{}", ext_unvisited);
+
+        let btn_visited = base.link_visited_declarations_for("a", Some("btn"));
+        assert!(btn_visited.contains("color:purple"), "{}", btn_visited);
+        assert!(
+            btn_visited.contains("text-decoration:underline"),
+            "{}",
+            btn_visited
+        );
+        assert!(
+            btn_visited.contains("font-weight:normal"),
+            "{}",
+            btn_visited
+        );
+
+        // CssCascade: overlay-only `:link`/`:visited` sets `has_link_pseudo()` and overrides base
+        let plain_base = CssStylesheet::new();
+        let mut overlay = CssStylesheet::new();
+        overlay.add_css(
+            "a:link { color: #336699; } A.btn:VISITED { color: darkgreen; font-weight: bold; }",
+        );
+        let overlay_only = CssCascade::new(&plain_base, Some(&overlay));
+        assert!(overlay_only.has_link_pseudo());
+        assert!(!CssCascade::new(&plain_base, None).has_link_pseudo());
+
+        let layered = CssCascade::new(&base, Some(&overlay));
+        assert!(layered.has_link_pseudo());
+        let layered_unvisited = layered.link_unvisited_declarations_for("a", None);
+        assert!(
+            layered_unvisited.find("color:#0044aa").unwrap()
+                < layered_unvisited.find("color:#336699").unwrap(),
+            "{}",
+            layered_unvisited
+        );
+        let layered_visited = layered.link_visited_declarations_for("a", Some("btn"));
+        assert!(
+            layered_visited.find("color:purple").unwrap()
+                < layered_visited.find("color:darkgreen").unwrap(),
+            "{}",
+            layered_visited
         );
     }
 }

@@ -348,6 +348,7 @@ mod tests {
             alt: None,
             width: None,
             height: None,
+            href: None,
         };
         for i in 0..20_000usize {
             nested = Block::List {
@@ -371,6 +372,7 @@ mod tests {
                     alt: None,
                     width: None,
                     height: None,
+                    href: None,
                 },
                 nested,
                 Block::Image {
@@ -379,6 +381,7 @@ mod tests {
                     alt: None,
                     width: None,
                     height: None,
+                    href: None,
                 },
             ],
         });
