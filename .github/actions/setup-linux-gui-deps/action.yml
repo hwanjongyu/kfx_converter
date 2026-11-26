@@ -1,0 +1,17 @@
+name: Setup Linux GUI Dependencies
+description: Installs Ubuntu development libraries required to compile GPUI (kfx-studio).
+runs:
+  using: composite
+  steps:
+    - name: Install Linux system dependencies (required for GPUI compilation)
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config \
+          libasound2-dev \
+          libxkbcommon-dev \
+          libxkbcommon-x11-dev \
+          libvulkan-dev \
+          libwayland-dev \
+          libfontconfig1-dev

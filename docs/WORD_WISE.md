@@ -98,8 +98,8 @@ At render time, the Kindle decoding routine unpacks the Base64 bytes directly in
 
 ## 4. The Companion Sidecar Database (`.kll`) Specification
 
-The companion sidecar file resides inside the book's companion SDR directory:
-$$\text{/documents/\{Author\}/\{Title\}.sdr/LanguageLayer.\{target\_lang\}.\{ASIN\}.kll}$$
+The companion sidecar file resides inside the book's flat companion SDR directory under `/documents/`:
+$$\text{/documents/\{safe\_title\}.sdr/LanguageLayer.\{target\_lang\}.\{ASIN\}.kll}$$
 
 ### 4.1 SQLite Table Schemas
 
@@ -116,6 +116,7 @@ CREATE TABLE glosses (
     sense_id INTEGER,           -- References senses.id in kll.en.en.klld
     low_confidence BOOLEAN      -- Confidence flag (0 = high confidence)
 );
+CREATE INDEX IF NOT EXISTS idx_glosses_diff_start ON glosses (difficulty, start);
 ```
 
 ### 4.2 Mandatory Metadata Keys
@@ -178,11 +179,12 @@ In a full-length 300-page commercial novel:
 For in-line glosses to render above the exact target word, the `start` integer in `glosses` must match Yellowjacket's internal linear **Position Identifier (PID)**.
 
 ### 6.1 Yellowjacket PID Formula
-Yellowjacket allocates PIDs linearly across the document based on its internal structural elements:
+Yellowjacket allocates PIDs linearly across the document using **UTF-16 code units** (`str::encode_utf16().count()` / `ch.len_utf16()`, so non-BMP characters such as emojis count as 2 code units):
 1. Each **Section Root** consumes exactly **1 PID**.
-2. Each **Block Element** (Paragraph, Heading, List Item) consumes PIDs equal to the character length of its text:
-   $$\text{Block PID Length} = \max(1, \text{char\_count})$$
-3. An empty block or section placeholder consumes **1 PID**.
+2. Each **Text Block Element** (Paragraph, Heading, List, Table, or unresolved `$269` image fallback) consumes PIDs equal to the UTF-16 code-unit length of its plain text:
+   $$\text{Block PID Length} = \max(1, \text{utf16\_len})$$
+3. Each **Resolved Image Element (`$271 image`)** consumes exactly **1 PID** (`$584 alt_text` is metadata, never flow text).
+4. An empty block or section placeholder consumes **1 PID**.
 
 ```
 +--------------------------------------------------------------------------------+
@@ -197,11 +199,11 @@ Yellowjacket allocates PIDs linearly across the document based on its internal s
 +--------------------------------------------------------------------------------+
 ```
 
-### 6.2 Word Character Start Calculation
+### 6.2 Word Start Offset Calculation
 Within any text block starting at base `block_base_pid`:
-$$\text{Word Gloss PID} = \text{section\_root\_pid} + \text{block\_offset} + \text{char\_index}$$
+$$\text{Word Gloss PID} = \text{section\_root\_pid} + \text{block\_offset} + \text{utf16\_code\_unit\_index}$$
 
-Where `char_index` is the 0-indexed Unicode character offset of the first letter of the word within the plain text string.
+Where `utf16_code_unit_index` is the 0-indexed UTF-16 code-unit offset of the first letter of the word within the block's plain text string (accumulated via `ch.len_utf16()`).
 
 ---
 
@@ -244,7 +246,7 @@ When testing or re-deploying books via USB, Kindle OS frequently caches previous
 ```mermaid
 flowchart LR
     BOOK_IR[BookIR Document] --> WW_BUILDER[WordWiseBuilder]
-    EMBEDDED_DICT[wordwise_dict.bin<br/><i>20,666 Ground Truth Lemmas</i>] --> LEMMA_DICT[LemmaDictionary]
+    EMBEDDED_DICT[wordwise_dict.bin<br/><i>52,000+ Ground Truth Lemmas</i>] --> LEMMA_DICT[LemmaDictionary]
     LEMMA_DICT -->|Lookup + Stemming| WW_BUILDER
     PACING[WordWisePacingConfig] -->|Distance & Density Guards| WW_BUILDER
     WW_BUILDER --> KLL_DB[(LanguageLayer.en.ASIN.kll)]
@@ -265,6 +267,7 @@ The `LemmaDictionary::lookup()` routine performs instant suffix stemming to reco
 
 ### 8.3 Anti-Cluttering Pacing Guards (`WordWisePacingConfig`)
 To prevent visual clutter on e-ink screens, `WordWisePacingConfig` enforces typographic pacing:
+- `max_difficulty_level: 3`: Default maximum difficulty level retained on Kindle's 1–5 slider scale (keeps tiers 1–3 by default, matching Medium / Default slider density).
 - `min_distance`: Minimum 20 characters between adjacent glosses.
 - `max_glosses_per_window`: Maximum 4 glosses per 800-character sliding window (~1 screen).
 - `max_total_glosses`: 10,000 gloss ceiling per volume.

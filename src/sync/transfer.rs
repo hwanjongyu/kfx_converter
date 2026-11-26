@@ -17,6 +17,84 @@ use crate::storage::{
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Returns `true` when `a` and `b` refer to the exact same underlying file on disk
+/// (matching lexical equality, canonical paths, or Unix `(dev, ino)` identity).
+pub(crate) fn is_same_file_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b))
+        && ca == cb
+    {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b))
+            && ma.dev() == mb.dev()
+            && ma.ino() == mb.ino()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns the in-place path inside `docs_dir` if `kfx_source` is already a regular `.kfx` file
+/// residing inside `docs_dir` (e.g. `documents/Book.kfx` via a relative path or
+/// `documents/Author/Book.kfx`) with no symlink ancestors under `device_root`.
+fn resolve_in_place_kfx_under_docs(
+    device_root: &Path,
+    docs_dir: &Path,
+    kfx_source: &Path,
+) -> Option<PathBuf> {
+    let has_kfx_ext = kfx_source
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("kfx"));
+    if !has_kfx_ext {
+        return None;
+    }
+    if std::fs::symlink_metadata(kfx_source)
+        .map(|m| m.file_type().is_symlink() || !m.file_type().is_file())
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    let canonical_src = std::fs::canonicalize(kfx_source).ok()?;
+    let canonical_docs = std::fs::canonicalize(docs_dir).ok()?;
+    let rel = canonical_src.strip_prefix(&canonical_docs).ok()?;
+    if rel.as_os_str().is_empty() {
+        return None;
+    }
+    let in_place = docs_dir.join(rel);
+    if !is_mtp_path(&in_place) && reject_symlink_ancestors_under(device_root, &in_place).is_err() {
+        return None;
+    }
+    Some(in_place)
+}
+
+/// Computes the `.sdr` directory path that `sync_to_device` will deploy to for
+/// `(device_root, kfx_source, book_title)`, matching both flat and in-place subfolder targets.
+pub(crate) fn expected_sync_sdr_dir(
+    device_root: &Path,
+    kfx_source: &Path,
+    book_title: &str,
+) -> PathBuf {
+    let docs_dir = device_root.join("documents");
+    if let Some(in_place) = resolve_in_place_kfx_under_docs(device_root, &docs_dir, kfx_source) {
+        return in_place.with_extension("sdr");
+    }
+    let safe_title = kfx_source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(sanitize_filename)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| sanitize_filename(book_title));
+    docs_dir.join(format!("{}.sdr", safe_title))
+}
+
 /// Synchronizes a converted KFX file, multi-identifier cover thumbnails, and optional sidecars to the Kindle.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_to_device(
@@ -83,14 +161,24 @@ pub fn sync_to_device(
     let safe_asin = sanitize_asin(asin);
     let safe_cid = content_id.and_then(sanitize_sidecar_stem);
 
-    let kfx_filename = format!("{}.kfx", safe_title);
-    let dest_kfx_path = docs_dir.join(&kfx_filename);
+    let (dest_kfx_path, sdr_dir) = if let Some(in_place) =
+        resolve_in_place_kfx_under_docs(device_root, &docs_dir, kfx_source)
+    {
+        let in_place_sdr = in_place.with_extension("sdr");
+        (in_place, in_place_sdr)
+    } else {
+        let kfx_filename = format!("{}.kfx", safe_title);
+        (
+            docs_dir.join(&kfx_filename),
+            docs_dir.join(format!("{}.sdr", safe_title)),
+        )
+    };
 
     // Security assertion: Destination path must reside strictly within docs_dir with no symlink components
     if !dest_kfx_path.starts_with(&docs_dir) {
         return Err(SyncError::SecurityViolation(format!(
             "Path traversal detected in KFX target: {:?}",
-            kfx_filename
+            dest_kfx_path
         )));
     }
     if !is_mtp_path(&dest_kfx_path) {
@@ -99,7 +187,7 @@ pub fn sync_to_device(
     }
 
     // 1. Copy KFX file if source and destination differ
-    if kfx_source != dest_kfx_path {
+    if !is_same_file_path(kfx_source, &dest_kfx_path) {
         copy_file_unlocked(kfx_source, &dest_kfx_path)?;
     }
 
@@ -152,11 +240,10 @@ pub fn sync_to_device(
     }
 
     // 3. Ensure companion .sdr folder exists, write covers/thumbnails, and sanitize stale files
-    let sdr_dir = docs_dir.join(format!("{}.sdr", safe_title));
     if !sdr_dir.starts_with(&docs_dir) {
         return Err(SyncError::SecurityViolation(format!(
             "Path traversal detected in SDR directory: {:?}",
-            safe_title
+            sdr_dir
         )));
     }
     if !is_mtp_path(&sdr_dir) {
@@ -499,8 +586,129 @@ mod tests {
             dummy_dst,
             Duration::from_millis(500),
         );
-        // gio copy must either fail or report GioFailed
-        assert!(res.is_err());
+        match res {
+            Err(SyncError::GioFailed(msg)) => {
+                assert!(
+                    !msg.trim().is_empty(),
+                    "GioFailed must include diagnostic output"
+                );
+            }
+            other => panic!("Expected SyncError::GioFailed, got {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_command_with_timeout_error_and_timeout_reporting() {
+        // 1. Non-zero command captures stderr deterministically
+        let mut fail_cmd = Command::new("sh");
+        fail_cmd
+            .arg("-c")
+            .arg("printf 'simulated gio copy error' >&2; exit 42");
+        let output = crate::storage::run_command_with_timeout(
+            "mock gio copy",
+            &mut fail_cmd,
+            Duration::from_secs(2),
+        )
+        .expect("spawning sh must succeed");
+        assert_eq!(output.status.code(), Some(42));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "simulated gio copy error"
+        );
+
+        // 2. Hung command is killed cleanly within the bounded watchdog timeout
+        let mut hang_cmd = Command::new("sh");
+        hang_cmd.arg("-c").arg("sleep 2");
+        let err = crate::storage::run_command_with_timeout(
+            "mock gio copy",
+            &mut hang_cmd,
+            Duration::from_millis(100),
+        )
+        .expect_err("hung command must return timeout error");
+        assert!(
+            err.contains("timed out"),
+            "timeout error must mention 'timed out', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_is_same_file_path_and_in_place_subfolder_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let device_root = temp.path().join("mock_kindle");
+        let docs = device_root.join("documents");
+        let author_dir = docs.join("Author");
+        std::fs::create_dir_all(&author_dir).unwrap();
+
+        let root_kfx = docs.join("RootBook.kfx");
+        std::fs::write(&root_kfx, b"ROOT_KFX_PAYLOAD").unwrap();
+        let dot_alias = docs.join(".").join("RootBook.kfx");
+        assert!(is_same_file_path(&root_kfx, &root_kfx));
+        assert!(is_same_file_path(&root_kfx, &dot_alias));
+
+        let sub_kfx = author_dir.join("SubBook.kfx");
+        std::fs::write(&sub_kfx, b"SUB_KFX_PAYLOAD").unwrap();
+        assert!(!is_same_file_path(&root_kfx, &sub_kfx));
+
+        #[cfg(unix)]
+        {
+            let hard_alias = temp.path().join("hardlink_root.kfx");
+            std::fs::hard_link(&root_kfx, &hard_alias).unwrap();
+            assert!(is_same_file_path(&root_kfx, &hard_alias));
+        }
+
+        // 1. In-place non-canonical path directly inside documents/ must not fail or self-copy
+        let synced_root = KindleSync::sync_to_device(
+            &device_root,
+            &dot_alias,
+            "Root Book",
+            "B00ROOTBOOK",
+            None,
+            Some("EBOK"),
+            Some("en"),
+            None,
+            Some(b"SQLite format 3\0ROOT_KLL"),
+        )
+        .expect("in-place root sync must succeed");
+        assert_eq!(synced_root, root_kfx);
+        assert_eq!(std::fs::read(&root_kfx).unwrap(), b"ROOT_KFX_PAYLOAD");
+        assert!(docs.join("RootBook.sdr").is_dir());
+
+        // 2. In-place subfolder path documents/Author/SubBook.kfx must stay in-place without
+        // creating a duplicate documents/SubBook.kfx or documents/SubBook.sdr
+        let synced_sub = KindleSync::sync_to_device(
+            &device_root,
+            &sub_kfx,
+            "Sub Book",
+            "B00SUBBOOK1",
+            None,
+            Some("EBOK"),
+            Some("en"),
+            None,
+            Some(b"SQLite format 3\0SUB_KLL"),
+        )
+        .expect("in-place subfolder sync must succeed");
+        assert_eq!(synced_sub, sub_kfx);
+        assert_eq!(std::fs::read(&sub_kfx).unwrap(), b"SUB_KFX_PAYLOAD");
+        assert!(
+            author_dir.join("SubBook.sdr").is_dir(),
+            "companion .sdr must be deployed beside in-place subfolder KFX"
+        );
+        assert!(
+            author_dir
+                .join("SubBook.sdr")
+                .join("LanguageLayer.en.B00SUBBOOK1.kll")
+                .is_file()
+        );
+        assert!(
+            !docs.join("SubBook.kfx").exists(),
+            "must NOT create duplicate flat copy in documents/"
+        );
+        assert!(
+            !docs.join("SubBook.sdr").exists(),
+            "must NOT create duplicate flat .sdr in documents/"
+        );
     }
 
     #[test]

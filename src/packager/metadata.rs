@@ -195,22 +195,31 @@ impl<'a> KfxPackager<'a> {
         let sym_table = KfxSymbol::Table as u32;
         let sym_table_row = KfxSymbol::TableRow as u32;
         let sym_type = KfxSymbol::Type as u32;
-        let has_native_tables = self.entities.iter().any(|e| {
-            if e.chunk_type == sym_table || e.chunk_type == sym_table_row {
-                return true;
-            }
-            if e.chunk_type == SYM_STORYLINE
-                && let Ok(values) = crate::ion::IonReader::new(&e.data).decode_all()
-            {
-                return storyline_contains_native_table(
-                    &values,
-                    sym_type,
-                    sym_table,
-                    sym_table_row,
-                );
-            }
-            false
-        });
+        let has_native_tables = if !section_data.is_empty() {
+            self.has_native_tables
+                || self
+                    .entities
+                    .iter()
+                    .any(|e| e.chunk_type == sym_table || e.chunk_type == sym_table_row)
+        } else {
+            self.has_native_tables
+                || self.entities.iter().any(|e| {
+                    if e.chunk_type == sym_table || e.chunk_type == sym_table_row {
+                        return true;
+                    }
+                    if e.chunk_type == SYM_STORYLINE
+                        && let Ok(values) = crate::ion::IonReader::new(&e.data).decode_all()
+                    {
+                        return storyline_contains_native_table(
+                            &values,
+                            sym_type,
+                            sym_table,
+                            sym_table_row,
+                        );
+                    }
+                    false
+                })
+        };
         if has_native_tables {
             feature_list.push(IonValue::Struct(vec![
                 (

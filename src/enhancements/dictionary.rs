@@ -820,46 +820,52 @@ static WORDWISE_DICT_BYTES: &[u8] = include_bytes!("wordwise_dict.bin");
 static STOPWORDS_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
 static VOCAB_MAP: OnceLock<HashMap<&'static str, (u8, u32)>> = OnceLock::new();
 
-/// Parses the embedded `WWK1` binary dataset into a map of `lemma -> (difficulty, sense_id)`.
-fn parse_wwk1_entries() -> HashMap<&'static str, (u8, u32)> {
-    let mut map = HashMap::with_capacity(55_000);
-    if WORDWISE_DICT_BYTES.len() >= 8
-        && &WORDWISE_DICT_BYTES[0..4] == b"WWK1"
-        && let Some(count_bytes) = WORDWISE_DICT_BYTES
-            .get(4..8)
-            .and_then(|s| s.try_into().ok())
-    {
-        let count = u32::from_le_bytes(count_bytes) as usize;
-        let mut offset = 8;
-        for _ in 0..count {
-            if offset >= WORDWISE_DICT_BYTES.len() {
-                break;
-            }
-            let len = WORDWISE_DICT_BYTES[offset] as usize;
+/// Parses a `WWK1` binary dataset slice into a map of `lemma -> (difficulty, sense_id)`.
+fn parse_wwk1_entries_from_bytes(bytes: &[u8]) -> HashMap<&str, (u8, u32)> {
+    if bytes.len() < 8 || &bytes[0..4] != b"WWK1" {
+        return HashMap::new();
+    }
+    let Some(count_bytes) = bytes.get(4..8).and_then(|s| s.try_into().ok()) else {
+        return HashMap::new();
+    };
+    let count = u32::from_le_bytes(count_bytes) as usize;
+    let max_possible = (bytes.len() - 8) / 6;
+    let mut map = HashMap::with_capacity(count.min(max_possible));
+
+    let mut offset = 8;
+    for _ in 0..count {
+        if offset >= bytes.len() {
+            break;
+        }
+        let len = bytes[offset] as usize;
+        offset += 1;
+        if bytes.len() - offset < len + 5 {
+            break;
+        }
+        if let Ok(lemma) = std::str::from_utf8(&bytes[offset..offset + len]) {
+            offset += len;
+            let diff = bytes[offset];
             offset += 1;
-            if offset + len + 5 > WORDWISE_DICT_BYTES.len() {
+            if let Some(sense_bytes) = bytes
+                .get(offset..offset + 4)
+                .and_then(|s| s.try_into().ok())
+            {
+                let sense_id = u32::from_le_bytes(sense_bytes);
+                offset += 4;
+                map.entry(lemma).or_insert((diff, sense_id));
+            } else {
                 break;
             }
-            if let Ok(lemma) = std::str::from_utf8(&WORDWISE_DICT_BYTES[offset..offset + len]) {
-                offset += len;
-                let diff = WORDWISE_DICT_BYTES[offset];
-                offset += 1;
-                if let Some(sense_bytes) = WORDWISE_DICT_BYTES
-                    .get(offset..offset + 4)
-                    .and_then(|s| s.try_into().ok())
-                {
-                    let sense_id = u32::from_le_bytes(sense_bytes);
-                    offset += 4;
-                    map.entry(lemma).or_insert((diff, sense_id));
-                } else {
-                    break;
-                }
-            } else {
-                offset += len + 5;
-            }
+        } else {
+            offset += len + 5;
         }
     }
     map
+}
+
+/// Parses the embedded `WWK1` binary dataset into a map of `lemma -> (difficulty, sense_id)`.
+fn parse_wwk1_entries() -> HashMap<&'static str, (u8, u32)> {
+    parse_wwk1_entries_from_bytes(WORDWISE_DICT_BYTES)
 }
 
 fn parse_builtin_and_ground_truth_vocab() -> HashMap<&'static str, (u8, u32)> {
@@ -1117,5 +1123,70 @@ mod tests {
                 lemma, ww_sense_id, sense_id
             );
         }
+    }
+
+    #[test]
+    fn test_parse_wwk1_entries_from_bytes_negative_and_boundary_cases() {
+        let push_record = |buf: &mut Vec<u8>, lemma: &[u8], diff: u8, sense_id: u32| {
+            buf.push(lemma.len() as u8);
+            buf.extend_from_slice(lemma);
+            buf.push(diff);
+            buf.extend_from_slice(&sense_id.to_le_bytes());
+        };
+
+        // 1. Empty buffer and truncated header (< 8 bytes)
+        assert!(parse_wwk1_entries_from_bytes(&[]).is_empty());
+        assert!(parse_wwk1_entries_from_bytes(b"WWK1\x01\x00").is_empty());
+
+        // 2. Wrong magic header
+        let mut bad_magic = Vec::new();
+        bad_magic.extend_from_slice(b"WWK2");
+        bad_magic.extend_from_slice(&1u32.to_le_bytes());
+        push_record(&mut bad_magic, b"alpha", 1, 100);
+        assert!(parse_wwk1_entries_from_bytes(&bad_magic).is_empty());
+
+        // 3. Declared count overflow (u32::MAX) with only 1 valid record
+        let mut count_overflow = Vec::new();
+        count_overflow.extend_from_slice(b"WWK1");
+        count_overflow.extend_from_slice(&u32::MAX.to_le_bytes());
+        push_record(&mut count_overflow, b"abstruse", 1, 8435);
+        let parsed_overflow = parse_wwk1_entries_from_bytes(&count_overflow);
+        assert_eq!(parsed_overflow.len(), 1);
+        assert_eq!(parsed_overflow.get("abstruse"), Some(&(1, 8435)));
+
+        // 4. Mid-entry truncated record (missing sense_id tail bytes) after valid record
+        let mut truncated_rec = Vec::new();
+        truncated_rec.extend_from_slice(b"WWK1");
+        truncated_rec.extend_from_slice(&2u32.to_le_bytes());
+        push_record(&mut truncated_rec, b"zenith", 2, 200);
+        truncated_rec.push(5); // claims 5 lemma bytes + 5 tail bytes
+        truncated_rec.extend_from_slice(b"trunc");
+        truncated_rec.push(3);
+        truncated_rec.extend_from_slice(&[0x01, 0x02]); // only 2 of 4 sense_id bytes
+        let parsed_trunc = parse_wwk1_entries_from_bytes(&truncated_rec);
+        assert_eq!(parsed_trunc.len(), 1);
+        assert_eq!(parsed_trunc.get("zenith"), Some(&(2, 200)));
+
+        // 5. Invalid UTF-8 lemma entry skipped while subsequent valid entry parses cleanly
+        let mut bad_utf8 = Vec::new();
+        bad_utf8.extend_from_slice(b"WWK1");
+        bad_utf8.extend_from_slice(&2u32.to_le_bytes());
+        push_record(&mut bad_utf8, &[0xFF, 0xFE, 0xFD], 1, 999);
+        push_record(&mut bad_utf8, b"elucidate", 1, 36391);
+        let parsed_utf8 = parse_wwk1_entries_from_bytes(&bad_utf8);
+        assert_eq!(parsed_utf8.len(), 1);
+        assert_eq!(parsed_utf8.get("elucidate"), Some(&(1, 36391)));
+
+        // 6. Valid multi-entry roundtrip + duplicate lemma first-wins (or_insert)
+        let mut multi = Vec::new();
+        multi.extend_from_slice(b"WWK1");
+        multi.extend_from_slice(&3u32.to_le_bytes());
+        push_record(&mut multi, b"cogent", 1, 14904);
+        push_record(&mut multi, b"cogent", 5, 99999); // duplicate must NOT overwrite first
+        push_record(&mut multi, b"lucid", 3, 55555);
+        let parsed_multi = parse_wwk1_entries_from_bytes(&multi);
+        assert_eq!(parsed_multi.len(), 2);
+        assert_eq!(parsed_multi.get("cogent"), Some(&(1, 14904)));
+        assert_eq!(parsed_multi.get("lucid"), Some(&(3, 55555)));
     }
 }

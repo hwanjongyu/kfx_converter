@@ -2,22 +2,39 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{BatchQueue, DropJob, KindleStudio};
 use crate::state::{
-    BatchProgressState, ConversionOutcome, ConversionSettings, ConversionTask, DeviceStatus,
-    EpubSortField, KindleFile, LocalEpubItem, LocalEpubStatus, ScanProgressState, SortDirection,
-    TaskStatus, apply_conversion_outcome_to_state, collect_incoming_epub_paths, convert_epub_file,
-    delete_device_file, detect_kindle_device, eject_kindle_device, format_file_size,
-    format_task_error, load_device_files, resolve_output_folder_target,
-    scan_local_epub_directory_with_progress,
+    BatchProgressState, ConversionOutcome, ConversionResult, ConversionSettings, ConversionTask,
+    DeviceStatus, EpubSortField, KindleFile, LocalEpubItem, LocalEpubStatus, ScanProgressState,
+    SortDirection, StudioTab, TaskStatus, apply_conversion_outcome_to_state,
+    collect_incoming_epub_paths, convert_epub_file, delete_device_file, detect_kindle_device,
+    eject_kindle_device, format_file_size, format_task_error, load_device_files,
+    resolve_output_folder_target, scan_local_epub_directory_with_progress,
 };
 use gpui::*;
 
 const MAX_BATCH_WORKERS: usize = 2;
 const MAX_DROP_WORKERS: usize = 4;
 const MAX_TOTAL_CONVERSION_WORKERS: usize = 4;
+const TAB_REFRESH_COOLDOWN: Duration = Duration::from_secs(3);
+
+/// Resolves the final `ConversionOutcome` for an in-flight batch worker job.
+///
+/// If the worker already produced `Ok(result)` (having written/synced the KFX artifact),
+/// preserve `ConversionOutcome::Finished(result)` even if `batch_cancel_token` was flipped
+/// while the job was completing.
+pub(super) fn resolve_batch_worker_outcome(
+    cancelled: bool,
+    res: Result<ConversionResult, String>,
+) -> ConversionOutcome {
+    match res {
+        Ok(r) => ConversionOutcome::Finished(r),
+        Err(_) if cancelled => ConversionOutcome::Cancelled,
+        Err(err) => ConversionOutcome::Failed(err),
+    }
+}
 
 pub(super) struct PreparedBatchRun {
     pub run_generation: u64,
@@ -131,7 +148,11 @@ impl KindleStudio {
         mut files: Vec<KindleFile>,
         clear_status: bool,
     ) -> bool {
-        if self.device_refresh_generation != generation || self.eject_in_progress {
+        if self.device_refresh_generation != generation {
+            return false;
+        }
+        self.device_refresh_in_flight = false;
+        if self.eject_in_progress {
             return false;
         }
         for file in &mut files {
@@ -160,11 +181,41 @@ impl KindleStudio {
         }
         self.device = device;
         self.files = files;
+        self.last_device_refresh_at = Some(Instant::now());
         self.mark_files_dirty();
         if clear_status {
             self.status_message = None;
         }
         true
+    }
+
+    pub(super) fn decide_tab_switch_refresh(
+        &mut self,
+        target_tab: StudioTab,
+        now: Instant,
+    ) -> bool {
+        if self.tab == target_tab {
+            return false;
+        }
+        self.tab = target_tab;
+        if self.eject_in_progress || self.device_refresh_in_flight || self.has_active_tasks() {
+            return false;
+        }
+        if self
+            .last_device_refresh_at
+            .is_some_and(|last| now.saturating_duration_since(last) < TAB_REFRESH_COOLDOWN)
+        {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn switch_tab(&mut self, target_tab: StudioTab, cx: &mut Context<Self>) {
+        let should_refresh = self.decide_tab_switch_refresh(target_tab, Instant::now());
+        cx.notify();
+        if should_refresh {
+            self.refresh_device_internal(false, cx);
+        }
     }
 
     pub fn refresh_device(&mut self, cx: &mut Context<Self>) {
@@ -175,8 +226,12 @@ impl KindleStudio {
         if self.eject_in_progress {
             return;
         }
+        if !clear_status && self.device_refresh_in_flight {
+            return;
+        }
         self.device_refresh_generation = self.device_refresh_generation.wrapping_add(1);
         let generation = self.device_refresh_generation;
+        self.device_refresh_in_flight = true;
 
         cx.spawn(async move |this, cx| {
             let (device, files) = cx
@@ -215,6 +270,7 @@ impl KindleStudio {
         self.eject_in_progress = true;
         self.confirm_delete_file = None;
         self.device_refresh_generation = self.device_refresh_generation.wrapping_add(1);
+        self.device_refresh_in_flight = false;
         self.status_message = Some(("Ejecting Kindle device...".into(), false));
         Ok(device)
     }
@@ -387,7 +443,47 @@ impl KindleStudio {
         cx.notify();
     }
 
+    pub(super) fn has_active_folder_conversions(&self) -> bool {
+        self.folder_state.items.iter().any(|i| {
+            matches!(
+                i.status,
+                LocalEpubStatus::InQueue | LocalEpubStatus::Processing { .. }
+            )
+        })
+    }
+
+    pub(super) fn can_start_folder_rescan(&self) -> Result<(), String> {
+        if self.is_batch_active() || self.has_active_folder_conversions() {
+            return Err("Cannot refresh folder while conversion is in progress.".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_folder_scan_result(
+        &mut self,
+        generation: u64,
+        items: Vec<LocalEpubItem>,
+    ) -> bool {
+        if self.folder_state.scan_generation != generation {
+            return false;
+        }
+        self.folder_state.is_scanning = false;
+        self.folder_state.scan_progress = None;
+        self.scan_cancel_token = None;
+        if self.is_batch_active() || self.has_active_folder_conversions() {
+            return false;
+        }
+        self.folder_state.items = items;
+        self.mark_folder_items_dirty();
+        true
+    }
+
     pub fn rescan_folder(&mut self, cx: &mut Context<Self>) {
+        if let Err(msg) = self.can_start_folder_rescan() {
+            self.status_message = Some((msg, true));
+            cx.notify();
+            return;
+        }
         let Some(folder) = self.folder_state.current_folder.clone() else {
             return;
         };
@@ -478,11 +574,7 @@ impl KindleStudio {
                 if this.folder_state.scan_generation != generation {
                     return;
                 }
-                this.folder_state.items = items;
-                this.mark_folder_items_dirty();
-                this.folder_state.is_scanning = false;
-                this.folder_state.scan_progress = None;
-                this.scan_cancel_token = None;
+                this.apply_folder_scan_result(generation, items);
                 cx.notify();
             })
             .ok();
@@ -815,14 +907,8 @@ impl KindleStudio {
                         {
                             bp.active_tasks = bp.active_tasks.saturating_sub(1);
                         }
-                        let outcome = if cancel_check.load(Ordering::SeqCst) {
-                            ConversionOutcome::Cancelled
-                        } else {
-                            match res {
-                                Ok(r) => ConversionOutcome::Finished(r),
-                                Err(err) => ConversionOutcome::Failed(err),
-                            }
-                        };
+                        let outcome =
+                            resolve_batch_worker_outcome(cancel_check.load(Ordering::SeqCst), res);
                         this.apply_conversion_outcome(
                             task_id,
                             &path_buf,
@@ -1059,6 +1145,17 @@ impl KindleStudio {
         self.spawn_drop_workers(to_spawn, cx);
     }
 
+    pub(super) fn should_apply_drop_detected_device(
+        &self,
+        detected: &DeviceStatus,
+        refresh_gen: u64,
+    ) -> bool {
+        detected.connected
+            && !self.eject_in_progress
+            && self.device_refresh_generation == refresh_gen
+            && !self.device.connected
+    }
+
     fn spawn_drop_workers(&mut self, count: usize, cx: &mut Context<Self>) {
         for _ in 0..count {
             let q = self.drop_queue.clone();
@@ -1119,19 +1216,21 @@ impl KindleStudio {
                         {
                             t.file_size_str = size_str;
                         }
+                        let mut needs_device_file_refresh = false;
                         if let Some(dev) = detected_device
-                            && dev.connected
-                            && !this.eject_in_progress
-                            && this.device_refresh_generation == refresh_gen
-                            && !this.device.connected
+                            && this.should_apply_drop_detected_device(&dev, refresh_gen)
                         {
                             this.device = dev;
+                            needs_device_file_refresh = true;
                         }
                         let outcome = match res {
                             Ok(r) => ConversionOutcome::Finished(r),
                             Err(err) => ConversionOutcome::Failed(err),
                         };
                         this.apply_conversion_outcome(job.task_id, &job.path, None, outcome);
+                        if needs_device_file_refresh {
+                            this.refresh_device_internal(false, cx);
+                        }
                         cx.notify();
                     });
                 }
@@ -1912,5 +2011,236 @@ mod tests {
         let woken_on_drop_exit = studio.claim_pending_drop_workers_state();
         assert_eq!(woken_on_drop_exit, 4);
         assert_eq!(studio.drop_active_workers, 4);
+    }
+
+    #[test]
+    fn test_batch_cancel_preserves_completed_inflight_outcome() {
+        use super::resolve_batch_worker_outcome;
+
+        let make_res = || ConversionResult {
+            output_path: PathBuf::from("/books/Finished.kfx"),
+            total_bytes: 8192,
+            synced_to_device: true,
+            synced_device_path: Some(PathBuf::from("/kindle/documents/Finished.kfx")),
+            sync_error: None,
+            word_wise_glosses: Some(12),
+            word_wise_error: None,
+            sdr_error: None,
+        };
+
+        // 1. Worker already finished with Ok(r) when cancel token became true -> preserve Finished(r)
+        let outcome_ok_after_cancel = resolve_batch_worker_outcome(true, Ok(make_res()));
+        assert!(matches!(
+            outcome_ok_after_cancel,
+            ConversionOutcome::Finished(_)
+        ));
+
+        // 2. Worker failed while cancelled -> Cancelled
+        let outcome_err_after_cancel =
+            resolve_batch_worker_outcome(true, Err("aborted mid-flight".into()));
+        assert!(matches!(
+            outcome_err_after_cancel,
+            ConversionOutcome::Cancelled
+        ));
+
+        // 3. Worker failed without cancel -> Failed(msg)
+        let outcome_err_normal = resolve_batch_worker_outcome(false, Err("corrupt epub".into()));
+        assert!(matches!(
+            outcome_err_normal,
+            ConversionOutcome::Failed(ref msg) if msg == "corrupt epub"
+        ));
+
+        // 4. Applying Finished(r) after cancel still marks task Completed, item OnDevice, and adds to studio.files
+        let mut studio = KindleStudio::new_for_test();
+        let epub_path = PathBuf::from("/books/Finished.epub");
+        studio.device = DeviceStatus {
+            connected: true,
+            model: "Kindle".into(),
+            path: Some(PathBuf::from("/kindle/documents")),
+            root_path: Some(PathBuf::from("/kindle")),
+            used_gb: 1.0,
+            total_gb: 8.0,
+        };
+        studio.folder_state.items = vec![dummy_item(1, epub_path.clone(), true)];
+        let prep = studio
+            .try_prepare_batch_run(true)
+            .expect("Batch should prepare");
+        let task_id = studio.tasks[0].id;
+        // Simulate worker already in-flight (Converting / Processing) when user clicks Cancel
+        studio.tasks[0].status = TaskStatus::Converting;
+        studio.folder_state.items[0].status = LocalEpubStatus::Processing {
+            stage: "Packaging & Sync".into(),
+            progress: 80,
+        };
+        studio.cancel_batch_state();
+        assert!(prep.cancel_token.load(Ordering::SeqCst));
+
+        studio.apply_conversion_outcome(
+            task_id,
+            &epub_path,
+            Some(prep.run_generation),
+            outcome_ok_after_cancel,
+        );
+        assert_eq!(studio.tasks[0].status, TaskStatus::Completed);
+        assert_eq!(
+            studio.folder_state.items[0].status,
+            LocalEpubStatus::OnDevice
+        );
+        assert_eq!(studio.files.len(), 1);
+        assert_eq!(studio.files[0].name, "Finished.kfx");
+    }
+
+    #[test]
+    fn test_rescan_folder_guard_blocks_during_active_batch_and_processing() {
+        let mut studio = KindleStudio::new_for_test();
+        let book_a = PathBuf::from("/books/A.epub");
+        let book_b = PathBuf::from("/books/B.epub");
+        studio.folder_state.items = vec![dummy_item(1, book_a.clone(), true)];
+
+        // 1. Idle state allows rescan
+        assert!(studio.can_start_folder_rescan().is_ok());
+
+        // 2. Active batch blocks rescan
+        let _prep = studio
+            .try_prepare_batch_run(false)
+            .expect("Batch should prepare");
+        assert!(studio.can_start_folder_rescan().is_err());
+
+        // 3. In-flight folder scan completing while conversion is active must NOT clobber items
+        studio.folder_state.scan_generation = 7;
+        studio.folder_state.is_scanning = true;
+        studio.folder_state.scan_progress = Some(crate::state::ScanProgressState::discovering());
+        let applied_during_batch =
+            studio.apply_folder_scan_result(7, vec![dummy_item(99, book_b.clone(), false)]);
+        assert!(!applied_during_batch);
+        assert!(!studio.folder_state.is_scanning);
+        assert!(studio.folder_state.scan_progress.is_none());
+        assert_eq!(studio.folder_state.items.len(), 1);
+        assert_eq!(studio.folder_state.items[0].path, book_a);
+
+        // 4. Clear batch, leave single item Processing -> still blocks rescan & completion overwrite
+        studio.batch_active_workers = 0;
+        studio.batch_cancel_token = None;
+        studio.batch_queue = None;
+        studio.folder_state.batch_progress = None;
+        studio.folder_state.items[0].status = LocalEpubStatus::Processing {
+            stage: "Packaging KFX".into(),
+            progress: 40,
+        };
+        assert!(studio.can_start_folder_rescan().is_err());
+        assert!(!studio.apply_folder_scan_result(7, vec![dummy_item(99, book_b.clone(), false)]));
+        assert_eq!(studio.folder_state.items[0].path, book_a);
+
+        // 5. Stale generation does not overwrite items or clear newer scan state
+        studio.folder_state.items[0].status = LocalEpubStatus::Unconverted;
+        studio.folder_state.scan_generation = 8;
+        studio.folder_state.is_scanning = true;
+        assert!(!studio.apply_folder_scan_result(7, vec![dummy_item(99, book_b.clone(), false)]));
+        assert!(studio.folder_state.is_scanning);
+        assert_eq!(studio.folder_state.items[0].path, book_a);
+
+        // 6. Idle + matching generation applies scan result cleanly
+        assert!(studio.can_start_folder_rescan().is_ok());
+        assert!(studio.apply_folder_scan_result(8, vec![dummy_item(99, book_b.clone(), false)]));
+        assert!(!studio.folder_state.is_scanning);
+        assert_eq!(studio.folder_state.items.len(), 1);
+        assert_eq!(studio.folder_state.items[0].path, book_b);
+    }
+
+    #[test]
+    fn test_tab_switch_coalescing_and_cooldown() {
+        use super::TAB_REFRESH_COOLDOWN;
+        use crate::state::StudioTab;
+        use std::time::{Duration, Instant};
+
+        let mut studio = KindleStudio::new_for_test();
+        let t0 = Instant::now();
+
+        // 1. Clicking the already-active tab (DualPane) is a no-op
+        assert!(!studio.decide_tab_switch_refresh(StudioTab::DualPane, t0));
+        assert_eq!(studio.tab, StudioTab::DualPane);
+
+        // 2. Switching to a different tab when idle with no prior refresh triggers refresh
+        assert!(studio.decide_tab_switch_refresh(StudioTab::Explorer, t0));
+        assert_eq!(studio.tab, StudioTab::Explorer);
+
+        // 3. In-flight refresh suppresses duplicate refresh while still switching tab
+        studio.device_refresh_in_flight = true;
+        assert!(!studio.decide_tab_switch_refresh(StudioTab::Convert, t0));
+        assert_eq!(studio.tab, StudioTab::Convert);
+
+        // Stale refresh generation must NOT clear in-flight flag for a newer refresh
+        studio.device_refresh_generation = 3;
+        assert!(!studio.apply_device_refresh_result(2, DeviceStatus::default(), Vec::new(), false));
+        assert!(studio.device_refresh_in_flight);
+        assert!(studio.last_device_refresh_at.is_none());
+
+        // Matching generation clears in-flight and stamps last_device_refresh_at
+        assert!(studio.apply_device_refresh_result(3, DeviceStatus::default(), Vec::new(), false));
+        assert!(!studio.device_refresh_in_flight);
+        assert!(studio.last_device_refresh_at.is_some());
+
+        // 4. Within cooldown window -> switches tab without triggering refresh
+        let stamped = studio.last_device_refresh_at.unwrap();
+        let within_cooldown =
+            stamped + TAB_REFRESH_COOLDOWN.saturating_sub(Duration::from_millis(1));
+        assert!(!studio.decide_tab_switch_refresh(StudioTab::LocalFolder, within_cooldown));
+        assert_eq!(studio.tab, StudioTab::LocalFolder);
+
+        // 5. Past cooldown, eject_in_progress or active tasks still suppress refresh
+        let after_cooldown = stamped + TAB_REFRESH_COOLDOWN;
+        studio.eject_in_progress = true;
+        assert!(!studio.decide_tab_switch_refresh(StudioTab::DualPane, after_cooldown));
+        assert_eq!(studio.tab, StudioTab::DualPane);
+        studio.eject_in_progress = false;
+
+        studio.tasks.push(ConversionTask {
+            id: 77,
+            filename: "Busy.epub".into(),
+            file_size_str: "2 KB".into(),
+            status: TaskStatus::Converting,
+            progress: 0.4,
+            word_wise: false,
+        });
+        assert!(!studio.decide_tab_switch_refresh(StudioTab::Explorer, after_cooldown));
+        assert_eq!(studio.tab, StudioTab::Explorer);
+        studio.tasks.clear();
+
+        // 6. Past cooldown and completely idle -> triggers refresh
+        assert!(studio.decide_tab_switch_refresh(StudioTab::Convert, after_cooldown));
+        assert_eq!(studio.tab, StudioTab::Convert);
+    }
+
+    #[test]
+    fn test_drop_worker_auto_detect_triggers_device_file_refresh() {
+        let mut studio = KindleStudio::new_for_test();
+        studio.device_refresh_generation = 4;
+
+        let connected_kindle = DeviceStatus {
+            connected: true,
+            model: "Kindle Paperwhite".into(),
+            path: Some(PathBuf::from("/kindle/documents")),
+            root_path: Some(PathBuf::from("/kindle")),
+            used_gb: 2.0,
+            total_gb: 16.0,
+        };
+
+        // 1. Fresh disconnected -> connected transition with matching generation returns true
+        assert!(studio.should_apply_drop_detected_device(&connected_kindle, 4));
+
+        // 2. Disconnected detected status returns false
+        assert!(!studio.should_apply_drop_detected_device(&DeviceStatus::default(), 4));
+
+        // 3. Stale generation (e.g. device refresh or eject ran concurrently) returns false
+        assert!(!studio.should_apply_drop_detected_device(&connected_kindle, 3));
+
+        // 4. Eject in progress returns false
+        studio.eject_in_progress = true;
+        assert!(!studio.should_apply_drop_detected_device(&connected_kindle, 4));
+        studio.eject_in_progress = false;
+
+        // 5. Already connected studio does not redundantly trigger transition
+        studio.device = connected_kindle.clone();
+        assert!(!studio.should_apply_drop_detected_device(&connected_kindle, 4));
     }
 }

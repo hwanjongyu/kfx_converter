@@ -19,6 +19,8 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
         .iter()
         .position(|s| s.style.as_deref().is_some_and(|st| st.contains("dropcap")));
     if let Some(dc_idx) = explicit_dropcap_idx {
+        let trimmed = spans[dc_idx].text.trim_start().to_string();
+        spans[dc_idx].text = trimmed;
         let dc_trimmed = spans[dc_idx].text.trim().to_string();
         let mut dc_chars = dc_trimmed.chars();
         if let Some(first_ch) = dc_chars.next()
@@ -37,6 +39,7 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
                     let ch_len = second_ch.len_utf8();
                     let remaining = next_trimmed[ch_len..].to_string();
                     next_span.text = remaining;
+                    spans[dc_idx].text = dc_trimmed;
                     spans[dc_idx].text.push(second_ch);
                     if let Some(ref mut st) = spans[dc_idx].style
                         && !st.contains("dropcap_2")
@@ -105,8 +108,6 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
                 }
             }
 
-            let leading_ws = &orig_text[..start_byte];
-            let drop_text = format!("{}{}", leading_ws, drop_chars);
             let rest_text = orig_text[rest_start_byte..].to_string();
             let orig_style = spans[first_idx].style.take();
             let orig_href = spans[first_idx].href.clone();
@@ -120,7 +121,7 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
                 Some(s) => format!("{} {}", s, drop_tag),
                 None => drop_tag.to_string(),
             };
-            spans[first_idx].text = drop_text;
+            spans[first_idx].text = drop_chars;
             spans[first_idx].style = Some(drop_style);
             if !rest_text.is_empty() {
                 spans.insert(
@@ -135,5 +136,57 @@ pub fn finish_paragraph_dropcaps(spans: &mut Vec<TextSpan>, p_dropcap: bool, p_l
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_p2_18_dropcap_trims_leading_whitespace_case_a_and_case_b() {
+        // Case A: explicit dropcap span with leading whitespace and opening quote
+        let mut explicit_spans = vec![
+            TextSpan {
+                text: "  “".to_string(),
+                style: Some("dropcap".to_string()),
+                anchor_id: Some("a1".to_string()),
+                href: None,
+                ruby: None,
+            },
+            TextSpan {
+                text: "Hello world".to_string(),
+                style: None,
+                anchor_id: None,
+                href: None,
+                ruby: None,
+            },
+        ];
+        finish_paragraph_dropcaps(&mut explicit_spans, false, false);
+        assert_eq!(explicit_spans[0].text, "“H");
+        assert_eq!(explicit_spans[0].anchor_id.as_deref(), Some("a1"));
+        assert!(
+            explicit_spans[0]
+                .style
+                .as_deref()
+                .unwrap()
+                .contains("dropcap_2")
+        );
+        assert_eq!(explicit_spans[1].text, "ello world");
+
+        // Case B: automatic dropcap with newline + spaces leading whitespace
+        let mut auto_spans = vec![TextSpan {
+            text: "\n  Once upon a time".to_string(),
+            style: None,
+            anchor_id: Some("p_start".to_string()),
+            href: None,
+            ruby: None,
+        }];
+        finish_paragraph_dropcaps(&mut auto_spans, true, false);
+        assert_eq!(auto_spans.len(), 2);
+        assert_eq!(auto_spans[0].text, "O");
+        assert_eq!(auto_spans[0].anchor_id.as_deref(), Some("p_start"));
+        assert_eq!(auto_spans[0].style.as_deref(), Some("dropcap"));
+        assert_eq!(auto_spans[1].text, "nce upon a time");
     }
 }

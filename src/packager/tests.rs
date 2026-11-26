@@ -2098,7 +2098,8 @@ fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
         },
     );
 
-    // Section 1: 300 chars text + 400-char alt-text image (crosses PID 350 and 700!)
+    // Section 1: 1 (root) + 349 chars (p1) puts resolved img_fig (400-char alt -> 1 PID) squarely at
+    // PID 350..351, followed by p1_after (360 chars) spanning 351..711 (crossing PID 700).
     let long_alt = "A".repeat(400);
     book.sections.push(Section {
         id: "chap1".to_string(),
@@ -2107,7 +2108,7 @@ fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
             Block::Paragraph {
                 id: "p1".to_string(),
                 spans: vec![TextSpan {
-                    text: "X".repeat(300),
+                    text: "X".repeat(349),
                     style: None,
                     anchor_id: None,
                     href: None,
@@ -2121,6 +2122,17 @@ fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
                 alt: Some(long_alt),
                 width: None,
                 height: None,
+            },
+            Block::Paragraph {
+                id: "p1_after".to_string(),
+                spans: vec![TextSpan {
+                    text: "Y".repeat(360),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
             },
         ],
     });
@@ -2265,7 +2277,8 @@ fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
             .collect();
         assert_eq!(raw_pids, vec![0, 350, 700]);
 
-        // Verify any entry targeting an image block has offset == 0
+        // Verify img_fig appears strictly once in $550 with offset == 0 (zero duplicate entries)
+        let mut image_loc_count = 0usize;
         for entry in entries {
             if let IonValue::Struct(ef) = entry {
                 let id = match ef.iter().find(|(k, _)| *k == 155).map(|(_, v)| v) {
@@ -2277,10 +2290,15 @@ fn test_packager_nested_toc_anchors_and_continuous_350_pid_calibration() {
                     _ => -1,
                 };
                 if packager.image_block_eids.contains(&id) {
+                    image_loc_count += 1;
                     assert_eq!(off, 0, "Block::Image $550 offset must be clamped to 0");
                 }
             }
         }
+        assert_eq!(
+            image_loc_count, 1,
+            "Resolved Block::Image with 400-char alt must emit strictly 1 $550 entry (zero duplicates)"
+        );
     } else {
         panic!("Malformed $550/$621 structure");
     }
@@ -2329,7 +2347,8 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
             Block::Paragraph {
                 id: "p1".to_string(),
                 spans: vec![TextSpan {
-                    text: "Y".repeat(300),
+                    // Cover (2 PIDs) + chap1 root (1 PID) + 347 chars = PID 350 for img_fig
+                    text: "Y".repeat(347),
                     style: None,
                     anchor_id: None,
                     href: None,
@@ -2456,6 +2475,7 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
         .decode_all()
         .unwrap();
     let mut saw_image_loc_entry = false;
+    let mut image_loc_count = 0usize;
     if let IonValue::List(l_wrap) = &loc_vals[0]
         && let IonValue::Struct(lf) = &l_wrap[0]
         && let Some((_, IonValue::List(entries))) = lf.iter().find(|(k, _)| *k == 182)
@@ -2472,6 +2492,7 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
                 };
                 if packager.image_block_eids.contains(&id) {
                     saw_image_loc_entry = true;
+                    image_loc_count += 1;
                     assert_eq!(off, 0, "Block::Image $550 offset must be clamped to 0");
                 }
             }
@@ -2480,6 +2501,10 @@ fn test_packager_index_and_cover_landmarks_and_non_vacuous_image_pid_zero_offset
     assert!(
         saw_image_loc_entry,
         "$550 location_map must have hit at least one image block EID at 350-PID intervals"
+    );
+    assert_eq!(
+        image_loc_count, 1,
+        "Resolved Block::Image with 400-char alt must emit strictly 1 (img_eid, 0) entry in $550"
     );
 }
 
@@ -4586,4 +4611,193 @@ fn test_packager_p1_11_list_nested_image_renders_271_and_matches_254() {
         "$419 $254 mandatory_dependencies for chapter section {} must include list_fig resource SID {}",
         chapter_sec_sid, list_fig_sid
     );
+}
+
+#[test]
+fn test_packager_long_image_alt_never_emits_duplicate_550_entries() {
+    use image::{ImageBuffer, Rgb};
+
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(16, 16);
+    let mut png_bytes = Cursor::new(Vec::new());
+    img.write_to(&mut png_bytes, image::ImageFormat::Png)
+        .unwrap();
+
+    let mut book = BookIR::default();
+    book.metadata.title = "Long Alt Image Regression".to_string();
+    book.resources.insert(
+        "diagram.png".to_string(),
+        crate::ir::ResourceAsset {
+            id: "diagram.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: png_bytes.into_inner(),
+        },
+    );
+
+    // chap1 contains diagram.png so no extra cover section is prepended:
+    // chap1 root (1) + p_before (349) = 350 -> img_long (1,200-char alt -> 1 PID) at 350..351,
+    // followed by p_after (700) at 351..1051.
+    book.sections.push(Section {
+        id: "chap1".to_string(),
+        title: "Chapter 1".to_string(),
+        blocks: vec![
+            Block::Paragraph {
+                id: "p_before".to_string(),
+                spans: vec![TextSpan {
+                    text: "A".repeat(349),
+                    ..Default::default()
+                }],
+                style: None,
+            },
+            Block::Image {
+                id: "img_long".to_string(),
+                resource_id: "diagram.png".to_string(),
+                alt: Some("Long descriptive alt text ".repeat(50)), // 1,300 chars (> 3 * 350)
+                width: Some(800),
+                height: Some(600),
+            },
+            Block::Paragraph {
+                id: "p_after".to_string(),
+                spans: vec![TextSpan {
+                    text: "B".repeat(700),
+                    ..Default::default()
+                }],
+                style: None,
+            },
+        ],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buf = Cursor::new(Vec::new());
+    packager.package(&mut buf).expect("package must succeed");
+
+    let loc_map = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == 550)
+        .expect("$550 missing");
+    let loc_pid_map = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == 621)
+        .expect("$621 missing");
+    let loc_vals = crate::ion::IonReader::new(&loc_map.data)
+        .decode_all()
+        .unwrap();
+    let pid_vals = crate::ion::IonReader::new(&loc_pid_map.data)
+        .decode_all()
+        .unwrap();
+
+    let IonValue::List(l_wrap) = &loc_vals[0] else {
+        panic!("Expected $550 list");
+    };
+    let IonValue::Struct(lf) = &l_wrap[0] else {
+        panic!("Expected $550 struct");
+    };
+    let Some((_, IonValue::List(entries))) = lf.iter().find(|(k, _)| *k == 182) else {
+        panic!("Expected $550 locations");
+    };
+    let IonValue::List(p_wrap) = &pid_vals[0] else {
+        panic!("Expected $621 list");
+    };
+    let IonValue::Struct(pf) = &p_wrap[0] else {
+        panic!("Expected $621 struct");
+    };
+    let Some((_, IonValue::List(pids))) = pf.iter().find(|(k, _)| *k == 182) else {
+        panic!("Expected $621 pids");
+    };
+
+    assert_eq!(entries.len(), pids.len());
+    let raw_pids: Vec<i64> = pids
+        .iter()
+        .map(|v| match v {
+            IonValue::Int(n) => *n,
+            _ => panic!("Expected int pid"),
+        })
+        .collect();
+    assert_eq!(raw_pids, vec![0, 350, 700, 1050]);
+
+    let mut seen_pairs = std::collections::HashSet::new();
+    let mut img_hits = 0usize;
+    for entry in entries {
+        let IonValue::Struct(ef) = entry else {
+            panic!("Expected entry struct");
+        };
+        let id = match ef.iter().find(|(k, _)| *k == 155).map(|(_, v)| v) {
+            Some(IonValue::Int(n)) => *n as u32,
+            _ => panic!("Expected int id"),
+        };
+        let off = match ef.iter().find(|(k, _)| *k == 143).map(|(_, v)| v) {
+            Some(IonValue::Int(n)) => *n,
+            _ => panic!("Expected int offset"),
+        };
+        assert!(
+            seen_pairs.insert((id, off)),
+            "Duplicate ($550) (eid, offset) pair emitted: ({}, {})",
+            id,
+            off
+        );
+        if packager.image_block_eids.contains(&id) {
+            img_hits += 1;
+            assert_eq!(off, 0);
+        }
+    }
+    assert_eq!(
+        img_hits, 1,
+        "Resolved image with >350-char alt must appear at most once in $550 (exactly once at PID 350)"
+    );
+}
+
+#[test]
+fn test_packager_content_features_skips_storyline_decode_when_sections_present() {
+    let book = BookIR::default();
+    let mut packager = KfxPackager::new(&book, "EBOK");
+
+    // Push a synthetic $259 storyline containing a native $278 table, but leave has_native_tables = false
+    let mut story_writer = crate::ion::IonWriter::new();
+    story_writer.write_bvm();
+    story_writer.write_value(&IonValue::Struct(vec![(
+        KfxSymbol::ContentList as u32,
+        IonValue::List(vec![IonValue::Struct(vec![
+            (KfxSymbol::Id as u32, IonValue::Int(1001)),
+            (
+                KfxSymbol::Type as u32,
+                IonValue::Symbol(KfxSymbol::Table as u32),
+            ),
+        ])]),
+    )]));
+    packager.entities.push(KfxEntity {
+        entity_id: 900,
+        chunk_type: SYM_STORYLINE,
+        data: story_writer.into_bytes(),
+    });
+
+    let non_empty_sections = vec![super::SectionPackData {
+        raw_id: "sec_1".to_string(),
+        name: "c_sec_1".to_string(),
+        sec_sym_id: 901,
+        sec_eid: 1000,
+        story_sym_id: 900,
+        block_info: vec![(1001, 10)],
+        outbound_anchors: Vec::new(),
+        used_resources: Vec::new(),
+    }];
+
+    // When section_data is non-empty and has_native_tables is false, $259 is NOT re-decoded
+    packager.build_content_features(&non_empty_sections);
+    let keys_false = extract_content_feature_keys(&packager.entities);
+    assert!(
+        !keys_false.iter().any(|k| k == "yj_table"),
+        "build_content_features must skip $259 re-decode when section_data is non-empty: {:?}",
+        keys_false
+    );
+
+    // When has_native_tables is true, yj_table and yj_table_viewer ARE emitted without $259 re-decode
+    packager
+        .entities
+        .retain(|e| e.chunk_type != SYM_CONTENT_FEATURES);
+    packager.has_native_tables = true;
+    packager.build_content_features(&non_empty_sections);
+    let keys_true = extract_content_feature_keys(&packager.entities);
+    assert!(keys_true.iter().any(|k| k == "yj_table"));
+    assert!(keys_true.iter().any(|k| k == "yj_table_viewer"));
 }

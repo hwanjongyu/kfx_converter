@@ -270,6 +270,60 @@ use crate::epub::{EpubError, EpubReader};
 use crate::packager::{KfxPackager, PackagerError};
 use crate::sync::{KindleSync, SyncError};
 
+/// Returns `true` when `lang` is empty or has an English primary language subtag (`en` / `eng`),
+/// matching BCP-47 hyphen or underscore tags (e.g. `"en"`, `"en-US"`, `"en_GB"`, `"eng"`).
+pub(crate) fn is_english_language_tag(lang: &str) -> bool {
+    let trimmed = lang.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let primary = trimmed
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(primary.as_str(), "en" | "eng")
+}
+
+/// Returns `true` when two target directory paths (which may not exist yet) resolve to the same
+/// canonical parent directory and matching leaf directory name (ASCII case-insensitive on
+/// Windows/macOS/MTP, exact on case-sensitive Unix).
+fn paths_match_target_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Some(leaf_a), Some(leaf_b)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let parent_a = match a.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let parent_b = match b.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let (Ok(canon_a), Ok(canon_b)) = (
+        std::fs::canonicalize(parent_a),
+        std::fs::canonicalize(parent_b),
+    ) else {
+        return false;
+    };
+    if canon_a != canon_b {
+        return false;
+    }
+    let case_insensitive = cfg!(any(target_os = "windows", target_os = "macos"))
+        || crate::storage::is_mtp_path(a)
+        || crate::storage::is_mtp_path(b);
+    if case_insensitive {
+        leaf_a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&leaf_b.to_string_lossy())
+    } else {
+        leaf_a == leaf_b
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum PipelineError {
     #[error("EPUB read error: {0}")]
@@ -438,80 +492,62 @@ impl ConversionPipeline {
         );
 
         if options.word_wise {
-            if let Some(ref cb) = progress {
-                cb(0.75, "Generating Word Wise lemma sidecar database...");
-            }
-            let book_revision = content_id
-                .chars()
-                .take(8)
-                .collect::<String>()
-                .to_lowercase();
-            let mut ww_builder =
-                WordWiseBuilder::new(&asin, &container_id, "en", "en", &book_revision);
-            let gloss_count = ww_builder.generate_from_book(&ir);
-            word_wise_glosses = Some(gloss_count);
-
-            if gloss_count == 0 {
+            if !is_english_language_tag(&ir.metadata.language) {
+                word_wise_glosses = Some(0);
                 log_pipeline_event(
                     log_path,
                     &format!(
-                        "WARN Word Wise enabled but 0 glosses matched (asin={}, lang=\"{}\"); skipping .kll sidecar emission",
+                        "INFO Word Wise skipped for non-English book (asin={}, lang=\"{}\"); skipping .kll sidecar emission",
                         asin, ir.metadata.language
                     ),
                 );
             } else {
-                match ww_builder.to_bytes() {
-                    Ok(bytes) => {
-                        log_pipeline_event(
-                            log_path,
-                            &format!(
-                                "WORD_WISE generated glosses={} kll_bytes={}",
-                                gloss_count,
-                                bytes.len()
-                            ),
-                        );
-                        kll_bytes = Some(bytes);
-                    }
-                    Err(e) => {
-                        let msg = format!("Word Wise KLL serialization failed: {}", e);
-                        log_pipeline_event(log_path, &format!("ERROR {}", msg));
-                        word_wise_error = Some(msg);
+                if let Some(ref cb) = progress {
+                    cb(0.75, "Generating Word Wise lemma sidecar database...");
+                }
+                let book_revision = content_id
+                    .chars()
+                    .take(8)
+                    .collect::<String>()
+                    .to_lowercase();
+                let mut ww_builder =
+                    WordWiseBuilder::new(&asin, &container_id, "en", "en", &book_revision);
+                let gloss_count = ww_builder.generate_from_book(&ir);
+                word_wise_glosses = Some(gloss_count);
+
+                if gloss_count == 0 {
+                    log_pipeline_event(
+                        log_path,
+                        &format!(
+                            "WARN Word Wise enabled but 0 glosses matched (asin={}, lang=\"{}\"); skipping .kll sidecar emission",
+                            asin, ir.metadata.language
+                        ),
+                    );
+                } else {
+                    match ww_builder.to_bytes() {
+                        Ok(bytes) => {
+                            log_pipeline_event(
+                                log_path,
+                                &format!(
+                                    "WORD_WISE generated glosses={} kll_bytes={}",
+                                    gloss_count,
+                                    bytes.len()
+                                ),
+                            );
+                            kll_bytes = Some(bytes);
+                        }
+                        Err(e) => {
+                            let msg = format!("Word Wise KLL serialization failed: {}", e);
+                            log_pipeline_event(log_path, &format!("ERROR {}", msg));
+                            word_wise_error = Some(msg);
+                        }
                     }
                 }
             }
         }
 
-        // 4b. Always deploy companion .sdr directory and sidecars alongside output_path
-        let mut sdr_error = None;
-        let sdr_path = output_path.with_extension("sdr");
-        if let Err(e) = crate::enhancements::SdrDeployer::deploy(
-            &sdr_path,
-            &asin,
-            Some(&content_id),
-            Some(&options.content_type),
-            Some(&ir.metadata.language),
-            cover_jpeg.as_deref(),
-            kll_bytes.as_deref(),
-        ) {
-            let msg = format!("SDR sidecar deploy failed ({}): {}", sdr_path.display(), e);
-            log_pipeline_event(log_path, &format!("ERROR {}", msg));
-            sdr_error = Some(msg);
-        } else {
-            log_pipeline_event(
-                log_path,
-                &format!(
-                    "SDR deployed path=\"{}\" has_kll={}",
-                    sdr_path.display(),
-                    kll_bytes.is_some()
-                ),
-            );
-        }
-
-        // 5. Automatic Device Sync when device_root is explicitly provided or auto_deploy is enabled
-        let mut synced_to_device = false;
-        let mut synced_device_path = None;
-        let mut sync_error = None;
-
+        // Resolve device sync target before Step 4b so local SdrDeployer::deploy is skipped when
+        // Step 5 (KindleSync::sync_to_device) will deploy to the exact same .sdr destination.
         let target_root = options.device_root.clone().or_else(|| {
             if !options.auto_deploy {
                 return None;
@@ -541,6 +577,55 @@ impl ConversionPipeline {
             }
             KindleSync::detect_kindle_root()
         });
+
+        // 4b. Deploy companion .sdr directory and sidecars alongside output_path unless Step 5
+        // deploys to the exact same .sdr destination under DEVICE_SYNC_LOCK.
+        let mut sdr_error = None;
+        let sdr_path = output_path.with_extension("sdr");
+        let skip_local_sdr = target_root.as_ref().is_some_and(|device_root| {
+            let device_sdr = crate::sync::transfer::expected_sync_sdr_dir(
+                device_root,
+                &output_path,
+                &ir.metadata.title,
+            );
+            paths_match_target_dir(&sdr_path, &device_sdr)
+        });
+        if skip_local_sdr {
+            log_pipeline_event(
+                log_path,
+                &format!(
+                    "SDR deferred to device sync path=\"{}\" has_kll={}",
+                    sdr_path.display(),
+                    kll_bytes.is_some()
+                ),
+            );
+        } else if let Err(e) = crate::enhancements::SdrDeployer::deploy(
+            &sdr_path,
+            &asin,
+            Some(&content_id),
+            Some(&options.content_type),
+            Some(&ir.metadata.language),
+            cover_jpeg.as_deref(),
+            kll_bytes.as_deref(),
+        ) {
+            let msg = format!("SDR sidecar deploy failed ({}): {}", sdr_path.display(), e);
+            log_pipeline_event(log_path, &format!("ERROR {}", msg));
+            sdr_error = Some(msg);
+        } else {
+            log_pipeline_event(
+                log_path,
+                &format!(
+                    "SDR deployed path=\"{}\" has_kll={}",
+                    sdr_path.display(),
+                    kll_bytes.is_some()
+                ),
+            );
+        }
+
+        // 5. Automatic Device Sync when device_root is explicitly provided or auto_deploy is enabled
+        let mut synced_to_device = false;
+        let mut synced_device_path = None;
+        let mut sync_error = None;
 
         if let Some(device_root) = target_root {
             if let Some(ref cb) = progress {
@@ -1008,5 +1093,72 @@ mod tests {
         symlink(&target_dir, &sym_parent).unwrap();
         append_conversion_log_at(&sym_parent.join("conversion.log"), "NO_ESCAPE");
         assert!(!target_dir.join("conversion.log").exists());
+    }
+
+    #[test]
+    fn test_is_english_language_tag_variants() {
+        for tag in ["", "  ", "en", "EN", "en-US", "en_GB", "eng", "ENG-US"] {
+            assert!(
+                is_english_language_tag(tag),
+                "Expected English tag {:?} to return true",
+                tag
+            );
+        }
+        for tag in [
+            "ko", "ko-KR", "ja", "zh-Hans", "fr", "de-DE", "es", "enigma",
+        ] {
+            assert!(
+                !is_english_language_tag(tag),
+                "Expected non-English tag {:?} to return false",
+                tag
+            );
+        }
+    }
+
+    #[test]
+    fn test_pipeline_skips_double_sdr_deploy_when_output_is_on_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let kindle_root = temp.path().join("mock_kindle");
+        let docs_dir = kindle_root.join("documents");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::create_dir_all(kindle_root.join("system")).unwrap();
+
+        let epub_path = temp.path().join("book.epub");
+        create_test_epub(&epub_path);
+        let output_kfx = docs_dir.join("book.kfx");
+        let log_path = temp.path().join("single_sdr.log");
+
+        let options = ConversionOptions {
+            content_type: "EBOK".into(),
+            word_wise: true,
+            auto_deploy: true,
+            device_root: Some(kindle_root.clone()),
+        };
+
+        let report = ConversionPipeline::run_with_log_path(
+            &epub_path,
+            Some(&output_kfx),
+            &options,
+            Some(&log_path),
+            None::<fn(f32, &str)>,
+        )
+        .expect("pipeline targeting Kindle documents/ must succeed");
+
+        assert!(report.synced_to_device);
+        assert_eq!(report.synced_device_path, Some(output_kfx.clone()));
+        assert!(docs_dir.join("book.sdr").is_dir());
+
+        let log_text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log_text.contains("SDR deferred to device sync"),
+            "Expected Step 4b to defer .sdr deployment to Step 5, got:\n{}",
+            log_text
+        );
+        assert!(
+            !log_text.contains("SDR deployed path="),
+            "Step 4b must NOT deploy .sdr a second time when Step 5 targets the same .sdr:\n{}",
+            log_text
+        );
+        assert!(log_text.contains("SYNC ok synced_kfx_path="));
     }
 }

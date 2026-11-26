@@ -199,28 +199,20 @@ pub fn resolve_output_folder_target(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
-/// Collects lowercase `.kfx` file stems present directly inside `doc_dir` in a single `read_dir` pass.
+/// Collects lowercase `.kfx` file stems present in `doc_dir` (including author subfolders
+/// up to depth 3) via `KindleSync::scan_device_files`, acquiring `DEVICE_SYNC_LOCK` and
+/// skipping symlinks, hidden directories, and `.sdr` sidecars.
 pub fn collect_device_kfx_stems(doc_dir: &Path) -> std::collections::HashSet<String> {
-    let mut stems = std::collections::HashSet::new();
-    let Ok(entries) = std::fs::read_dir(doc_dir) else {
-        return stems;
-    };
-    for entry in entries.flatten() {
-        let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
-        if is_dir {
-            continue;
-        }
-        let path = entry.path();
-        if path
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("kfx"))
-            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-        {
-            stems.insert(stem.to_lowercase());
-        }
-    }
-    stems
+    kfx_converter::KindleSync::scan_device_files(doc_dir)
+        .into_iter()
+        .filter(|f| f.format.eq_ignore_ascii_case("KFX"))
+        .filter_map(|f| {
+            f.full_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|stem| stem.to_lowercase())
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -497,9 +489,10 @@ impl Default for ConversionSettings {
     }
 }
 
-/// Discovers connected Kindle devices on Linux (GVFS MTP and USB Mass Storage).
-pub fn detect_kindle_device() -> DeviceStatus {
-    if let Some(info) = kfx_converter::KindleSync::detect_device_info() {
+pub(crate) fn device_status_from_info(
+    info: Option<kfx_converter::sync::KindleDeviceInfo>,
+) -> DeviceStatus {
+    if let Some(info) = info {
         DeviceStatus {
             connected: true,
             model: info.model_name,
@@ -511,6 +504,11 @@ pub fn detect_kindle_device() -> DeviceStatus {
     } else {
         DeviceStatus::default()
     }
+}
+
+/// Discovers connected Kindle devices on Linux (GVFS MTP and USB Mass Storage).
+pub fn detect_kindle_device() -> DeviceStatus {
+    device_status_from_info(kfx_converter::KindleSync::detect_device_info())
 }
 
 /// Formats a byte count into a compact human-readable KB/MB string.
@@ -985,14 +983,14 @@ pub fn scan_local_epub_directory_with_progress(
         // Determine status
         let local_kfx_exists = path.with_extension("kfx").exists();
         let on_kindle = if !device_kfx_stems.is_empty() {
-            let raw_stem_lower = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
+            let raw_stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            let raw_stem_lower = raw_stem.to_lowercase();
+            let sanitized_stem_lower =
+                kfx_converter::KindleSync::sanitize_filename(&raw_stem).to_lowercase();
             let sanitized_title_lower =
                 kfx_converter::KindleSync::sanitize_filename(&title).to_lowercase();
             device_kfx_stems.contains(&raw_stem_lower)
+                || device_kfx_stems.contains(&sanitized_stem_lower)
                 || device_kfx_stems.contains(&sanitized_title_lower)
         } else {
             false
@@ -1038,16 +1036,195 @@ pub fn eject_kindle_device(device: &DeviceStatus) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn write_minimal_epub(path: &Path, title: &str, author: &str) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).expect("Create minimal epub");
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("mimetype", opts).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+
+        zip.start_file("META-INF/container.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+        )
+        .unwrap();
+
+        let opf = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>{title}</dc:title>
+    <dc:creator>{author}</dc:creator>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest/>
+  <spine/>
+</package>"#
+        );
+        zip.start_file("OEBPS/content.opf", opts).unwrap();
+        zip.write_all(opf.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+
     #[test]
     fn test_detect_kindle_device_and_load_files() {
-        let device = detect_kindle_device();
-        println!("Device status: {:?}", device);
-        if device.connected {
-            assert!(device.path.is_some());
-            assert!(device.model.starts_with("Kindle"));
-            assert!(device.total_gb > 5.0);
-            let files = load_device_files(&device);
-            println!("Loaded files count: {}", files.len());
+        // 1. Disconnected mapping yields default status
+        let disconnected = device_status_from_info(None);
+        assert!(!disconnected.connected);
+        assert!(disconnected.path.is_none());
+        assert!(disconnected.root_path.is_none());
+
+        // 2. Deterministic TempDir mock Kindle with top-level, author subfolder, depth-3 subfolder,
+        //    companion .sdr Word Wise sidecar, depth-4 exclusion, and Unix symlink exclusion
+        let temp_dir = tempfile::tempdir().expect("Create mock Kindle temp dir");
+        let root = temp_dir.path();
+        let docs_dir = root.join("documents");
+        let sys_dir = root.join("system");
+        let author_dir = docs_dir.join("Frank Herbert");
+        let depth3_dir = docs_dir.join("Level1").join("Level2").join("Level3");
+        let depth4_dir = depth3_dir.join("Level4");
+        let top_sdr = docs_dir.join("TopBook.sdr");
+
+        std::fs::create_dir_all(&sys_dir).unwrap();
+        std::fs::create_dir_all(&author_dir).unwrap();
+        std::fs::create_dir_all(&depth4_dir).unwrap();
+        std::fs::create_dir_all(&top_sdr).unwrap();
+
+        std::fs::write(sys_dir.join("version.txt"), "Kindle 5.16.21").unwrap();
+        std::fs::write(docs_dir.join("TopBook.kfx"), b"CONT top").unwrap();
+        std::fs::write(top_sdr.join("LanguageLayer.en.B00TOP.kll"), b"kll db").unwrap();
+        std::fs::write(author_dir.join("SubBook.kfx"), b"CONT sub").unwrap();
+        std::fs::write(depth3_dir.join("DepthThree.kfx"), b"CONT d3").unwrap();
+        std::fs::write(depth4_dir.join("TooDeep.kfx"), b"CONT d4").unwrap();
+        std::fs::write(docs_dir.join("LegacyBook.azw3"), b"MOBI").unwrap();
+
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().expect("Create outside dir");
+            let outside_kfx = outside.path().join("SymlinkTarget.kfx");
+            std::fs::write(&outside_kfx, b"CONT outside").unwrap();
+            std::os::unix::fs::symlink(&outside_kfx, docs_dir.join("LinkedBook.kfx")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), docs_dir.join("LinkedDir")).unwrap();
+
+            let stems_with_symlinks = collect_device_kfx_stems(&docs_dir);
+            assert!(!stems_with_symlinks.contains("linkedbook"));
+            assert!(!stems_with_symlinks.contains("symlinktarget"));
+        }
+
+        let (used_gb, total_gb) =
+            kfx_converter::KindleSync::get_storage_stats(root).unwrap_or((0.0, 0.0));
+        assert!(
+            total_gb > 0.0,
+            "Mock Kindle temp filesystem must report > 0 GB"
+        );
+        assert!(used_gb >= 0.0);
+
+        let info = kfx_converter::sync::KindleDeviceInfo {
+            root: root.to_path_buf(),
+            documents_dir: docs_dir.clone(),
+            model_name: kfx_converter::KindleSync::resolve_model_name(root, "Kindle Paperwhite"),
+            used_gb,
+            total_gb,
+        };
+        let device = device_status_from_info(Some(info));
+        assert!(device.connected);
+        assert_eq!(device.path.as_deref(), Some(docs_dir.as_path()));
+        assert_eq!(device.root_path.as_deref(), Some(root));
+        assert!(device.model.starts_with("Kindle"));
+        assert!(device.total_gb > 0.0);
+
+        let files = load_device_files(&device);
+        assert_eq!(files.len(), 4);
+        let top = files.iter().find(|f| f.name == "TopBook.kfx").unwrap();
+        assert!(top.has_sdr);
+        assert!(top.has_word_wise);
+        let sub = files.iter().find(|f| f.name == "SubBook.kfx").unwrap();
+        assert_eq!(sub.author, "Frank Herbert");
+        assert!(files.iter().any(|f| f.name == "DepthThree.kfx"));
+        assert!(!files.iter().any(|f| f.name == "TooDeep.kfx"));
+
+        let stems = collect_device_kfx_stems(&docs_dir);
+        assert!(stems.contains("topbook"));
+        assert!(stems.contains("subbook"));
+        assert!(stems.contains("depththree"));
+        assert!(!stems.contains("toodeep"));
+        assert!(!stems.contains("legacybook"));
+    }
+
+    #[test]
+    fn test_scan_local_epub_matches_subfolder_and_sanitized_raw_stem() {
+        let temp_dir = tempfile::tempdir().expect("Create temp dir");
+        let epub_dir = temp_dir.path().join("epubs");
+        let doc_dir = temp_dir.path().join("kindle").join("documents");
+        let author_dir = doc_dir.join("Isaac Asimov");
+        std::fs::create_dir_all(&epub_dir).unwrap();
+        std::fs::create_dir_all(&author_dir).unwrap();
+
+        // Device holds sanitized .kfx inside an author subfolder (depth 1)
+        std::fs::write(author_dir.join("Book_Part 1.kfx"), b"CONT").unwrap();
+        // Local EPUB has a filename stem ("Book..Part 1") that sanitizes to "Book_Part 1"
+        // while its OPF <dc:title> is completely different so only sanitized_stem_lower matches.
+        write_minimal_epub(
+            &epub_dir.join("Book..Part 1.epub"),
+            "Completely Different Metadata Title",
+            "Isaac Asimov",
+        );
+        write_minimal_epub(
+            &epub_dir.join("NotSynced.epub"),
+            "Not Synced Title",
+            "Isaac Asimov",
+        );
+
+        #[cfg(unix)]
+        {
+            // On Unix, also verify colon sanitization ("Book: Part 1.epub" -> "Book_ Part 1.kfx")
+            std::fs::write(author_dir.join("Book_ Part 1.kfx"), b"CONT").unwrap();
+            write_minimal_epub(
+                &epub_dir.join("Book: Part 1.epub"),
+                "Another Distinct Title",
+                "Isaac Asimov",
+            );
+        }
+
+        let dev = DeviceStatus {
+            connected: true,
+            model: "Kindle Paperwhite".into(),
+            path: Some(doc_dir),
+            root_path: Some(temp_dir.path().join("kindle")),
+            used_gb: 1.0,
+            total_gb: 16.0,
+        };
+
+        let items = scan_local_epub_directory_with_progress(&epub_dir, false, &dev, None, None);
+        let dot_item = items
+            .iter()
+            .find(|i| i.filename == "Book..Part 1.epub")
+            .unwrap();
+        assert_eq!(dot_item.title, "Completely Different Metadata Title");
+        assert_eq!(dot_item.status, LocalEpubStatus::OnDevice);
+
+        let unsynced = items
+            .iter()
+            .find(|i| i.filename == "NotSynced.epub")
+            .unwrap();
+        assert_eq!(unsynced.status, LocalEpubStatus::Unconverted);
+
+        #[cfg(unix)]
+        {
+            let colon_item = items
+                .iter()
+                .find(|i| i.filename == "Book: Part 1.epub")
+                .unwrap();
+            assert_eq!(colon_item.title, "Another Distinct Title");
+            assert_eq!(colon_item.status, LocalEpubStatus::OnDevice);
         }
     }
 

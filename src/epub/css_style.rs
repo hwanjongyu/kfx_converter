@@ -9,9 +9,11 @@
 /// - Dark mode safety filtering (ignores pure black text color)
 /// - Font size ratio to bucket token conversion
 pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
-    // 1. Last-wins merge of declarations, preserving first-seen order of properties
+    // 1. Last-wins merge of declarations in O(N), preserving first-seen order of properties
     let mut merged: Vec<(std::borrow::Cow<'static, str>, String)> = Vec::new();
-    for declaration in style_str.split(';') {
+    let mut prop_indices: std::collections::HashMap<std::borrow::Cow<'static, str>, usize> =
+        std::collections::HashMap::new();
+    for declaration in crate::css::split_declarations_quote_aware(style_str) {
         let decl = declaration.trim();
         if decl.is_empty() {
             continue;
@@ -23,14 +25,12 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
             }
             let p_lc = p_trim.to_ascii_lowercase();
             let p = crate::css::intern_css_property(&p_lc);
-            let v = val
-                .trim()
-                .trim_end_matches("!important")
-                .trim()
-                .to_ascii_lowercase();
-            if let Some(existing) = merged.iter_mut().find(|(k, _)| *k == p) {
-                existing.1 = v;
+            let v = crate::css::strip_css_important(val).to_ascii_lowercase();
+            if let Some(&idx) = prop_indices.get(&p) {
+                merged[idx].1 = v;
             } else {
+                let idx = merged.len();
+                prop_indices.insert(p.clone(), idx);
                 merged.push((p, v));
             }
         }
@@ -236,4 +236,33 @@ pub fn sanitize_css_style(style_str: &str) -> Vec<String> {
         _ => {}
     }
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_p2_16_sanitize_css_style_quote_aware_important_and_linear_merge() {
+        // Semicolon inside quoted font-family must NOT be parsed as `color: red`
+        let tokens = sanitize_css_style(
+            r#"font-family: "A; color: red"; font-weight: bold ! IMPORTANT; text-align: center ! important; text-align: right !important"#,
+        );
+        assert!(
+            !tokens.iter().any(|t| t.starts_with("color_")),
+            "Quoted semicolon leaked as color declaration: {:?}",
+            tokens
+        );
+        assert!(tokens.iter().any(|t| t == "bold"), "tokens: {:?}", tokens);
+        assert!(
+            tokens.iter().any(|t| t == "align_right"),
+            "Last-wins text-align failed: {:?}",
+            tokens
+        );
+        assert!(
+            !tokens.iter().any(|t| t == "align_center"),
+            "Earlier text-align should be overwritten: {:?}",
+            tokens
+        );
+    }
 }

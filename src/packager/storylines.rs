@@ -1314,6 +1314,7 @@ impl<'a> KfxPackager<'a> {
         styles: &StyleSymMap,
     ) -> (Vec<SectionPackData>, Vec<PendingStoryline>, HashSet<u32>) {
         let syms = StorylineSymIds::resolve();
+        self.has_native_tables = false;
         let sections = std::mem::replace(&mut self.sections, std::borrow::Cow::Borrowed(&[]));
         let mut section_data = Vec::with_capacity(sections.len());
         let mut pending_storylines = Vec::with_capacity(sections.len());
@@ -1465,6 +1466,8 @@ impl<'a> KfxPackager<'a> {
         used_styles: &mut HashSet<u32>,
     ) {
         let syms = StorylineSymIds::resolve();
+        let sym_table = KfxSymbol::Table as u32;
+        let sym_table_row = KfxSymbol::TableRow as u32;
         let mut anchor_dedup: HashMap<AnchorTargetKey, u32> = HashMap::new();
         let mut anchor_idx: usize = 1;
         let mut note_idx: usize = 1;
@@ -1595,6 +1598,14 @@ impl<'a> KfxPackager<'a> {
                         syms.style_events,
                         IonValue::List(std::mem::take(&mut elem.style_events)),
                     ));
+                }
+                if !self.has_native_tables
+                    && elem.elem_fields.iter().any(|(k, v)| {
+                        *k == syms.type_key
+                            && matches!(v, IonValue::Symbol(s) if *s == sym_table || *s == sym_table_row)
+                    })
+                {
+                    self.has_native_tables = true;
                 }
                 story_elements.push(IonValue::Struct(std::mem::take(&mut elem.elem_fields)));
             }

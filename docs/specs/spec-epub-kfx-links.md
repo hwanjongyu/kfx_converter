@@ -4,14 +4,17 @@
 - **Target Crate / Workspace:** `kfx-converter` (`Cargo.toml` — Rust `edition = "2024"`, `[profile.release] panic = "abort"`, binaries `kfx-conv` [`cli`] and `kfx-studio` [`gui`])
 - **Baseline Commit:** `877ce3d56835e2e5ad9249a43e13c7a57bf170df` (post-P0 + post-P1 remediation)
 - **Scope:**
-  - **Stage 1 — Core Text Links (Internal & External)** `[In Scope by Default]`
-  - **Stage 2 — List Links (`Block::List`) & Footnote Popups (`$617 yj.note`)** `[In Scope by Default]`
-  - **Stage 3 — Optional Extensions (`3A` Table Links, `3B` Image Links, `3C` Visited/Unvisited Link Styles)** `[Explicit User Scope Decision Required]`
-- **Status:** Phase 1 Specification (Pending Approval)
+  - **Stage 1 — Core Text Links (Internal & External)** `[Implemented in c91e114]`
+  - **Stage 2 — List Links (`Block::List`) & Footnote Popups (`$617 yj.note`)** `[Implemented in c91e114]`
+  - **Stage 3 — Optional Extensions (`3A` Table Links, `3B` Image Links, `3C` Visited/Unvisited Link Styles)** `[Deferred to spec-epub-kfx-links-stage3.md]`
+- **Status:** Stages 1 & 2 Implemented in `c91e114` (Stage 3 tracked in [`spec-epub-kfx-links-stage3.md`](spec-epub-kfx-links-stage3.md))
 
 ---
 
 ## 1. Executive Summary & Cross-Cutting Invariants
+
+> [!NOTE]
+> **Implementation Status:** Stages 1 & 2 shipped in commit `c91e114` and passed full verification in [`docs/qa/qa-epub-kfx-links.md`](../qa/qa-epub-kfx-links.md). The pre-`c91e114` gap summary below is preserved as historical baseline context; Stage 3 extensions are specified in [`docs/specs/spec-epub-kfx-links-stage3.md`](spec-epub-kfx-links-stage3.md).
 
 Currently, `EpubReader` extracts `<a href="...">` targets onto `TextSpan.href` (`src/epub/xhtml.rs:1438-1498`), and `EpubReader::read_from_file` extracts footnote strings into `BookIR.footnotes` (`src/epub/mod.rs:583-591`), **but** three architectural gaps prevent hyperlinks and popup footnotes from functioning in packaged `.kfx` files:
 
@@ -46,7 +49,7 @@ flowchart TD
 
 ---
 
-## 2. Stage 1 — Core Text Links (Internal & External) `[In Scope by Default]`
+## 2. Stage 1 — Core Text Links (Internal & External) `[Implemented in c91e114]`
 
 ### 2.1 IR & EPUB Link Resolution (`src/ir.rs`, `src/epub/mod.rs`, `src/epub/xhtml.rs`, `src/epub/dropcap.rs`)
 
@@ -314,7 +317,7 @@ Extend `KfxPreflightValidator` (`src/validator.rs:162-931`) as follows:
 
 ---
 
-## 3. Stage 2 — List Links (`Block::List`) & Footnote Popups `[In Scope by Default]`
+## 3. Stage 2 — List Links (`Block::List`) & Footnote Popups `[Implemented in c91e114]`
 
 ### 3.1 List `style_events` & Exact Non-Zero Anchor/Link Offsets (`src/packager/storylines.rs`)
 
@@ -404,7 +407,7 @@ Inspection of `src/epub/xhtml.rs:93-197, 765-792, 966-1008, 1704-1755, 1791-1813
 
 ---
 
-## 4. Stage 3 — Optional Extensions `[Explicit User Scope Decision Required]`
+## 4. Stage 3 — Optional Extensions `[Deferred to spec-epub-kfx-links-stage3.md]`
 
 > **Stage 3 Full Specification:** The complete Phase 1 technical specification covering Stage 3A (Table Links & Inline Spans), Stage 3B (Image Links), and Stage 3C (Visited/Unvisited Link Styles) is located in [spec-epub-kfx-links-stage3.md](spec-epub-kfx-links-stage3.md).
 
@@ -414,8 +417,8 @@ The following three extensions introduce IR schema changes, KFX layout trade-off
 
 - **Current State (Verified):**
   - `Block::Table` (`src/ir.rs:282-285`) stores `rows: Vec<Vec<String>>`.
-  - `xhtml.rs:1602-1606, 1717-1718, 1970-1987` buffers cell text into `current_cell: String`, discarding inline `<a href="...">`, `<b>`, `<i>`, and capturing `<td id="...">` into `pending_anchors` (which leaks onto the post-table block).
-  - `src/packager/metadata.rs:158-197` emits `yj_table` (v7.0) and `yj_table_viewer` (v2.0) in `$585 content_features`, while `storylines.rs:640-673` flattens `Block::Table` as a `$269 text` element using `block.plain_text()` (`'\t'`/`'\n'`).
+  - `xhtml.rs` buffers cell text into `current_cell: String`, discarding inline `<a href="...">`, `<b>`, `<i>` (P2-#15 adds nested table stack handling, EOF flush, and `<td id>` anchor containment so cell IDs no longer leak onto post-table blocks, while keeping 2-field `Block::Table` compatible with Stage 3A).
+  - `src/packager/metadata.rs` emits `yj_table` (v7.0) and `yj_table_viewer` (v2.0) in `$585 content_features` **only** when native `$278`/`$279` table structures are actually emitted; flattened `$269 text` tables produced by `storylines.rs` using `block.plain_text()` (`'\t'`/`'\n'`) omit `yj_table` and `yj_table_viewer`.
   - **Existing Footprint:** 9 sites across `src/` (`src/epub/mod.rs:1061-1065` directly asserts `assert_eq!(rows[0], vec!["Header 1", "Header 2"]);`).
 - **Design Options:**
   - **Option 3A-1 (Minimal Compatibility — Additive `cell_spans`):** Keep `rows: Vec<Vec<String>>` untouched and add `cell_spans: Vec<Vec<Vec<TextSpan>>>` (populated by `xhtml.rs` when `in_cell == true` using the active `style_stack`, drained per cell so `<td id>` anchors attach inside the cell instead of leaking out of `</table>`). Emit `$142 style_events` on the flattened `$269 text` storyline element at exact `'\t'`/`'\n'` offsets matching `block.plain_text()`.

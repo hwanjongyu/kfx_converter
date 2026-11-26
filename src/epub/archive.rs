@@ -14,6 +14,7 @@ pub const MAX_EPUB_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
 pub const MAX_CHAPTER_XHTML_BYTES: u64 = 20 * 1024 * 1024; // 20 MB limit for single chapter XHTML
 pub const MAX_METADATA_BYTES: u64 = 10 * 1024 * 1024; // 10 MB limit for XML/NCX/NAV metadata
 pub const MAX_COMPRESSION_RATIO: f64 = 100.0;
+pub const MAX_ZERO_COMPRESSED_ENTRY_BYTES: u64 = 1024 * 1024; // 1 MiB
 
 /// Tracks cumulative decompressed bytes read from an EPUB archive against a hard limit.
 #[derive(Debug, Clone, Copy)]
@@ -55,13 +56,32 @@ pub fn read_entry_bytes(
     budget: &mut DecompressionBudget,
 ) -> Result<Vec<u8>, EpubError> {
     let entry_name = entry.name().to_string();
+    let declared_size = entry.size();
     let compressed = entry.compressed_size();
-    let mut out = Vec::with_capacity(entry.size().min(max_entry_bytes).min(64 * 1024) as usize);
+    read_bounded_stream(
+        entry,
+        &entry_name,
+        declared_size,
+        compressed,
+        max_entry_bytes,
+        budget,
+    )
+}
+
+fn read_bounded_stream<R: Read>(
+    reader: &mut R,
+    entry_name: &str,
+    declared_size: u64,
+    compressed: u64,
+    max_entry_bytes: u64,
+    budget: &mut DecompressionBudget,
+) -> Result<Vec<u8>, EpubError> {
+    let mut out = Vec::with_capacity(declared_size.min(max_entry_bytes).min(64 * 1024) as usize);
     let mut entry_read: u64 = 0;
     let mut buf = [0u8; 64 * 1024];
 
     loop {
-        match entry.read(&mut buf) {
+        match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 entry_read = entry_read.checked_add(n as u64).ok_or_else(|| {
@@ -77,7 +97,13 @@ pub fn read_entry_bytes(
                     )));
                 }
                 budget.charge(n as u64)?;
-                if compressed > 0 && entry_read > 1024 * 1024 {
+                if entry_read > MAX_ZERO_COMPRESSED_ENTRY_BYTES {
+                    if compressed == 0 {
+                        return Err(EpubError::Security(format!(
+                            "Member '{}' exceeds {} byte limit with zero compressed size",
+                            entry_name, MAX_ZERO_COMPRESSED_ENTRY_BYTES
+                        )));
+                    }
                     let ratio = (entry_read as f64) / (compressed as f64);
                     if ratio > MAX_COMPRESSION_RATIO {
                         return Err(EpubError::Security(format!(
@@ -287,5 +313,47 @@ mod tests {
         assert!(open_zip_entry(&mut archive, "OEBPS\\Text\\./sub/../My%20Chapter.xhtml").is_ok());
         assert!(open_zip_entry(&mut archive, "oebps/images/cover.jpg").is_ok());
         assert!(open_zip_entry(&mut archive, "missing/file.xhtml").is_err());
+    }
+
+    #[test]
+    fn test_p2_16_read_entry_bytes_rejects_zero_compressed_size_over_1mib() {
+        // <= 1 MiB with compressed == 0 is allowed (e.g. tiny synthetic fixtures)
+        let small = vec![b'a'; 64 * 1024];
+        let mut small_cursor = Cursor::new(&small);
+        let mut budget = DecompressionBudget::new(10 * 1024 * 1024);
+        let ok = read_bounded_stream(
+            &mut small_cursor,
+            "small.xhtml",
+            small.len() as u64,
+            0,
+            MAX_CHAPTER_XHTML_BYTES,
+            &mut budget,
+        )
+        .expect("<= 1 MiB entry with zero compressed size must be allowed");
+        assert_eq!(ok.len(), small.len());
+
+        // > 1 MiB with compressed == 0 must be rejected with EpubError::Security
+        let over_limit = vec![b'b'; (MAX_ZERO_COMPRESSED_ENTRY_BYTES as usize) + 1024];
+        let mut over_cursor = Cursor::new(&over_limit);
+        let mut budget2 = DecompressionBudget::new(10 * 1024 * 1024);
+        let err = read_bounded_stream(
+            &mut over_cursor,
+            "bomb.xhtml",
+            over_limit.len() as u64,
+            0,
+            MAX_CHAPTER_XHTML_BYTES,
+            &mut budget2,
+        )
+        .expect_err("> 1 MiB entry with zero compressed size must be rejected");
+        match err {
+            EpubError::Security(msg) => {
+                assert!(
+                    msg.contains("zero compressed size"),
+                    "Unexpected security message: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected EpubError::Security, got {:?}", other),
+        }
     }
 }

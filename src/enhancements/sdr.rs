@@ -19,22 +19,73 @@ struct SdrSidecarTarget<'a> {
 /// Deduplicated target file plan for `.sdr` sidecar deployment.
 struct SdrSidecarFiles<'a> {
     targets: Vec<SdrSidecarTarget<'a>>,
-    seen_paths: HashSet<PathBuf>,
+    seen_keys: HashSet<String>,
+    case_insensitive: bool,
 }
 
 impl<'a> SdrSidecarFiles<'a> {
-    fn new() -> Self {
+    fn new(case_insensitive: bool) -> Self {
         Self {
             targets: Vec::new(),
-            seen_paths: HashSet::new(),
+            seen_keys: HashSet::new(),
+            case_insensitive,
         }
     }
 
     fn push(&mut self, path: PathBuf, bytes: &'a [u8]) {
-        if self.seen_paths.insert(path.clone()) {
+        let key = if self.case_insensitive {
+            path.to_string_lossy().to_ascii_lowercase()
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        if self.seen_keys.insert(key) {
             self.targets.push(SdrSidecarTarget { path, bytes });
         }
     }
+}
+
+/// Detects whether `dir` targets a case-insensitive or MTP filesystem where case-variant
+/// sidecar filenames (e.g. `en` vs `EN`, `en-US` vs `EN-US`) alias to the exact same entry.
+fn is_case_insensitive_target(dir: &Path) -> bool {
+    if cfg!(any(target_os = "windows", target_os = "macos")) || crate::storage::is_mtp_path(dir) {
+        return true;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        const MSDOS_SUPER_MAGIC: u64 = 0x4d44;
+        const EXFAT_SUPER_MAGIC: u64 = 0x2011_bab0;
+        const NTFS_SB_MAGIC: u64 = 0x5346_544e;
+        const FUSE_SUPER_MAGIC: u64 = 0x6573_5546;
+
+        let mut probe = dir;
+        while !probe.exists() {
+            match probe.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => probe = parent,
+                _ => {
+                    probe = Path::new(".");
+                    break;
+                }
+            }
+        }
+
+        if let Ok(c_path) = CString::new(probe.as_os_str().as_bytes()) {
+            // SAFETY: `libc::statfs` is a C POD struct where all-zero bits is a valid initial state.
+            let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+            // SAFETY: `c_path` is a valid NUL-terminated `CString` and `stat` is a valid output buffer.
+            if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } == 0 {
+                return matches!(
+                    stat.f_type as u64,
+                    MSDOS_SUPER_MAGIC | EXFAT_SUPER_MAGIC | NTFS_SB_MAGIC | FUSE_SUPER_MAGIC
+                );
+            }
+        }
+    }
+
+    false
 }
 
 pub struct SdrDeployer;
@@ -151,21 +202,19 @@ impl SdrDeployer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn deploy_inner(
+    fn plan_sidecar_targets<'a>(
         sdr_dir: &Path,
         asin: &str,
         content_id: Option<&str>,
         cde_content_type: Option<&str>,
         book_language: Option<&str>,
-        cover_jpeg: Option<&[u8]>,
-        kll_bytes: Option<&[u8]>,
-        lock_mtp: bool,
-    ) -> std::io::Result<()> {
-        Self::ensure_dir_exists(sdr_dir)?;
-
+        cover_jpeg: Option<&'a [u8]>,
+        kll_bytes: Option<&'a [u8]>,
+        case_insensitive: bool,
+    ) -> Vec<SdrSidecarTarget<'a>> {
         let safe_asin = sanitize_asin(asin);
         let safe_cid = content_id.and_then(sanitize_sidecar_stem);
-        let mut plan = SdrSidecarFiles::new();
+        let mut plan = SdrSidecarFiles::new(case_insensitive);
 
         // 1. Plan deduplicated Word Wise sidecars (.kll) across language tags and ID aliases
         if let Some(kll) = kll_bytes {
@@ -202,7 +251,35 @@ impl SdrDeployer {
             }
         }
 
-        for target in plan.targets {
+        plan.targets
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deploy_inner(
+        sdr_dir: &Path,
+        asin: &str,
+        content_id: Option<&str>,
+        cde_content_type: Option<&str>,
+        book_language: Option<&str>,
+        cover_jpeg: Option<&[u8]>,
+        kll_bytes: Option<&[u8]>,
+        lock_mtp: bool,
+    ) -> std::io::Result<()> {
+        Self::ensure_dir_exists(sdr_dir)?;
+
+        let case_insensitive = is_case_insensitive_target(sdr_dir);
+        let targets = Self::plan_sidecar_targets(
+            sdr_dir,
+            asin,
+            content_id,
+            cde_content_type,
+            book_language,
+            cover_jpeg,
+            kll_bytes,
+            case_insensitive,
+        );
+
+        for target in targets {
             Self::write_file_with_mtp(&target.path, target.bytes, lock_mtp)?;
         }
 
@@ -476,5 +553,83 @@ mod tests {
             std::fs::read_dir(&outside_dir).unwrap().next().is_none(),
             "Outside directory targeted by symlinked .sdr must remain untouched"
         );
+    }
+
+    #[test]
+    fn test_plan_sidecar_targets_case_insensitive_deduplication() {
+        let sdr_dir = Path::new("/mock/Kindle/documents/Book.sdr");
+        let asin = "123456789ABCDEF0123456789ABCDEF0"; // yields 2 stems: full asin + B123456789
+
+        // en-US with 2 stems: 5 case-sensitive tags x 2 = 10 writes vs 2 case-insensitive tags x 2 = 4 writes
+        let cs_en_us = SdrDeployer::plan_sidecar_targets(
+            sdr_dir,
+            asin,
+            None,
+            Some("EBOK"),
+            Some("en-US"),
+            None,
+            Some(b"KLL"),
+            false,
+        );
+        let ci_en_us = SdrDeployer::plan_sidecar_targets(
+            sdr_dir,
+            asin,
+            None,
+            Some("EBOK"),
+            Some("en-US"),
+            None,
+            Some(b"KLL"),
+            true,
+        );
+        assert_eq!(cs_en_us.len(), 10);
+        assert_eq!(ci_en_us.len(), 4);
+        let ci_names: Vec<String> = ci_en_us
+            .iter()
+            .map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            ci_names,
+            vec![
+                format!("LanguageLayer.en.{}.kll", asin),
+                format!("LanguageLayer.en-US.{}.kll", asin),
+                "LanguageLayer.en.B123456789.kll".to_string(),
+                "LanguageLayer.en-US.B123456789.kll".to_string(),
+            ]
+        );
+
+        // en with 2 stems: 2 case-sensitive tags x 2 = 4 writes vs 1 case-insensitive tag x 2 = 2 writes
+        let cs_en = SdrDeployer::plan_sidecar_targets(
+            sdr_dir,
+            asin,
+            None,
+            Some("EBOK"),
+            Some("en"),
+            None,
+            Some(b"KLL"),
+            false,
+        );
+        let ci_en = SdrDeployer::plan_sidecar_targets(
+            sdr_dir,
+            asin,
+            None,
+            Some("EBOK"),
+            Some("en"),
+            None,
+            Some(b"KLL"),
+            true,
+        );
+        assert_eq!(cs_en.len(), 4);
+        assert_eq!(ci_en.len(), 2);
+
+        // MTP paths must always be treated as case-insensitive targets
+        assert!(is_case_insensitive_target(Path::new(
+            "/run/user/1000/gvfs/mtp:host=Amazon_Kindle/Internal Storage/documents/Book.sdr"
+        )));
+        assert!(is_case_insensitive_target(Path::new(
+            "mtp://Amazon_Kindle/documents/Book.sdr"
+        )));
+        assert!(is_case_insensitive_target(Path::new(
+            "gio://mtp/Kindle/documents/Book.sdr"
+        )));
     }
 }

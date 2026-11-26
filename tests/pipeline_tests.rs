@@ -245,10 +245,133 @@ fn test_pipeline_non_english_book_conversion() {
 
     let log_text = std::fs::read_to_string(&log_path).unwrap();
     assert!(
-        log_text.contains("WARN Word Wise enabled but 0 glosses matched"),
-        "Conversion log must record 0-gloss warning: {}",
+        log_text.contains("INFO Word Wise skipped for non-English book"),
+        "Conversion log must record non-English Word Wise skip: {}",
         log_text
     );
+    assert!(
+        !log_text.contains("WARN Word Wise enabled but 0 glosses matched"),
+        "Non-English book must skip English dictionary scan without emitting 0-gloss warning: {}",
+        log_text
+    );
+}
+
+#[test]
+fn test_pipeline_english_book_zero_glosses_logs_warning() {
+    let temp = common::temp_dir();
+    let simple_xhtml = r#"<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Simple</title></head>
+<body>
+  <p>The cat sat on the mat.</p>
+</body>
+</html>"#;
+    let epub_path = common::create_epub_with_xhtml(
+        temp.path(),
+        "simple_english.epub",
+        "Simple English Reader",
+        "en",
+        false,
+        simple_xhtml,
+    );
+    let kfx_path = temp.path().join("simple_english.kfx");
+
+    let options = ConversionOptions {
+        content_type: "EBOK".to_string(),
+        word_wise: true,
+        auto_deploy: false,
+        device_root: None,
+    };
+
+    let log_path = temp.path().join("pipeline.log");
+    let report = ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&kfx_path),
+        &options,
+        Some(&log_path),
+        None::<fn(f32, &str)>,
+    )
+    .expect("Simple English EPUB conversion should succeed");
+
+    assert_eq!(report.word_wise_glosses, Some(0));
+    assert!(report.word_wise_error.is_none());
+
+    let sdr_path = temp.path().join("simple_english.sdr");
+    assert!(sdr_path.is_dir());
+    let has_kll = std::fs::read_dir(&sdr_path)
+        .unwrap()
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(".kll"));
+    assert!(!has_kll, "0-gloss English book must not emit .kll files");
+
+    let log_text = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log_text.contains("WARN Word Wise enabled but 0 glosses matched"),
+        "English book with 0 matched glosses must still emit WARN log: {}",
+        log_text
+    );
+}
+
+#[test]
+fn test_pipeline_device_subfolder_output_deploys_sdr_once_without_duplicate_copy() {
+    let temp = common::temp_dir();
+    let kindle_root = temp.path().join("mock_kindle");
+    let docs_dir = kindle_root.join("documents");
+    let author_dir = docs_dir.join("Author");
+    std::fs::create_dir_all(&author_dir).unwrap();
+    std::fs::create_dir_all(kindle_root.join("system")).unwrap();
+
+    let epub_path = common::create_minimal_epub(
+        temp.path(),
+        "subfolder_novel.epub",
+        "Subfolder Novel",
+        "en",
+        true,
+    );
+    let output_kfx = author_dir.join("subfolder_novel.kfx");
+    let log_path = temp.path().join("subfolder_sync.log");
+
+    let options = ConversionOptions {
+        content_type: "EBOK".to_string(),
+        word_wise: true,
+        auto_deploy: true,
+        device_root: Some(kindle_root.clone()),
+    };
+
+    let report = ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&output_kfx),
+        &options,
+        Some(&log_path),
+        None::<fn(f32, &str)>,
+    )
+    .expect("Subfolder device conversion must succeed");
+
+    assert!(report.synced_to_device);
+    assert_eq!(report.synced_device_path, Some(output_kfx.clone()));
+    assert!(output_kfx.is_file());
+    assert!(author_dir.join("subfolder_novel.sdr").is_dir());
+    assert!(
+        !docs_dir.join("subfolder_novel.kfx").exists(),
+        "In-place subfolder KFX must not create duplicate flat copy in documents/"
+    );
+    assert!(
+        !docs_dir.join("subfolder_novel.sdr").exists(),
+        "In-place subfolder SDR must not create duplicate flat .sdr in documents/"
+    );
+
+    let log_text = std::fs::read_to_string(&log_path).unwrap();
+    assert!(
+        log_text.contains("SDR deferred to device sync"),
+        "Expected single .sdr deployment deferred to Step 5, got:\n{}",
+        log_text
+    );
+    assert!(
+        !log_text.contains("SDR deployed path="),
+        "Step 4b must be skipped when Step 5 targets the same .sdr:\n{}",
+        log_text
+    );
+    assert!(log_text.contains("SYNC ok synced_kfx_path="));
 }
 
 #[test]

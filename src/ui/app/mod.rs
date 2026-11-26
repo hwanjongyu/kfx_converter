@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::state::{
     ConversionSettings, ConversionTask, ConverterMode, DeviceStatus, EpubSortField, KindleFile,
@@ -90,6 +91,8 @@ pub struct KindleStudio {
     pub(super) drop_active_workers: usize,
     pub(super) scan_cancel_token: Option<Arc<AtomicBool>>,
     pub(super) device_refresh_generation: u64,
+    pub(super) device_refresh_in_flight: bool,
+    pub(super) last_device_refresh_at: Option<Instant>,
     pub(super) eject_in_progress: bool,
     pub(super) delete_in_progress: bool,
     pub(super) last_output_path: Option<PathBuf>,
@@ -127,6 +130,8 @@ impl KindleStudio {
             drop_active_workers: 0,
             scan_cancel_token: None,
             device_refresh_generation: 0,
+            device_refresh_in_flight: false,
+            last_device_refresh_at: None,
             eject_in_progress: false,
             delete_in_progress: false,
             last_output_path: None,

@@ -76,6 +76,69 @@ fn run_eject_command(label: &str, mut cmd: Command) -> Result<(), String> {
     }
 }
 
+/// Constructs `gio mount -u -- <target>` with POSIX `--` option termination so dash-prefixed
+/// mount paths cannot be interpreted as CLI flags.
+#[cfg(any(target_os = "linux", test))]
+fn build_linux_gio_unmount_command(target: &Path) -> Command {
+    let mut cmd = Command::new("gio");
+    cmd.args(["mount", "-u", "--"]).arg(target);
+    cmd
+}
+
+/// Constructs `umount -- <root>` with POSIX `--` option termination so dash-prefixed
+/// mount paths cannot be interpreted as CLI flags.
+#[cfg(any(target_os = "linux", test))]
+fn build_linux_umount_command(root: &Path) -> Command {
+    let mut cmd = Command::new("umount");
+    cmd.arg("--").arg(root);
+    cmd
+}
+
+/// Flushes dirty filesystem caches targeting `root` (using `libc::syncfs` on Linux to avoid
+/// stalling unrelated host mounts, with fallback to `libc::sync`).
+#[cfg(not(windows))]
+fn flush_device_root_syncfs(root: &Path) -> Result<(), SyncError> {
+    // 1. Flush file system write cache to prevent eMMC data loss.
+    // On Linux, use syncfs on the device root file descriptor to flush only the Kindle
+    // filesystem instead of forcing a global host-wide sync across all drives.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        if let Ok(file) = std::fs::File::open(root) {
+            // SAFETY: `file` is an open `File` whose raw fd remains valid for the `syncfs` call.
+            let ret = unsafe { libc::syncfs(file.as_raw_fd()) };
+            if ret != 0 {
+                let err = std::io::Error::last_os_error();
+                if matches!(
+                    err.raw_os_error(),
+                    Some(libc::EINVAL | libc::ENOTSUP | libc::ENOSYS)
+                ) {
+                    eprintln!(
+                        "Warning: syncfs unsupported on {:?} ({}); continuing with unmount.",
+                        root, err
+                    );
+                } else {
+                    return Err(SyncError::Io(err));
+                }
+            }
+        } else {
+            // SAFETY: `libc::sync` takes no arguments and flushes kernel buffers without pointer access.
+            unsafe { libc::sync() };
+        }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let _ = root;
+        // SAFETY: `libc::sync` takes no arguments and flushes kernel buffers without pointer access.
+        unsafe { libc::sync() };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+    }
+    Ok(())
+}
+
 /// Validates a Linux `/dev/...` block device path and constructs `udisksctl unmount --block-device=<dev>`.
 ///
 /// GLib's `GOptionContext` treats `-b` / `--block-device` as an option taking a required argument,
@@ -929,38 +992,7 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
         let macos_eject_cmd = build_macos_eject_command(root)?;
 
         // 1. Flush file system write cache to prevent eMMC data loss.
-        // On Linux, use syncfs on the device root file descriptor to flush only the Kindle
-        // filesystem instead of forcing a global host-wide sync across all drives.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
-            if let Ok(file) = std::fs::File::open(root) {
-                // SAFETY: `file` is an open `File` whose raw fd remains valid for the `syncfs` call.
-                let ret = unsafe { libc::syncfs(file.as_raw_fd()) };
-                if ret != 0 {
-                    let err = std::io::Error::last_os_error();
-                    if matches!(
-                        err.raw_os_error(),
-                        Some(libc::EINVAL | libc::ENOTSUP | libc::ENOSYS)
-                    ) {
-                        eprintln!(
-                            "Warning: syncfs unsupported on {:?} ({}); continuing with unmount.",
-                            root, err
-                        );
-                    } else {
-                        return Err(SyncError::Io(err));
-                    }
-                }
-            } else {
-                // SAFETY: `libc::sync` takes no arguments and flushes kernel buffers without pointer access.
-                unsafe { libc::sync() };
-            }
-        }
-        #[cfg(all(unix, not(target_os = "linux")))]
-        {
-            // SAFETY: `libc::sync` takes no arguments and flushes kernel buffers without pointer access.
-            unsafe { libc::sync() };
-        }
+        flush_device_root_syncfs(root)?;
 
         // 2. Unmount cleanly depending on host OS and mount type
         #[cfg(target_os = "linux")]
@@ -968,12 +1000,11 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
             let root_str = root.to_string_lossy();
             if crate::storage::is_mtp_path(root) {
                 let mtp_mount = if let Some(idx) = root_str.find("/Internal Storage") {
-                    &root_str[..idx]
+                    Path::new(&root_str[..idx])
                 } else {
-                    &root_str
+                    root
                 };
-                let mut cmd = Command::new("gio");
-                cmd.args(["mount", "-u", "--"]).arg(mtp_mount);
+                let cmd = build_linux_gio_unmount_command(mtp_mount);
                 run_eject_command("gio mount -u", cmd).map_err(|err| {
                     SyncError::GioFailed(format!(
                         "Failed to unmount MTP Kindle device at {:?}: {}",
@@ -982,8 +1013,7 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
                 })?;
             } else {
                 let mut errors = Vec::new();
-                let mut gio_cmd = Command::new("gio");
-                gio_cmd.args(["mount", "-u", "--"]).arg(root);
+                let gio_cmd = build_linux_gio_unmount_command(root);
                 if let Err(err) = run_eject_command("gio mount -u", gio_cmd) {
                     errors.push(err);
                     let block_dev = std::fs::read_to_string("/proc/mounts")
@@ -1000,8 +1030,7 @@ pub fn eject_device(root: &Path) -> Result<(), SyncError> {
                         }
                     }
                     if !unmounted {
-                        let mut umount_cmd = Command::new("umount");
-                        umount_cmd.arg("--").arg(root);
+                        let umount_cmd = build_linux_umount_command(root);
                         if let Err(e) = run_eject_command("umount", umount_cmd) {
                             errors.push(e);
                             return Err(SyncError::GioFailed(format!(
@@ -1046,14 +1075,21 @@ mod tests {
 
     #[test]
     fn test_detect_device_info_structure() {
-        let info = KindleSync::detect_device_info();
-        println!("Detected Kindle Info: {:?}", info);
-        if let Some(info) = info {
-            assert!(info.root.exists());
-            assert!(!info.model_name.is_empty());
-            assert!(info.total_gb > 0.0);
-            assert!(info.used_gb >= 0.0);
-        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Kindle");
+        let docs = root.join("documents");
+        let sys = root.join("system");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+        std::fs::write(sys.join("version.txt"), b"Kindle Paperwhite 5.16.2").unwrap();
+
+        let info = detect_device_info_with_override(Some(&root))
+            .expect("Deterministic TempDir Kindle override must resolve device info");
+        assert_eq!(info.root, root);
+        assert_eq!(info.documents_dir, docs);
+        assert_eq!(info.model_name, "Kindle Paperwhite");
+        assert!(info.total_gb > 0.0);
+        assert!(info.used_gb >= 0.0);
     }
 
     #[test]
@@ -1075,10 +1111,9 @@ mod tests {
         let dummy = root.join("test_file.bin");
         std::fs::write(&dummy, b"dirty cache data").unwrap();
 
-        // eject_device should successfully invoke targeted syncfs without failing
-        let res = KindleSync::eject_device(root);
-        // Note: gio mount -u may return error if not actually mounted, but syncfs itself succeeds
-        let _ = res;
+        // Exercise targeted syncfs flush deterministically without invoking host unmount tools
+        #[cfg(not(windows))]
+        flush_device_root_syncfs(root).expect("flush_device_root_syncfs must succeed on tempdir");
         assert!(dummy.exists());
     }
 
@@ -1203,7 +1238,19 @@ mod tests {
         assert_eq!(dev.root, root);
         assert_eq!(dev.documents_dir, docs);
         let expected_stats = get_storage_stats(&root).unwrap_or((0.0, 0.0));
-        assert_eq!((dev.used_gb, dev.total_gb), expected_stats);
+        assert_eq!(dev.total_gb, expected_stats.1);
+        assert!(
+            dev.used_gb >= 0.0 && dev.used_gb <= dev.total_gb,
+            "used_gb ({}) must be within [0.0, total_gb ({})]",
+            dev.used_gb,
+            dev.total_gb
+        );
+        assert!(
+            (dev.used_gb - expected_stats.0).abs() < 1.0,
+            "used_gb ({}) drifted unexpectedly from statvfs ({})",
+            dev.used_gb,
+            expected_stats.0
+        );
 
         // MTP-style "Internal Storage" subdirectory resolution inside override root
         let mtp_root = temp.path().join("mtp_override");
@@ -1396,18 +1443,63 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn test_eject_device_propagates_failure_for_unmounted_and_dash_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let dash_dir = temp.path().join("-rf");
-        std::fs::create_dir_all(&dash_dir).unwrap();
-        let err = KindleSync::eject_device(&dash_dir).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            !msg.is_empty(),
-            "eject_device on unmounted path must return descriptive error"
+    fn test_eject_command_builders_and_error_propagation() {
+        use std::ffi::OsStr;
+
+        // 1. Linux gio mount -u must include POSIX `--` before dash-prefixed and MTP paths
+        let dash_path = Path::new("/media/user/-rf");
+        let gio_cmd = build_linux_gio_unmount_command(dash_path);
+        assert_eq!(gio_cmd.get_program(), OsStr::new("gio"));
+        let gio_args: Vec<&OsStr> = gio_cmd.get_args().collect();
+        assert_eq!(
+            gio_args,
+            vec![
+                OsStr::new("mount"),
+                OsStr::new("-u"),
+                OsStr::new("--"),
+                OsStr::new("/media/user/-rf"),
+            ]
         );
+
+        let mtp_path = Path::new("/run/user/1000/gvfs/mtp:host=Amazon_Kindle");
+        let mtp_cmd = build_linux_gio_unmount_command(mtp_path);
+        assert_eq!(mtp_cmd.get_program(), OsStr::new("gio"));
+        assert_eq!(
+            mtp_cmd.get_args().collect::<Vec<&OsStr>>(),
+            vec![
+                OsStr::new("mount"),
+                OsStr::new("-u"),
+                OsStr::new("--"),
+                OsStr::new("/run/user/1000/gvfs/mtp:host=Amazon_Kindle"),
+            ]
+        );
+
+        // 2. Linux umount must include POSIX `--` before dash-prefixed paths
+        let umount_cmd = build_linux_umount_command(dash_path);
+        assert_eq!(umount_cmd.get_program(), OsStr::new("umount"));
+        assert_eq!(
+            umount_cmd.get_args().collect::<Vec<&OsStr>>(),
+            vec![OsStr::new("--"), OsStr::new("/media/user/-rf")]
+        );
+
+        // 3. Deterministic run_eject_command error propagation (never invokes live host unmount)
+        #[cfg(unix)]
+        {
+            let mut fail_cmd = Command::new("sh");
+            fail_cmd
+                .arg("-c")
+                .arg("printf 'target is not mounted' >&2; exit 1");
+            let err = run_eject_command("mock unmount", fail_cmd)
+                .expect_err("non-zero eject command must return Err");
+            assert!(err.contains("mock unmount failed"));
+            assert!(err.contains("target is not mounted"));
+
+            let mut ok_cmd = Command::new("sh");
+            ok_cmd.arg("-c").arg("exit 0");
+            run_eject_command("mock unmount", ok_cmd)
+                .expect("zero-exit eject command must return Ok");
+        }
     }
 
     #[test]

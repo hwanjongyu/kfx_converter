@@ -29,6 +29,7 @@ pub struct KfxPackager<'a> {
     pub(crate) global_anchor_targets: HashMap<String, (u32, usize, usize)>,
     pub(crate) section_pid_starts: HashMap<u32, usize>,
     pub(crate) resource_symbols: HashMap<String, AllocatedResourceSym>,
+    pub(crate) has_native_tables: bool,
 }
 
 impl<'a> KfxPackager<'a> {
@@ -71,6 +72,7 @@ impl<'a> KfxPackager<'a> {
             global_anchor_targets: HashMap::new(),
             section_pid_starts: HashMap::new(),
             resource_symbols: HashMap::new(),
+            has_native_tables: false,
         }
     }
 
@@ -140,6 +142,7 @@ impl<'a> KfxPackager<'a> {
         self.global_anchor_targets.clear();
         self.section_pid_starts.clear();
         self.resource_symbols.clear();
+        self.has_native_tables = false;
         let mut symbols = LocalSymbols::new();
 
         // 1. Build typography and text styles ($157) - MUST be first symbol-interning step (SIDs 852..=890)

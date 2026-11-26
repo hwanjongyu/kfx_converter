@@ -193,7 +193,7 @@ In Yellowjacket, styles are structured Amazon Ion entities registered under chun
 All typography dimensions and spacing properties (`$16 font_size`, `$42 line_height`, `$36 text_indent`, `$31 baseline_shift`, `$47 margin_top`, `$48 margin_left`, `$49 margin_bottom`, `$50 margin_right`) **must** be expressed in relative `$308 em` units:
 ```ion
 {
-    $307: "1.4",  // value (decimal string)
+    $307: 1.4d0,  // value (Ion decimal)
     $306: $308    // unit = em ($308)
 }
 ```
@@ -231,7 +231,7 @@ Publishing industry typographic convention requires that the opening paragraph o
 | `style_subscript` | `$157` | `$16`: 0.75em, `$31`: -0.20em | Inline subscript span |
 | `style_code` | `$157` | `$11`: `"monospace"`, `$16`: 0.9em | Inline code / preformatted text |
 | `style_small_caps` | `$157` | `$14`: `$369` (small_caps) | Inline small caps / `<abbr>` / `<acronym>` |
-| `style_dropcap` | `$157` | `$16`: 3.0em, `$13`: `$361` (bold), `$42`: 0.9em, `$50`: 0.15em, `$125`: 3, `$126`: 1 | Initial capital drop cap |
+| `style_dropcap` | `$157` | `$16`: 3.0em, `$42`: 0.9em, `$50`: 0.15em, `$125`: 3, `$126`: 1 | Initial capital drop cap (regular weight) |
 | `style_uppercase` | `$157` | `$41`: `$372` (uppercase) | Text transform uppercase |
 | `style_h1_center` / `style_h2_center` / `style_h3_center` | `$157` | Same as `style_hN` + `$34`: `$320` (center), `$36`: 0.0em | Headings centered via EPUB CSS |
 | `style_font_size_xs` / `_sm` / `_lg` / `_xl` / `_xxl` | `$157` | `$16`: 0.67em / 0.75em / 1.15em / 1.50em / 2.00em | Relative font-size buckets resolved from EPUB CSS (`style_events`) |
@@ -263,11 +263,10 @@ Yellowjacket natively supports initial drop capitals through a combination of re
 ### 9.1 Drop Cap Entity Structure (`style_dropcap`)
 ```ion
 $157 /* style */: {
-    $4 /* name */: $style_dropcap,
-    $16 /* font_size */: { $307: "3.0", $306: $308 /* 3.0em */ },
-    $13 /* font_weight */: $361 /* bold */,
-    $42 /* line_height */: { $307: "0.9", $306: $308 /* 0.9em */ },
-    $50 /* margin_right */: { $307: "0.15", $306: $308 /* 0.15em */ },
+    $173 /* style_name */: $style_dropcap,
+    $16 /* font_size */: { $307: 3.0d0, $306: $308 /* 3.0em */ },
+    $42 /* line_height */: { $307: 0.9d0, $306: $308 /* 0.9em */ },
+    $50 /* margin_right */: { $307: 0.15d0, $306: $308 /* 0.15em */ },
     $125 /* dropcap_lines */: 3,
     $126 /* dropcap_chars */: 1
 }
@@ -304,7 +303,7 @@ For each section, `KfxPackager` inspects all block spans for referenced footnote
 
 ```ion
 $597 /* auxiliary_data */: {
-    $598 /* kfx_id */: $c_sec_1-ad,
+    $598 /* kfx_id */: $c_section_1-ad,
     $258 /* metadata */: [
         {
             $492 /* key */: "IS_TARGET_SECTION",
@@ -313,7 +312,7 @@ $597 /* auxiliary_data */: {
     ],
     $617 /* yj.note */: [
         {
-            $155 /* id */: $note-fn1,
+            $155 /* id */: $note_1,
             $492 /* key */: "fn1",
             $159 /* type */: $281 /* footnote */,
             $440 /* popup */: true,

@@ -96,6 +96,8 @@ pub enum FontSizeBucket {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpanStyles {
     pub format: TextFormatFlags,
+    pub explicit_normal_weight: bool,
+    pub explicit_normal_style: bool,
     pub font_size: FontSizeBucket,
     pub dropcap: DropCapStyle,
     pub custom_classes: Vec<String>,
@@ -120,10 +122,22 @@ impl SpanStyles {
 
         for tok in tokens.split_whitespace() {
             match tok {
-                "bold" => styles.format.bold = true,
-                "font_weight_normal" => styles.format.bold = false,
-                "italic" => styles.format.italic = true,
-                "font_style_normal" => styles.format.italic = false,
+                "bold" => {
+                    styles.format.bold = true;
+                    styles.explicit_normal_weight = false;
+                }
+                "font_weight_normal" => {
+                    styles.format.bold = false;
+                    styles.explicit_normal_weight = true;
+                }
+                "italic" => {
+                    styles.format.italic = true;
+                    styles.explicit_normal_style = false;
+                }
+                "font_style_normal" => {
+                    styles.format.italic = false;
+                    styles.explicit_normal_style = true;
+                }
                 "underline" => styles.format.underline = true,
                 "strike" | "strikethrough" => styles.format.strikethrough = true,
                 "code" => styles.format.code = true,
@@ -165,9 +179,13 @@ impl SpanStyles {
         }
         if self.format.bold {
             tokens.push("bold");
+        } else if self.explicit_normal_weight {
+            tokens.push("font_weight_normal");
         }
         if self.format.italic {
             tokens.push("italic");
+        } else if self.explicit_normal_style {
+            tokens.push("font_style_normal");
         }
         if self.format.underline {
             tokens.push("underline");
@@ -211,6 +229,7 @@ impl SpanStyles {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlockStyle {
     pub alignment: TextAlignment,
+    pub explicit_align_left: bool,
     pub is_first_paragraph: bool,
     pub is_hanging_indent: bool,
     pub is_blockquote: bool,
@@ -223,10 +242,22 @@ impl BlockStyle {
         let mut style = Self::default();
         for tok in tokens.split_whitespace() {
             match tok {
-                "align_left" => style.alignment = TextAlignment::Left,
-                "align_center" => style.alignment = TextAlignment::Center,
-                "align_right" => style.alignment = TextAlignment::Right,
-                "align_justify" => style.alignment = TextAlignment::Justify,
+                "align_left" => {
+                    style.alignment = TextAlignment::Left;
+                    style.explicit_align_left = true;
+                }
+                "align_center" => {
+                    style.alignment = TextAlignment::Center;
+                    style.explicit_align_left = false;
+                }
+                "align_right" => {
+                    style.alignment = TextAlignment::Right;
+                    style.explicit_align_left = false;
+                }
+                "align_justify" => {
+                    style.alignment = TextAlignment::Justify;
+                    style.explicit_align_left = false;
+                }
                 "p_first" | "indent_none" => style.is_first_paragraph = true,
                 "hanging_indent" => style.is_hanging_indent = true,
                 "blockquote" | "indented_block" => style.is_blockquote = true,
@@ -243,6 +274,7 @@ impl BlockStyle {
     pub fn to_tokens(&self) -> String {
         let mut tokens = Vec::new();
         match self.alignment {
+            TextAlignment::Left if self.explicit_align_left => tokens.push("align_left"),
             TextAlignment::Left => {}
             TextAlignment::Center => tokens.push("align_center"),
             TextAlignment::Right => tokens.push("align_right"),
@@ -479,8 +511,10 @@ impl Block {
         match self {
             Block::Image { alt, .. } => {
                 if has_resolved_resource {
-                    alt.as_deref().map_or(0, str_utf16_len).max(1)
+                    // Resolved `$271 image` elements occupy 1 PID in Yellowjacket (`$584 alt_text` is metadata).
+                    1
                 } else {
+                    // Unresolved images emit a `$269 text` fallback whose PID length equals its UTF-16 text length.
                     str_utf16_len(Self::image_fallback_text(alt.as_deref())).max(1)
                 }
             }
@@ -2420,5 +2454,96 @@ mod tests {
 
         drop(cloned_toc);
         drop(root_toc);
+    }
+
+    #[test]
+    fn test_span_and_block_style_explicit_reset_lossless_roundtrip() {
+        // Explicit normal overrides survive from_tokens -> to_tokens roundtrip
+        let reset_span =
+            SpanStyles::from_tokens("bold font_weight_normal italic font_style_normal");
+        assert!(!reset_span.format.bold);
+        assert!(!reset_span.format.italic);
+        assert!(reset_span.explicit_normal_weight);
+        assert!(reset_span.explicit_normal_style);
+        assert_eq!(
+            reset_span.to_tokens(),
+            "font_weight_normal font_style_normal"
+        );
+        assert_eq!(SpanStyles::from_tokens(&reset_span.to_tokens()), reset_span);
+
+        // Subsequent bold/italic clears explicit_normal flags
+        let re_enabled =
+            SpanStyles::from_tokens("font_weight_normal bold font_style_normal italic");
+        assert!(re_enabled.format.bold);
+        assert!(re_enabled.format.italic);
+        assert!(!re_enabled.explicit_normal_weight);
+        assert!(!re_enabled.explicit_normal_style);
+        assert_eq!(re_enabled.to_tokens(), "bold italic");
+
+        // Default SpanStyles does not emit explicit reset tokens
+        let default_span = SpanStyles::default();
+        assert!(!default_span.explicit_normal_weight);
+        assert!(!default_span.explicit_normal_style);
+        assert_eq!(default_span.to_tokens(), "");
+
+        // TextSpan::with_resolved_styles preserves explicit normal overrides
+        let span = TextSpan {
+            text: "upright".to_string(),
+            style: Some("bold font_weight_normal font_style_normal".to_string()),
+            ..Default::default()
+        };
+        let resolved = span.resolved_styles();
+        let rebuilt = span.clone().with_resolved_styles(&resolved);
+        assert_eq!(
+            rebuilt.style.as_deref(),
+            Some("font_weight_normal font_style_normal")
+        );
+
+        // Explicit align_left survives BlockStyle roundtrip
+        let reset_block = BlockStyle::from_tokens("align_center align_left");
+        assert_eq!(reset_block.alignment, TextAlignment::Left);
+        assert!(reset_block.explicit_align_left);
+        assert_eq!(reset_block.to_tokens(), "align_left");
+        assert_eq!(
+            BlockStyle::from_tokens(&reset_block.to_tokens()),
+            reset_block
+        );
+
+        // Overriding align_left with align_right clears explicit_align_left
+        let overridden_block = BlockStyle::from_tokens("align_left align_right");
+        assert_eq!(overridden_block.alignment, TextAlignment::Right);
+        assert!(!overridden_block.explicit_align_left);
+        assert_eq!(overridden_block.to_tokens(), "align_right");
+
+        // Default BlockStyle does not emit align_left
+        let default_block = BlockStyle::default();
+        assert!(!default_block.explicit_align_left);
+        assert_eq!(default_block.to_tokens(), "");
+
+        // Block::with_resolved_style preserves explicit align_left
+        let p = Block::Paragraph {
+            id: "p_align".to_string(),
+            spans: vec![],
+            style: Some("align_justify align_left".to_string()),
+        };
+        let p_style = p.resolved_style();
+        let p_rebuilt = p.with_resolved_style(&p_style);
+        let Block::Paragraph { ref style, .. } = p_rebuilt else {
+            panic!("Expected Paragraph");
+        };
+        assert_eq!(style.as_deref(), Some("align_left"));
+    }
+
+    #[test]
+    fn test_image_yellowjacket_pid_len_clamps_resolved_to_one() {
+        let img_long_alt = Block::Image {
+            id: "img_long".to_string(),
+            resource_id: "fig.png".to_string(),
+            alt: Some("A".repeat(400)),
+            width: Some(800),
+            height: Some(600),
+        };
+        assert_eq!(img_long_alt.yellowjacket_pid_len(true), 1);
+        assert_eq!(img_long_alt.yellowjacket_pid_len(false), 400);
     }
 }

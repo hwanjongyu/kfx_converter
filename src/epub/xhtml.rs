@@ -16,6 +16,83 @@ pub use crate::epub::dropcap::{finish_paragraph_dropcaps, is_opening_quote};
 /// Maximum HTML list nesting depth (`<ul>` / `<ol>`) preserved as recursive `Block::List` nodes
 /// before deeper levels are flattened into the active depth-bounded list item.
 pub const MAX_LIST_DEPTH: usize = 32;
+/// Maximum HTML table nesting depth (`<table>`) preserved before deeper nested tables are bounded.
+pub const MAX_TABLE_DEPTH: usize = 32;
+/// Maximum depth for XHTML tag-tracking and inline style stacks to bound memory and scan cost.
+pub const MAX_TAG_STACK_DEPTH: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorScope {
+    Paragraph,
+    Heading,
+    ListItem,
+}
+
+struct TableFrame {
+    id: Option<String>,
+    anchor_mark: usize,
+    rows: Vec<Vec<String>>,
+    current_row: Vec<String>,
+    current_cell: String,
+    in_cell: bool,
+}
+
+struct BoundedTagStack<T> {
+    items: Vec<T>,
+    overflow_depth: usize,
+}
+
+impl<T> BoundedTagStack<T> {
+    fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            overflow_depth: 0,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    #[inline]
+    fn push(&mut self, item: T) {
+        if self.items.len() < MAX_TAG_STACK_DEPTH && self.overflow_depth == 0 {
+            self.items.push(item);
+        } else {
+            self.overflow_depth += 1;
+        }
+    }
+
+    fn pop_matching(&mut self, pred: impl Fn(&T) -> bool) -> bool {
+        if self.overflow_depth > 0 {
+            if self.items.first().is_some_and(&pred) && !self.items[1..].iter().any(&pred) {
+                self.items.clear();
+                self.overflow_depth = 0;
+                return true;
+            }
+            self.overflow_depth -= 1;
+            return false;
+        }
+        if let Some(pos) = self.items.iter().rposition(&pred) {
+            self.items.truncate(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.items.clear();
+        self.overflow_depth = 0;
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        &self.items
+    }
+}
 
 pub fn parse_xhtml_blocks(xhtml: &str) -> Vec<Block> {
     parse_xhtml_blocks_with_manifest(xhtml, &HashMap::new())
@@ -68,19 +145,11 @@ fn is_anchor_target_tag(tag: &[u8]) -> bool {
             | b"dd"
             | b"td"
             | b"th"
+            | b"table"
+            | b"tr"
             | b"figure"
             | b"figcaption"
     )
-}
-
-#[inline]
-fn pop_tag_stack(stack: &mut Vec<Vec<u8>>, tag: &[u8]) -> bool {
-    if let Some(pos) = stack.iter().rposition(|t| t.as_slice() == tag) {
-        stack.truncate(pos);
-        true
-    } else {
-        false
-    }
 }
 
 enum FootnoteElementRole {
@@ -544,17 +613,39 @@ pub fn parse_xhtml_with_css_and_context(
     book_css: &CssStylesheet,
     link_ctx: Option<&XhtmlLinkContext<'_>>,
 ) -> (Vec<Block>, HashMap<String, String>) {
+    parse_xhtml_with_css_context_and_cache(xhtml, href_to_id, book_css, link_ctx, None)
+}
+
+/// Parses XHTML with book CSS, optional chapter link context, and an optional shared
+/// `ElementStyleCache` reused across chapters that share the same stylesheet and have no inline `<style>`.
+pub(crate) fn parse_xhtml_with_css_context_and_cache(
+    xhtml: &str,
+    href_to_id: &HashMap<String, String>,
+    book_css: &CssStylesheet,
+    link_ctx: Option<&XhtmlLinkContext<'_>>,
+    shared_cache: Option<&crate::css::ElementStyleCache>,
+) -> (Vec<Block>, HashMap<String, String>) {
     let inline_css = crate::css::extract_inline_style_blocks(xhtml);
-    let chapter_css_owned;
-    let css: &CssStylesheet = if inline_css.trim().is_empty() {
-        book_css
+    let inline_sheet = if inline_css.trim().is_empty() {
+        None
     } else {
-        let mut c = book_css.clone();
-        c.add_css(&inline_css);
-        chapter_css_owned = c;
-        &chapter_css_owned
+        let mut s = CssStylesheet::new();
+        s.add_css(&inline_css);
+        Some(s)
     };
-    let style_cache = crate::css::ElementStyleCache::new();
+    let css = crate::css::CssCascade::new(book_css, inline_sheet.as_ref());
+    let local_cache;
+    let style_cache: &crate::css::ElementStyleCache = if inline_sheet.is_none() {
+        if let Some(shared) = shared_cache {
+            shared
+        } else {
+            local_cache = crate::css::ElementStyleCache::new();
+            &local_cache
+        }
+    } else {
+        local_cache = crate::css::ElementStyleCache::new();
+        &local_cache
+    };
 
     // Resolves cascaded stylesheet declarations + inline `style` attribute into IR tokens.
     let element_style_tokens = |tag: &[u8], e: &quick_xml::events::BytesStart| -> Vec<String> {
@@ -569,7 +660,10 @@ pub fn parse_xhtml_with_css_and_context(
         }
         let tag_str = String::from_utf8_lossy(tag);
         if let Some(inline) = inline_style {
-            let decls = css.declarations_for(&tag_str, class_attr.as_deref());
+            let decls =
+                style_cache.get_or_resolve_declarations(&tag_str, class_attr.as_deref(), |t, c| {
+                    css.declarations_for(t, c)
+                });
             if decls.is_empty() {
                 sanitize_css_style(&inline)
             } else {
@@ -614,28 +708,29 @@ pub fn parse_xhtml_with_css_and_context(
     xml_reader.config_mut().check_end_names = false;
     let mut buf = Vec::new();
 
-    // Explicit tag-name stacks (no fragile unchecked depth counters)
-    let mut ignore_stack: Vec<Vec<u8>> = Vec::new();
-    let mut footnote_wrapper_stack: Vec<Vec<u8>> = Vec::new();
-    let mut footnote_stack: Vec<Vec<u8>> = Vec::new();
-    let mut backlink_stack: Vec<Vec<u8>> = Vec::new();
+    // Depth-bounded tag-name stacks (capped at MAX_TAG_STACK_DEPTH)
+    let mut ignore_stack: BoundedTagStack<Vec<u8>> = BoundedTagStack::new();
+    let mut footnote_wrapper_stack: BoundedTagStack<Vec<u8>> = BoundedTagStack::new();
+    let mut footnote_stack: BoundedTagStack<Vec<u8>> = BoundedTagStack::new();
+    let mut backlink_stack: BoundedTagStack<Vec<u8>> = BoundedTagStack::new();
     let mut current_footnote_id: Option<String> = None;
     let mut current_footnote_text = String::new();
 
     // Ruby (Furigana) state
     let mut ruby = RubyState::new();
 
-    // Style & Inline stack
+    // Style & Inline stack (bounded at MAX_TAG_STACK_DEPTH)
     let mut style_stack: Vec<StyleFrameKind> = Vec::new();
+    let mut style_overflow_depth: usize = 0;
     let mut pending_anchors: VecDeque<String> = VecDeque::new();
-    let mut block_anchor_mark: Option<usize> = None;
+    let mut block_anchor_marks: Vec<(AnchorScope, usize)> = Vec::new();
 
     let mut current_span_text = String::new();
     let mut current_spans: Vec<TextSpan> = Vec::new();
 
     // Block state
-    let mut blockquote_stack: Vec<(Vec<u8>, Vec<String>)> = Vec::new();
-    let mut center_stack: Vec<Vec<u8>> = Vec::new();
+    let mut blockquote_stack: BoundedTagStack<(Vec<u8>, Vec<String>)> = BoundedTagStack::new();
+    let mut center_stack: BoundedTagStack<Vec<u8>> = BoundedTagStack::new();
     let mut in_p = false;
     let mut p_style: Option<String> = None;
     let mut p_has_dropcap = false;
@@ -646,17 +741,26 @@ pub fn parse_xhtml_with_css_and_context(
     let mut pending_page_break = false;
     let mut first_paragraph_seen = false;
 
-    // Table state
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
-    let mut current_cell = String::new();
-    let mut in_cell = false;
+    // Depth-bounded table stack
+    let mut table_stack: Vec<TableFrame> = Vec::new();
+    let mut table_overflow_depth: usize = 0;
+    let in_table_cell = |stack: &[TableFrame]| stack.last().is_some_and(|f| f.in_cell);
 
     // List state
     let mut list_stack: Vec<(bool, Vec<Vec<Block>>, Vec<Block>)> = Vec::new();
     let mut current_list_item_blocks: Vec<Block> = Vec::new();
     let mut in_li = false;
     let mut list_overflow_depth: usize = 0;
+
+    let push_style_frame = |style_stack: &mut Vec<StyleFrameKind>,
+                            style_overflow_depth: &mut usize,
+                            frame: StyleFrameKind| {
+        if style_stack.len() < MAX_TAG_STACK_DEPTH && *style_overflow_depth == 0 {
+            style_stack.push(frame);
+        } else {
+            *style_overflow_depth += 1;
+        }
+    };
 
     let flush_current_span = |text: &mut String,
                               spans: &mut Vec<TextSpan>,
@@ -715,11 +819,17 @@ pub fn parse_xhtml_with_css_and_context(
         }
     };
 
-    let drain_block_anchors_if_needed =
+    let drain_block_anchors_for_scope =
         |spans: &mut Vec<TextSpan>,
          pending_anchors: &mut VecDeque<String>,
-         anchor_mark: &mut Option<usize>| {
-            if let Some(mark) = anchor_mark.take()
+         marks: &mut Vec<(AnchorScope, usize)>,
+         expected: AnchorScope| {
+            let mark_opt = if marks.last().is_some_and(|(scope, _)| *scope == expected) {
+                marks.pop().map(|(_, m)| m)
+            } else {
+                None
+            };
+            if let Some(mark) = mark_opt
                 && pending_anchors.len() > mark
             {
                 let mut rest = pending_anchors.split_off(mark);
@@ -743,7 +853,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 current_spans: &mut Vec<TextSpan>,
                                 style_stack: &mut [StyleFrameKind],
                                 pending_anchors: &mut VecDeque<String>,
-                                block_anchor_mark: &mut Option<usize>,
+                                block_anchor_marks: &mut Vec<(AnchorScope, usize)>,
                                 in_li: bool,
                                 current_list_item_blocks: &mut Vec<Block>,
                                 blocks: &mut Vec<Block>| {
@@ -754,7 +864,12 @@ pub fn parse_xhtml_with_css_and_context(
                 style_stack,
                 pending_anchors,
             );
-            drain_block_anchors_if_needed(current_spans, pending_anchors, block_anchor_mark);
+            drain_block_anchors_for_scope(
+                current_spans,
+                pending_anchors,
+                block_anchor_marks,
+                AnchorScope::Paragraph,
+            );
             if !current_spans.is_empty() {
                 finish_paragraph_spans(current_spans, *p_has_dropcap, *p_dropcap_l2);
                 let p_block = Block::Paragraph {
@@ -783,7 +898,7 @@ pub fn parse_xhtml_with_css_and_context(
                               current_spans: &mut Vec<TextSpan>,
                               style_stack: &mut [StyleFrameKind],
                               pending_anchors: &mut VecDeque<String>,
-                              block_anchor_mark: &mut Option<usize>,
+                              block_anchor_marks: &mut Vec<(AnchorScope, usize)>,
                               in_li: bool,
                               current_list_item_blocks: &mut Vec<Block>,
                               blocks: &mut Vec<Block>| {
@@ -794,7 +909,12 @@ pub fn parse_xhtml_with_css_and_context(
                 style_stack,
                 pending_anchors,
             );
-            drain_block_anchors_if_needed(current_spans, pending_anchors, block_anchor_mark);
+            drain_block_anchors_for_scope(
+                current_spans,
+                pending_anchors,
+                block_anchor_marks,
+                AnchorScope::Heading,
+            );
             if !current_spans.is_empty() {
                 let h_block = Block::Heading {
                     id: format!("h_{}", blocks.len() + 1),
@@ -814,68 +934,137 @@ pub fn parse_xhtml_with_css_and_context(
         }
     };
 
-    let pop_block_boundary = |style_stack: &mut Vec<StyleFrameKind>, target_tag: &[u8]| {
+    let pop_block_boundary = |style_stack: &mut Vec<StyleFrameKind>,
+                              style_overflow_depth: &mut usize,
+                              target_tag: &[u8]| {
         if let Some(pos) = style_stack.iter().rposition(|f| match f {
             StyleFrameKind::BlockBoundary { tag } => tag.as_slice() == target_tag,
             _ => false,
         }) {
             style_stack.truncate(pos);
+            *style_overflow_depth = 0;
         }
     };
 
-    let parse_image_block =
-        |e: &quick_xml::events::BytesStart, total_blocks: usize| -> Option<Block> {
-            let mut src = String::new();
-            let mut alt = None;
-            for attr in e.attributes().flatten() {
-                let key = attr.key.as_ref();
-                if key == b"src" || key == b"xlink:href" || key == b"href" {
-                    let val = crate::epub::unescape_attr_value(&attr);
-                    if src.is_empty() || key == b"src" || key == b"xlink:href" {
-                        src = val;
+    let finalize_table_frame = |table_stack: &mut Vec<TableFrame>,
+                                pending_anchors: &mut VecDeque<String>,
+                                in_li: bool,
+                                current_list_item_blocks: &mut Vec<Block>,
+                                blocks: &mut Vec<Block>| {
+        if let Some(mut frame) = table_stack.pop() {
+            if frame.in_cell {
+                frame
+                    .current_row
+                    .push(frame.current_cell.trim().to_string());
+                frame.current_cell.clear();
+                frame.in_cell = false;
+            }
+            if !frame.current_row.is_empty() {
+                frame.rows.push(std::mem::take(&mut frame.current_row));
+            }
+            // Anchor containment: discard <td id>/<th id>/<tr id> and inner IDs so they never leak out.
+            pending_anchors.truncate(frame.anchor_mark.min(pending_anchors.len()));
+
+            if let Some(parent) = table_stack.last_mut() {
+                if parent.in_cell {
+                    let flattened: String = frame
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|c| c.trim())
+                                .filter(|c| !c.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .filter(|line| !line.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !flattened.is_empty() {
+                        if !parent.current_cell.is_empty()
+                            && !parent.current_cell.ends_with(char::is_whitespace)
+                        {
+                            parent.current_cell.push(' ');
+                        }
+                        parent.current_cell.push_str(&flattened);
+                        if !parent.current_cell.ends_with(char::is_whitespace) {
+                            parent.current_cell.push(' ');
+                        }
                     }
-                } else if key == b"alt" {
-                    alt = Some(crate::epub::unescape_attr_value(&attr));
+                } else {
+                    parent.rows.extend(frame.rows);
+                }
+            } else if !frame.rows.is_empty() {
+                let tbl = Block::Table {
+                    id: frame
+                        .id
+                        .unwrap_or_else(|| format!("table_{}", blocks.len() + 1)),
+                    rows: frame.rows,
+                };
+                if in_li {
+                    current_list_item_blocks.push(tbl);
+                } else {
+                    blocks.push(tbl);
                 }
             }
-            if !src.is_empty() {
-                let img_id = format!("img_{}", total_blocks + 1);
-                let mut clean_src = src.as_str();
-                while let Some(stripped) = clean_src
-                    .strip_prefix("../")
-                    .or_else(|| clean_src.strip_prefix("./"))
-                {
-                    clean_src = stripped;
+        }
+    };
+
+    let parse_image_block = |e: &quick_xml::events::BytesStart,
+                             total_blocks: usize,
+                             explicit_id: Option<String>|
+     -> Option<Block> {
+        let mut src = String::new();
+        let mut alt = None;
+        for attr in e.attributes().flatten() {
+            let key = attr.key.as_ref();
+            if key == b"src" || key == b"xlink:href" || key == b"href" {
+                let val = crate::epub::unescape_attr_value(&attr);
+                if src.is_empty() || key == b"src" || key == b"xlink:href" {
+                    src = val;
                 }
-                let decoded_src = decode_percent(clean_src);
-                let decoded_raw_src = decode_percent(&src);
-                let file_name = Path::new(&src)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| src.clone());
-                let decoded_file_name = decode_percent(&file_name);
-
-                let res_id = href_to_id
-                    .get(&src)
-                    .or_else(|| href_to_id.get(clean_src))
-                    .or_else(|| href_to_id.get(&decoded_src))
-                    .or_else(|| href_to_id.get(&decoded_raw_src))
-                    .or_else(|| href_to_id.get(&file_name))
-                    .or_else(|| href_to_id.get(&decoded_file_name))
-                    .cloned()
-                    .unwrap_or(file_name);
-
-                Some(Block::Image {
-                    id: img_id,
-                    resource_id: res_id,
-                    alt,
-                    width: None,
-                    height: None,
-                })
-            } else {
-                None
+            } else if key == b"alt" {
+                alt = Some(crate::epub::unescape_attr_value(&attr));
             }
-        };
+        }
+        if !src.is_empty() {
+            let img_id = explicit_id.unwrap_or_else(|| format!("img_{}", total_blocks + 1));
+            let mut clean_src = src.as_str();
+            while let Some(stripped) = clean_src
+                .strip_prefix("../")
+                .or_else(|| clean_src.strip_prefix("./"))
+            {
+                clean_src = stripped;
+            }
+            let decoded_src = decode_percent(clean_src);
+            let decoded_raw_src = decode_percent(&src);
+            let file_name = Path::new(&src)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| src.clone());
+            let decoded_file_name = decode_percent(&file_name);
+
+            let res_id = href_to_id
+                .get(&src)
+                .or_else(|| href_to_id.get(clean_src))
+                .or_else(|| href_to_id.get(&decoded_src))
+                .or_else(|| href_to_id.get(&decoded_raw_src))
+                .or_else(|| href_to_id.get(&file_name))
+                .or_else(|| href_to_id.get(&decoded_file_name))
+                .cloned()
+                .unwrap_or(file_name);
+
+            Some(Block::Image {
+                id: img_id,
+                resource_id: res_id,
+                alt,
+                width: None,
+                height: None,
+            })
+        } else {
+            None
+        }
+    };
 
     let extract_id_attr = |e: &quick_xml::events::BytesStart| -> Option<String> {
         for attr in e.attributes().flatten() {
@@ -897,7 +1086,7 @@ pub fn parse_xhtml_with_css_and_context(
         }
     };
 
-    let finalize_footnote = |footnote_stack: &mut Vec<Vec<u8>>,
+    let finalize_footnote = |footnote_stack: &mut BoundedTagStack<Vec<u8>>,
                              current_footnote_id: &mut Option<String>,
                              current_footnote_text: &mut String,
                              footnotes: &mut HashMap<String, String>| {
@@ -926,6 +1115,58 @@ pub fn parse_xhtml_with_css_and_context(
         }
     };
 
+    #[allow(clippy::too_many_arguments)]
+    let handle_text_chunk = |text: &str,
+                             ruby: &mut RubyState,
+                             footnote_stack: &BoundedTagStack<Vec<u8>>,
+                             backlink_stack: &BoundedTagStack<Vec<u8>>,
+                             current_footnote_text: &mut String,
+                             table_overflow_depth: usize,
+                             table_stack: &mut [TableFrame],
+                             in_p: &mut bool,
+                             in_heading: bool,
+                             in_li: bool,
+                             blockquote_stack: &BoundedTagStack<(Vec<u8>, Vec<String>)>,
+                             center_stack: &BoundedTagStack<Vec<u8>>,
+                             p_style: &mut Option<String>,
+                             current_span_text: &mut String| {
+        if ruby.in_ruby {
+            if !ruby.in_rp && !ruby.in_rt && !footnote_stack.is_empty() && backlink_stack.is_empty()
+            {
+                current_footnote_text.push_str(text);
+            }
+            ruby.handle_text(text);
+        } else {
+            if !footnote_stack.is_empty() && backlink_stack.is_empty() {
+                current_footnote_text.push_str(text);
+            }
+            if table_overflow_depth > 0 {
+                // Ignore text inside overflow-depth nested tables
+            } else if let Some(top) = table_stack.last_mut()
+                && top.in_cell
+            {
+                top.current_cell.push_str(text);
+            } else if *in_p || in_heading || in_li {
+                current_span_text.push_str(text);
+            } else if !text.trim().is_empty() {
+                // Implicit paragraph for text directly in <div>, <section>, <blockquote>, <body>, etc.
+                *in_p = true;
+                let mut imp_tokens = Vec::new();
+                merge_blockquote_and_center_tokens(
+                    &mut imp_tokens,
+                    blockquote_stack.as_slice(),
+                    center_stack.as_slice(),
+                );
+                *p_style = if imp_tokens.is_empty() {
+                    None
+                } else {
+                    Some(imp_tokens.join(" "))
+                };
+                current_span_text.push_str(text);
+            }
+        }
+    };
+
     loop {
         let ev = xml_reader.read_event_into(&mut buf);
         let empty_or_void = match &ev {
@@ -938,64 +1179,78 @@ pub fn parse_xhtml_with_css_and_context(
             let tag_lc = e.local_name().as_ref().to_ascii_lowercase();
             let local_bytes = tag_lc.as_slice();
             if ignore_stack.is_empty() {
+                let inside_cell = in_table_cell(&table_stack);
                 match local_bytes {
+                    b"td" | b"th" => {
+                        if table_overflow_depth == 0
+                            && let Some(top) = table_stack.last_mut()
+                        {
+                            if top.in_cell {
+                                top.current_row.push(top.current_cell.trim().to_string());
+                                top.current_cell.clear();
+                                top.in_cell = false;
+                            }
+                            top.current_row.push(String::new());
+                        }
+                    }
                     b"hr" | b"div" | b"section" => {
                         if is_anchor_target_tag(local_bytes) {
                             push_pending_anchor(&mut pending_anchors, extract_id_attr(e));
                         }
-                        let mut is_page_break = false;
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"class" {
-                                let val =
-                                    crate::epub::unescape_attr_value(&attr).to_ascii_lowercase();
-                                if val.contains("pagebreak") || val.contains("page-break") {
-                                    is_page_break = true;
-                                }
-                            } else if attr.key.as_ref() == b"style" {
-                                let val = crate::epub::unescape_attr_value(&attr);
-                                let tokens = sanitize_css_style(&val);
-                                if tokens
-                                    .iter()
-                                    .any(|t| t == "page_break_before" || t == "page_break_after")
-                                {
-                                    is_page_break = true;
+                        if !inside_cell {
+                            let mut is_page_break = false;
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"class" {
+                                    let val = crate::epub::unescape_attr_value(&attr)
+                                        .to_ascii_lowercase();
+                                    if val.contains("pagebreak") || val.contains("page-break") {
+                                        is_page_break = true;
+                                    }
+                                } else if attr.key.as_ref() == b"style" {
+                                    let val = crate::epub::unescape_attr_value(&attr);
+                                    let tokens = sanitize_css_style(&val);
+                                    if tokens.iter().any(|t| {
+                                        t == "page_break_before" || t == "page_break_after"
+                                    }) {
+                                        is_page_break = true;
+                                    }
                                 }
                             }
-                        }
-                        if is_page_break {
-                            pending_page_break = true;
-                        } else if local_bytes == b"hr" {
-                            flush_open_paragraph(
-                                &mut in_p,
-                                &mut p_style,
-                                &mut p_has_dropcap,
-                                &mut p_dropcap_l2,
-                                &mut current_span_text,
-                                &mut current_spans,
-                                &mut style_stack,
-                                &mut pending_anchors,
-                                &mut block_anchor_mark,
-                                in_li,
-                                &mut current_list_item_blocks,
-                                &mut blocks,
-                            );
-                            flush_open_heading(
-                                &mut in_heading,
-                                heading_level,
-                                &mut heading_style,
-                                &mut current_span_text,
-                                &mut current_spans,
-                                &mut style_stack,
-                                &mut pending_anchors,
-                                &mut block_anchor_mark,
-                                in_li,
-                                &mut current_list_item_blocks,
-                                &mut blocks,
-                            );
-                            if in_li {
-                                current_list_item_blocks.push(Block::HorizontalRule);
-                            } else {
-                                blocks.push(Block::HorizontalRule);
+                            if is_page_break {
+                                pending_page_break = true;
+                            } else if local_bytes == b"hr" {
+                                flush_open_paragraph(
+                                    &mut in_p,
+                                    &mut p_style,
+                                    &mut p_has_dropcap,
+                                    &mut p_dropcap_l2,
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    &mut style_stack,
+                                    &mut pending_anchors,
+                                    &mut block_anchor_marks,
+                                    in_li,
+                                    &mut current_list_item_blocks,
+                                    &mut blocks,
+                                );
+                                flush_open_heading(
+                                    &mut in_heading,
+                                    heading_level,
+                                    &mut heading_style,
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    &mut style_stack,
+                                    &mut pending_anchors,
+                                    &mut block_anchor_marks,
+                                    in_li,
+                                    &mut current_list_item_blocks,
+                                    &mut blocks,
+                                );
+                                if in_li {
+                                    current_list_item_blocks.push(Block::HorizontalRule);
+                                } else {
+                                    blocks.push(Block::HorizontalRule);
+                                }
                             }
                         }
                     }
@@ -1007,75 +1262,165 @@ pub fn parse_xhtml_with_css_and_context(
                         {
                             current_footnote_text.push(' ');
                         }
-                        current_span_text.push('\n');
+                        if table_overflow_depth == 0
+                            && let Some(top) = table_stack.last_mut()
+                            && top.in_cell
+                        {
+                            top.current_cell.push('\n');
+                        } else if !inside_cell {
+                            current_span_text.push('\n');
+                        }
                     }
                     b"a" => {
-                        let mut anchor = None;
-                        let mut href = None;
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name" {
-                                let v = crate::epub::unescape_attr_value(&attr).trim().to_string();
-                                if !v.is_empty() {
-                                    anchor = Some(v);
-                                }
-                            } else if attr.key.as_ref() == b"href" {
-                                let v = crate::epub::unescape_attr_value(&attr);
-                                if !v.is_empty() {
-                                    href = Some(v);
+                        if !inside_cell {
+                            let mut anchor = None;
+                            let mut href = None;
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"id" || attr.key.as_ref() == b"name" {
+                                    let v =
+                                        crate::epub::unescape_attr_value(&attr).trim().to_string();
+                                    if !v.is_empty() {
+                                        anchor = Some(v);
+                                    }
+                                } else if attr.key.as_ref() == b"href" {
+                                    let v = crate::epub::unescape_attr_value(&attr);
+                                    if !v.is_empty() {
+                                        href = Some(v);
+                                    }
                                 }
                             }
-                        }
-                        if anchor.is_some() {
-                            let norm_href = href.and_then(|h| normalize_span_href(&h, link_ctx));
-                            flush_current_span(
-                                &mut current_span_text,
-                                &mut current_spans,
-                                &mut style_stack,
-                                &mut pending_anchors,
-                            );
-                            current_spans.push(TextSpan {
-                                text: String::new(),
-                                style: None,
-                                anchor_id: anchor,
-                                href: norm_href,
-                                ruby: None,
-                            });
-                        }
-                    }
-                    b"img" | b"image" => {
-                        if let Some(img_block) = parse_image_block(e, blocks.len()) {
-                            if in_p || in_heading || in_li {
+                            if anchor.is_some() {
+                                let norm_href =
+                                    href.and_then(|h| normalize_span_href(&h, link_ctx));
                                 flush_current_span(
                                     &mut current_span_text,
                                     &mut current_spans,
                                     &mut style_stack,
                                     &mut pending_anchors,
                                 );
-                                if !current_spans.is_empty() {
-                                    finish_paragraph_spans(
-                                        &mut current_spans,
-                                        p_has_dropcap,
-                                        p_dropcap_l2,
-                                    );
-                                    let p_id = format!("p_{}", blocks.len() + 1);
-                                    let p_block = Block::Paragraph {
-                                        id: p_id,
-                                        spans: std::mem::take(&mut current_spans),
-                                        style: p_style.clone(),
-                                    };
-                                    if in_li {
-                                        current_list_item_blocks.push(p_block);
-                                    } else {
-                                        blocks.push(p_block);
+                                current_spans.push(TextSpan {
+                                    text: String::new(),
+                                    style: None,
+                                    anchor_id: anchor,
+                                    href: norm_href,
+                                    ruby: None,
+                                });
+                            }
+                        }
+                    }
+                    b"img" | b"image" => {
+                        if inside_cell {
+                            if table_overflow_depth == 0
+                                && let Some(top) = table_stack.last_mut()
+                            {
+                                for attr in e.attributes().flatten() {
+                                    if attr.key.as_ref() == b"alt" {
+                                        let alt_val = crate::epub::unescape_attr_value(&attr);
+                                        let trimmed = alt_val.trim();
+                                        if !trimmed.is_empty() {
+                                            if !top.current_cell.is_empty()
+                                                && !top.current_cell.ends_with(char::is_whitespace)
+                                            {
+                                                top.current_cell.push(' ');
+                                            }
+                                            top.current_cell.push_str(trimmed);
+                                        }
                                     }
                                 }
-                                p_has_dropcap = false;
-                                p_dropcap_l2 = false;
                             }
-                            if in_li {
-                                current_list_item_blocks.push(img_block);
+                            push_pending_anchor(&mut pending_anchors, extract_id_attr(e));
+                        } else {
+                            let img_own_id = extract_id_attr(e);
+                            if let Some(mut img_block) = parse_image_block(e, blocks.len(), None) {
+                                if in_heading {
+                                    flush_current_span(
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    if !current_spans.is_empty() {
+                                        let h_block = Block::Heading {
+                                            id: format!("h_{}", blocks.len() + 1),
+                                            level: heading_level,
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: heading_style.clone(),
+                                        };
+                                        if in_li {
+                                            current_list_item_blocks.push(h_block);
+                                        } else {
+                                            blocks.push(h_block);
+                                        }
+                                    }
+                                } else if in_p || in_li {
+                                    flush_current_span(
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    if !current_spans.is_empty() {
+                                        finish_paragraph_spans(
+                                            &mut current_spans,
+                                            p_has_dropcap,
+                                            p_dropcap_l2,
+                                        );
+                                        let p_block = Block::Paragraph {
+                                            id: format!("p_{}", blocks.len() + 1),
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: p_style.clone(),
+                                        };
+                                        if in_li {
+                                            current_list_item_blocks.push(p_block);
+                                        } else {
+                                            blocks.push(p_block);
+                                        }
+                                    }
+                                    p_has_dropcap = false;
+                                    p_dropcap_l2 = false;
+                                }
+
+                                let resolved_img_id = if let Some(own_id) = img_own_id {
+                                    own_id
+                                } else if let Some(pa) = pending_anchors.pop_back() {
+                                    pa
+                                } else {
+                                    format!("img_{}", blocks.len() + 1)
+                                };
+
+                                if !pending_anchors.is_empty() {
+                                    let marker_spans: Vec<TextSpan> = pending_anchors
+                                        .drain(..)
+                                        .map(|pa| TextSpan {
+                                            text: String::new(),
+                                            style: None,
+                                            anchor_id: Some(pa),
+                                            href: None,
+                                            ruby: None,
+                                        })
+                                        .collect();
+                                    let marker_block = Block::Paragraph {
+                                        id: format!("p_{}", blocks.len() + 1),
+                                        spans: marker_spans,
+                                        style: None,
+                                    };
+                                    if in_li {
+                                        current_list_item_blocks.push(marker_block);
+                                    } else {
+                                        blocks.push(marker_block);
+                                    }
+                                }
+
+                                if let Block::Image { ref mut id, .. } = img_block {
+                                    *id = resolved_img_id;
+                                }
+                                if in_li {
+                                    current_list_item_blocks.push(img_block);
+                                } else {
+                                    blocks.push(img_block);
+                                }
                             } else {
-                                blocks.push(img_block);
+                                push_pending_anchor(&mut pending_anchors, img_own_id);
                             }
                         }
                     }
@@ -1142,8 +1487,122 @@ pub fn parse_xhtml_with_css_and_context(
                     } else {
                         None
                     };
+                    let inside_cell = in_table_cell(&table_stack);
 
                     match local_bytes {
+                        b"table" => {
+                            if table_stack.is_empty() {
+                                flush_open_paragraph(
+                                    &mut in_p,
+                                    &mut p_style,
+                                    &mut p_has_dropcap,
+                                    &mut p_dropcap_l2,
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    &mut style_stack,
+                                    &mut pending_anchors,
+                                    &mut block_anchor_marks,
+                                    in_li,
+                                    &mut current_list_item_blocks,
+                                    &mut blocks,
+                                );
+                                flush_open_heading(
+                                    &mut in_heading,
+                                    heading_level,
+                                    &mut heading_style,
+                                    &mut current_span_text,
+                                    &mut current_spans,
+                                    &mut style_stack,
+                                    &mut pending_anchors,
+                                    &mut block_anchor_marks,
+                                    in_li,
+                                    &mut current_list_item_blocks,
+                                    &mut blocks,
+                                );
+                                if in_li {
+                                    flush_current_span(
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    if current_spans
+                                        .iter()
+                                        .any(|s| !s.text.trim().is_empty() || s.anchor_id.is_some())
+                                    {
+                                        current_list_item_blocks.push(Block::Paragraph {
+                                            id: format!("li_{}", blocks.len() + 1),
+                                            spans: std::mem::take(&mut current_spans),
+                                            style: None,
+                                        });
+                                    } else {
+                                        current_spans.clear();
+                                    }
+                                }
+                            }
+                            if table_stack.len() >= MAX_TABLE_DEPTH {
+                                table_overflow_depth += 1;
+                            } else {
+                                table_stack.push(TableFrame {
+                                    id: element_anchor_id,
+                                    anchor_mark: pending_anchors.len(),
+                                    rows: Vec::new(),
+                                    current_row: Vec::new(),
+                                    current_cell: String::new(),
+                                    in_cell: false,
+                                });
+                            }
+                        }
+                        b"tr" => {
+                            if table_overflow_depth == 0
+                                && let Some(top) = table_stack.last_mut()
+                            {
+                                if top.in_cell {
+                                    top.current_row.push(top.current_cell.trim().to_string());
+                                    top.current_cell.clear();
+                                    top.in_cell = false;
+                                }
+                                if !top.current_row.is_empty() {
+                                    top.rows.push(std::mem::take(&mut top.current_row));
+                                }
+                                push_pending_anchor(&mut pending_anchors, element_anchor_id);
+                            }
+                        }
+                        b"th" | b"td" => {
+                            if table_overflow_depth == 0
+                                && let Some(top) = table_stack.last_mut()
+                            {
+                                if top.in_cell {
+                                    top.current_row.push(top.current_cell.trim().to_string());
+                                    top.current_cell.clear();
+                                }
+                                push_pending_anchor(&mut pending_anchors, element_anchor_id);
+                                top.in_cell = true;
+                                top.current_cell.clear();
+                            }
+                        }
+                        _ if inside_cell => {
+                            // Inside <td>/<th>, block/list/inline tags must not mutate outer parser state.
+                            if table_overflow_depth == 0
+                                && matches!(
+                                    local_bytes,
+                                    b"p" | b"div"
+                                        | b"li"
+                                        | b"h1"
+                                        | b"h2"
+                                        | b"h3"
+                                        | b"h4"
+                                        | b"h5"
+                                        | b"h6"
+                                )
+                                && let Some(top) = table_stack.last_mut()
+                                && !top.current_cell.is_empty()
+                                && !top.current_cell.ends_with(char::is_whitespace)
+                            {
+                                top.current_cell.push(' ');
+                            }
+                            push_pending_anchor(&mut pending_anchors, element_anchor_id);
+                        }
                         b"ruby" => {
                             flush_current_span(
                                 &mut current_span_text,
@@ -1167,7 +1626,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1180,15 +1639,19 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
                             push_pending_anchor(&mut pending_anchors, element_anchor_id);
-                            style_stack.push(StyleFrameKind::BlockBoundary {
-                                tag: local_bytes.to_vec(),
-                            });
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::BlockBoundary {
+                                    tag: local_bytes.to_vec(),
+                                },
+                            );
                             for attr in e.attributes().flatten() {
                                 let key = attr.key.as_ref();
                                 if key == b"class" {
@@ -1216,7 +1679,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1229,7 +1692,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1267,9 +1730,13 @@ pub fn parse_xhtml_with_css_and_context(
                                 }
                             }
                             blockquote_stack.push((local_bytes.to_vec(), bq_tokens));
-                            style_stack.push(StyleFrameKind::BlockBoundary {
-                                tag: local_bytes.to_vec(),
-                            });
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::BlockBoundary {
+                                    tag: local_bytes.to_vec(),
+                                },
+                            );
                         }
                         b"p" => {
                             flush_open_paragraph(
@@ -1281,7 +1748,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1294,17 +1761,24 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
-                            pop_block_boundary(&mut style_stack, b"p");
-                            style_stack.push(StyleFrameKind::BlockBoundary {
-                                tag: local_bytes.to_vec(),
-                            });
+                            pop_block_boundary(&mut style_stack, &mut style_overflow_depth, b"p");
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::BlockBoundary {
+                                    tag: local_bytes.to_vec(),
+                                },
+                            );
 
-                            block_anchor_mark = Some(pending_anchors.len());
+                            if block_anchor_marks.len() < MAX_TAG_STACK_DEPTH {
+                                block_anchor_marks
+                                    .push((AnchorScope::Paragraph, pending_anchors.len()));
+                            }
                             push_pending_anchor(&mut pending_anchors, element_anchor_id);
 
                             in_p = true;
@@ -1313,8 +1787,8 @@ pub fn parse_xhtml_with_css_and_context(
                             let mut p_tokens = Vec::new();
                             merge_blockquote_and_center_tokens(
                                 &mut p_tokens,
-                                &blockquote_stack,
-                                &center_stack,
+                                blockquote_stack.as_slice(),
+                                center_stack.as_slice(),
                             );
                             if blockquote_stack.is_empty()
                                 && center_stack.is_empty()
@@ -1409,7 +1883,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1422,15 +1896,19 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
                             center_stack.push(local_bytes.to_vec());
-                            style_stack.push(StyleFrameKind::BlockBoundary {
-                                tag: local_bytes.to_vec(),
-                            });
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::BlockBoundary {
+                                    tag: local_bytes.to_vec(),
+                                },
+                            );
 
                             in_p = true;
                             p_has_dropcap = false;
@@ -1438,8 +1916,8 @@ pub fn parse_xhtml_with_css_and_context(
                             let mut c_tokens = Vec::new();
                             merge_blockquote_and_center_tokens(
                                 &mut c_tokens,
-                                &blockquote_stack,
-                                &center_stack,
+                                blockquote_stack.as_slice(),
+                                center_stack.as_slice(),
                             );
                             push_unique_tokens(&mut c_tokens, element_style_tokens(local_bytes, e));
                             if pending_page_break {
@@ -1463,7 +1941,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1476,15 +1954,22 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
-                            style_stack.push(StyleFrameKind::BlockBoundary {
-                                tag: local_bytes.to_vec(),
-                            });
-                            block_anchor_mark = Some(pending_anchors.len());
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::BlockBoundary {
+                                    tag: local_bytes.to_vec(),
+                                },
+                            );
+                            if block_anchor_marks.len() < MAX_TAG_STACK_DEPTH {
+                                block_anchor_marks
+                                    .push((AnchorScope::Heading, pending_anchors.len()));
+                            }
                             push_pending_anchor(&mut pending_anchors, element_anchor_id);
 
                             in_heading = true;
@@ -1552,24 +2037,28 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut pending_anchors,
                             );
                             let css_tokens = element_style_tokens(local_bytes, e);
-                            style_stack.push(StyleFrameKind::Inline {
-                                tag: local_bytes.to_vec(),
-                                bold: matches!(local_bytes, b"b" | b"strong"),
-                                italic: matches!(local_bytes, b"i" | b"em"),
-                                underline: local_bytes == b"u",
-                                strike: matches!(local_bytes, b"del" | b"s" | b"strike"),
-                                sup: local_bytes == b"sup",
-                                sub: local_bytes == b"sub",
-                                code: matches!(
-                                    local_bytes,
-                                    b"code" | b"tt" | b"kbd" | b"samp" | b"pre"
-                                ),
-                                css_tokens,
-                                href: None,
-                                anchor: None,
-                                is_noteref: false,
-                                emitted_span: false,
-                            });
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::Inline {
+                                    tag: local_bytes.to_vec(),
+                                    bold: matches!(local_bytes, b"b" | b"strong"),
+                                    italic: matches!(local_bytes, b"i" | b"em"),
+                                    underline: local_bytes == b"u",
+                                    strike: matches!(local_bytes, b"del" | b"s" | b"strike"),
+                                    sup: local_bytes == b"sup",
+                                    sub: local_bytes == b"sub",
+                                    code: matches!(
+                                        local_bytes,
+                                        b"code" | b"tt" | b"kbd" | b"samp" | b"pre"
+                                    ),
+                                    css_tokens,
+                                    href: None,
+                                    anchor: None,
+                                    is_noteref: false,
+                                    emitted_span: false,
+                                },
+                            );
                         }
                         b"a" => {
                             flush_current_span(
@@ -1614,21 +2103,25 @@ pub fn parse_xhtml_with_css_and_context(
                                 }
                             }
                             let css_tokens = element_style_tokens(local_bytes, e);
-                            style_stack.push(StyleFrameKind::Inline {
-                                tag: local_bytes.to_vec(),
-                                bold: false,
-                                italic: false,
-                                underline: false,
-                                strike: false,
-                                sup: false,
-                                sub: false,
-                                code: false,
-                                css_tokens,
-                                href,
-                                anchor,
-                                is_noteref: is_noteref && !is_backlink_a,
-                                emitted_span: false,
-                            });
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::Inline {
+                                    tag: local_bytes.to_vec(),
+                                    bold: false,
+                                    italic: false,
+                                    underline: false,
+                                    strike: false,
+                                    sup: false,
+                                    sub: false,
+                                    code: false,
+                                    css_tokens,
+                                    href,
+                                    anchor,
+                                    is_noteref: is_noteref && !is_backlink_a,
+                                    emitted_span: false,
+                                },
+                            );
                         }
                         b"span" | b"abbr" | b"acronym" => {
                             flush_current_span(
@@ -1697,46 +2190,25 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut span_tokens,
                                 element_style_tokens(local_bytes, e),
                             );
-                            style_stack.push(StyleFrameKind::Inline {
-                                tag: local_bytes.to_vec(),
-                                bold: false,
-                                italic: false,
-                                underline: false,
-                                strike: false,
-                                sup: false,
-                                sub: false,
-                                code: false,
-                                css_tokens: span_tokens,
-                                href: None,
-                                anchor: None,
-                                is_noteref: false,
-                                emitted_span: false,
-                            });
-                        }
-                        b"table" => {
-                            flush_open_paragraph(
-                                &mut in_p,
-                                &mut p_style,
-                                &mut p_has_dropcap,
-                                &mut p_dropcap_l2,
-                                &mut current_span_text,
-                                &mut current_spans,
+                            push_style_frame(
                                 &mut style_stack,
-                                &mut pending_anchors,
-                                &mut block_anchor_mark,
-                                in_li,
-                                &mut current_list_item_blocks,
-                                &mut blocks,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::Inline {
+                                    tag: local_bytes.to_vec(),
+                                    bold: false,
+                                    italic: false,
+                                    underline: false,
+                                    strike: false,
+                                    sup: false,
+                                    sub: false,
+                                    code: false,
+                                    css_tokens: span_tokens,
+                                    href: None,
+                                    anchor: None,
+                                    is_noteref: false,
+                                    emitted_span: false,
+                                },
                             );
-                            table_rows.clear();
-                        }
-                        b"tr" => {
-                            current_row.clear();
-                        }
-                        b"th" | b"td" => {
-                            push_pending_anchor(&mut pending_anchors, element_anchor_id);
-                            in_cell = true;
-                            current_cell.clear();
                         }
                         b"dt" | b"dd" => {
                             push_pending_anchor(&mut pending_anchors, element_anchor_id);
@@ -1751,7 +2223,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1764,7 +2236,7 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
@@ -1776,7 +2248,10 @@ pub fn parse_xhtml_with_css_and_context(
                                     &mut style_stack,
                                     &mut pending_anchors,
                                 );
-                                if current_spans.iter().any(|s| !s.text.trim().is_empty()) {
+                                if current_spans
+                                    .iter()
+                                    .any(|s| !s.text.trim().is_empty() || s.anchor_id.is_some())
+                                {
                                     current_list_item_blocks.push(Block::Paragraph {
                                         id: format!("li_{}", blocks.len() + 1),
                                         spans: std::mem::take(&mut current_spans),
@@ -1797,10 +2272,17 @@ pub fn parse_xhtml_with_css_and_context(
                             }
                         }
                         b"li" => {
-                            style_stack.push(StyleFrameKind::BlockBoundary {
-                                tag: local_bytes.to_vec(),
-                            });
-                            block_anchor_mark = Some(pending_anchors.len());
+                            push_style_frame(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                StyleFrameKind::BlockBoundary {
+                                    tag: local_bytes.to_vec(),
+                                },
+                            );
+                            if block_anchor_marks.len() < MAX_TAG_STACK_DEPTH {
+                                block_anchor_marks
+                                    .push((AnchorScope::ListItem, pending_anchors.len()));
+                            }
                             push_pending_anchor(&mut pending_anchors, element_anchor_id);
 
                             if list_overflow_depth > 0 {
@@ -1810,7 +2292,10 @@ pub fn parse_xhtml_with_css_and_context(
                                     &mut style_stack,
                                     &mut pending_anchors,
                                 );
-                                if current_spans.iter().any(|s| !s.text.trim().is_empty()) {
+                                if current_spans
+                                    .iter()
+                                    .any(|s| !s.text.trim().is_empty() || s.anchor_id.is_some())
+                                {
                                     current_list_item_blocks.push(Block::Paragraph {
                                         id: format!("li_{}", blocks.len() + 1),
                                         spans: std::mem::take(&mut current_spans),
@@ -1835,78 +2320,43 @@ pub fn parse_xhtml_with_css_and_context(
             Ok(Event::Text(ref e)) => {
                 if ignore_stack.is_empty() {
                     let text = crate::epub::unescape_xml_or_html(e);
-                    if ruby.in_ruby {
-                        if !ruby.in_rp
-                            && !ruby.in_rt
-                            && !footnote_stack.is_empty()
-                            && backlink_stack.is_empty()
-                        {
-                            current_footnote_text.push_str(&text);
-                        }
-                        ruby.handle_text(&text);
-                    } else {
-                        if !footnote_stack.is_empty() && backlink_stack.is_empty() {
-                            current_footnote_text.push_str(&text);
-                        }
-                        if in_cell {
-                            current_cell.push_str(&text);
-                        } else if in_p || in_heading || in_li {
-                            current_span_text.push_str(&text);
-                        } else if !text.trim().is_empty() {
-                            // Implicit paragraph for text directly in <div>, <section>, <blockquote>, <body>, etc.
-                            in_p = true;
-                            let mut imp_tokens = Vec::new();
-                            merge_blockquote_and_center_tokens(
-                                &mut imp_tokens,
-                                &blockquote_stack,
-                                &center_stack,
-                            );
-                            p_style = if imp_tokens.is_empty() {
-                                None
-                            } else {
-                                Some(imp_tokens.join(" "))
-                            };
-                            current_span_text.push_str(&text);
-                        }
-                    }
+                    handle_text_chunk(
+                        &text,
+                        &mut ruby,
+                        &footnote_stack,
+                        &backlink_stack,
+                        &mut current_footnote_text,
+                        table_overflow_depth,
+                        &mut table_stack,
+                        &mut in_p,
+                        in_heading,
+                        in_li,
+                        &blockquote_stack,
+                        &center_stack,
+                        &mut p_style,
+                        &mut current_span_text,
+                    );
                 }
             }
             Ok(Event::CData(ref e)) => {
                 if ignore_stack.is_empty() {
                     let text = String::from_utf8_lossy(e.as_ref());
-                    if ruby.in_ruby {
-                        if !ruby.in_rp
-                            && !ruby.in_rt
-                            && !footnote_stack.is_empty()
-                            && backlink_stack.is_empty()
-                        {
-                            current_footnote_text.push_str(&text);
-                        }
-                        ruby.handle_text(&text);
-                    } else {
-                        if !footnote_stack.is_empty() && backlink_stack.is_empty() {
-                            current_footnote_text.push_str(&text);
-                        }
-                        if in_cell {
-                            current_cell.push_str(&text);
-                        } else if in_p || in_heading || in_li {
-                            current_span_text.push_str(&text);
-                        } else if !text.trim().is_empty() {
-                            in_p = true;
-                            let mut imp_tokens = Vec::new();
-                            merge_blockquote_and_center_tokens(
-                                &mut imp_tokens,
-                                &blockquote_stack,
-                                &center_stack,
-                            );
-                            p_style = if imp_tokens.is_empty() {
-                                None
-                            } else {
-                                Some(imp_tokens.join(" "))
-                            };
-                            current_span_text.push_str(&text);
-                        }
-                    }
+                    handle_text_chunk(
+                        &text,
+                        &mut ruby,
+                        &footnote_stack,
+                        &backlink_stack,
+                        &mut current_footnote_text,
+                        table_overflow_depth,
+                        &mut table_stack,
+                        &mut in_p,
+                        in_heading,
+                        in_li,
+                        &blockquote_stack,
+                        &center_stack,
+                        &mut p_style,
+                        &mut current_span_text,
+                    );
                 }
             }
             Ok(Event::End(ref e)) => {
@@ -1920,12 +2370,13 @@ pub fn parse_xhtml_with_css_and_context(
                 }
 
                 if !ignore_stack.is_empty() {
-                    pop_tag_stack(&mut ignore_stack, local_bytes);
+                    ignore_stack.pop_matching(|t| t.as_slice() == local_bytes);
                 } else {
                     if !backlink_stack.is_empty() {
-                        pop_tag_stack(&mut backlink_stack, local_bytes);
+                        backlink_stack.pop_matching(|t| t.as_slice() == local_bytes);
                     }
-                    if !footnote_stack.is_empty() && pop_tag_stack(&mut footnote_stack, local_bytes)
+                    if !footnote_stack.is_empty()
+                        && footnote_stack.pop_matching(|t| t.as_slice() == local_bytes)
                     {
                         if matches!(local_bytes, b"p" | b"div" | b"li")
                             && !footnote_stack.is_empty()
@@ -1943,10 +2394,67 @@ pub fn parse_xhtml_with_css_and_context(
                         );
                     }
                     if !footnote_wrapper_stack.is_empty() {
-                        pop_tag_stack(&mut footnote_wrapper_stack, local_bytes);
+                        footnote_wrapper_stack.pop_matching(|t| t.as_slice() == local_bytes);
                     }
 
                     match local_bytes {
+                        b"th" | b"td" => {
+                            if table_overflow_depth == 0
+                                && let Some(top) = table_stack.last_mut()
+                                && top.in_cell
+                            {
+                                top.in_cell = false;
+                                top.current_row.push(top.current_cell.trim().to_string());
+                                top.current_cell.clear();
+                            }
+                        }
+                        b"tr" => {
+                            if table_overflow_depth == 0
+                                && let Some(top) = table_stack.last_mut()
+                            {
+                                if top.in_cell {
+                                    top.in_cell = false;
+                                    top.current_row.push(top.current_cell.trim().to_string());
+                                    top.current_cell.clear();
+                                }
+                                if !top.current_row.is_empty() {
+                                    top.rows.push(std::mem::take(&mut top.current_row));
+                                }
+                            }
+                        }
+                        b"table" => {
+                            if table_overflow_depth > 0 {
+                                table_overflow_depth -= 1;
+                            } else {
+                                finalize_table_frame(
+                                    &mut table_stack,
+                                    &mut pending_anchors,
+                                    in_li,
+                                    &mut current_list_item_blocks,
+                                    &mut blocks,
+                                );
+                            }
+                        }
+                        _ if in_table_cell(&table_stack) => {
+                            if table_overflow_depth == 0
+                                && matches!(
+                                    local_bytes,
+                                    b"p" | b"div"
+                                        | b"li"
+                                        | b"h1"
+                                        | b"h2"
+                                        | b"h3"
+                                        | b"h4"
+                                        | b"h5"
+                                        | b"h6"
+                                )
+                                && let Some(top) = table_stack.last_mut()
+                                && !top.current_cell.is_empty()
+                                && !top.current_cell.ends_with(char::is_whitespace)
+                            {
+                                top.current_cell.push(' ');
+                            }
+                        }
                         b"rt" | b"rtc" | b"rp" | b"rb" => {
                             ruby.on_end_tag(local_bytes);
                         }
@@ -1975,12 +2483,16 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
-                            pop_block_boundary(&mut style_stack, local_bytes);
+                            pop_block_boundary(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                local_bytes,
+                            );
                         }
                         b"blockquote" => {
                             flush_open_paragraph(
@@ -1992,18 +2504,17 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
-                            if let Some(pos) = blockquote_stack
-                                .iter()
-                                .rposition(|(t, _)| t.as_slice() == local_bytes)
-                            {
-                                blockquote_stack.truncate(pos);
-                            }
-                            pop_block_boundary(&mut style_stack, local_bytes);
+                            blockquote_stack.pop_matching(|(t, _)| t.as_slice() == local_bytes);
+                            pop_block_boundary(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                local_bytes,
+                            );
                         }
                         b"center" => {
                             flush_open_paragraph(
@@ -2015,13 +2526,17 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
-                            pop_tag_stack(&mut center_stack, local_bytes);
-                            pop_block_boundary(&mut style_stack, local_bytes);
+                            center_stack.pop_matching(|t| t.as_slice() == local_bytes);
+                            pop_block_boundary(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                local_bytes,
+                            );
                         }
                         b"div" | b"section" | b"article" | b"main" | b"aside" | b"figure"
                         | b"figcaption" => {
@@ -2034,12 +2549,16 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
-                            pop_block_boundary(&mut style_stack, local_bytes);
+                            pop_block_boundary(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                local_bytes,
+                            );
                         }
                         b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
                             flush_open_heading(
@@ -2050,76 +2569,93 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut current_spans,
                                 &mut style_stack,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
                                 in_li,
                                 &mut current_list_item_blocks,
                                 &mut blocks,
                             );
-                            pop_block_boundary(&mut style_stack, local_bytes);
+                            pop_block_boundary(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                local_bytes,
+                            );
                         }
                         b"b" | b"strong" | b"i" | b"em" | b"u" | b"del" | b"s" | b"strike"
                         | b"sup" | b"sub" | b"code" | b"tt" | b"kbd" | b"samp" | b"pre"
                         | b"span" | b"abbr" | b"acronym" | b"a" => {
-                            // Only flush & pop if matching inline tag exists before any BlockBoundary
-                            let mut match_pos = None;
-                            for (idx, frame) in style_stack.iter().enumerate().rev() {
-                                match frame {
-                                    StyleFrameKind::BlockBoundary { .. } => break,
-                                    StyleFrameKind::Inline { tag, .. }
-                                        if tag.as_slice() == local_bytes =>
-                                    {
-                                        match_pos = Some(idx);
-                                        break;
+                            if style_overflow_depth > 0 {
+                                style_overflow_depth -= 1;
+                            } else {
+                                // Only flush & pop if matching inline tag exists before any BlockBoundary
+                                let mut match_pos = None;
+                                for (idx, frame) in style_stack.iter().enumerate().rev() {
+                                    match frame {
+                                        StyleFrameKind::BlockBoundary { .. } => break,
+                                        StyleFrameKind::Inline { tag, .. }
+                                            if tag.as_slice() == local_bytes =>
+                                        {
+                                            match_pos = Some(idx);
+                                            break;
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
-                            }
-                            if let Some(pos) = match_pos {
-                                flush_current_span(
-                                    &mut current_span_text,
-                                    &mut current_spans,
-                                    &mut style_stack,
-                                    &mut pending_anchors,
-                                );
-                                // If closing <a> without having emitted any span inside, emit anchor marker
-                                if local_bytes == b"a"
-                                    && let StyleFrameKind::Inline {
-                                        anchor: Some(a_id),
-                                        href,
-                                        emitted_span: false,
-                                        ..
-                                    } = &style_stack[pos]
-                                {
-                                    current_spans.push(TextSpan {
-                                        text: String::new(),
-                                        style: None,
-                                        anchor_id: Some(a_id.clone()),
-                                        href: href.clone(),
-                                        ruby: None,
-                                    });
+                                if let Some(pos) = match_pos {
+                                    flush_current_span(
+                                        &mut current_span_text,
+                                        &mut current_spans,
+                                        &mut style_stack,
+                                        &mut pending_anchors,
+                                    );
+                                    // If closing <a> without having emitted any span inside, emit anchor marker
+                                    if local_bytes == b"a"
+                                        && let StyleFrameKind::Inline {
+                                            anchor: Some(a_id),
+                                            href,
+                                            emitted_span: false,
+                                            ..
+                                        } = &style_stack[pos]
+                                    {
+                                        current_spans.push(TextSpan {
+                                            text: String::new(),
+                                            style: None,
+                                            anchor_id: Some(a_id.clone()),
+                                            href: href.clone(),
+                                            ruby: None,
+                                        });
+                                    }
+                                    style_stack.truncate(pos);
                                 }
-                                style_stack.truncate(pos);
-                            }
-                        }
-                        b"th" | b"td" => {
-                            in_cell = false;
-                            current_row.push(current_cell.trim().to_string());
-                            current_cell.clear();
-                        }
-                        b"tr" => {
-                            if !current_row.is_empty() {
-                                table_rows.push(std::mem::take(&mut current_row));
-                            }
-                        }
-                        b"table" => {
-                            if !table_rows.is_empty() {
-                                blocks.push(Block::Table {
-                                    id: format!("table_{}", blocks.len() + 1),
-                                    rows: std::mem::take(&mut table_rows),
-                                });
                             }
                         }
                         b"li" => {
+                            flush_open_paragraph(
+                                &mut in_p,
+                                &mut p_style,
+                                &mut p_has_dropcap,
+                                &mut p_dropcap_l2,
+                                &mut current_span_text,
+                                &mut current_spans,
+                                &mut style_stack,
+                                &mut pending_anchors,
+                                &mut block_anchor_marks,
+                                in_li,
+                                &mut current_list_item_blocks,
+                                &mut blocks,
+                            );
+                            flush_open_heading(
+                                &mut in_heading,
+                                heading_level,
+                                &mut heading_style,
+                                &mut current_span_text,
+                                &mut current_spans,
+                                &mut style_stack,
+                                &mut pending_anchors,
+                                &mut block_anchor_marks,
+                                in_li,
+                                &mut current_list_item_blocks,
+                                &mut blocks,
+                            );
                             in_li = false;
                             flush_current_span(
                                 &mut current_span_text,
@@ -2127,10 +2663,11 @@ pub fn parse_xhtml_with_css_and_context(
                                 &mut style_stack,
                                 &mut pending_anchors,
                             );
-                            drain_block_anchors_if_needed(
+                            drain_block_anchors_for_scope(
                                 &mut current_spans,
                                 &mut pending_anchors,
-                                &mut block_anchor_mark,
+                                &mut block_anchor_marks,
+                                AnchorScope::ListItem,
                             );
                             if !current_spans.is_empty() {
                                 if current_spans
@@ -2151,7 +2688,11 @@ pub fn parse_xhtml_with_css_and_context(
                             {
                                 items.push(std::mem::take(&mut current_list_item_blocks));
                             }
-                            pop_block_boundary(&mut style_stack, local_bytes);
+                            pop_block_boundary(
+                                &mut style_stack,
+                                &mut style_overflow_depth,
+                                local_bytes,
+                            );
                         }
                         b"ul" | b"ol" => {
                             if list_overflow_depth > 0 {
@@ -2193,7 +2734,7 @@ pub fn parse_xhtml_with_css_and_context(
                     &mut current_spans,
                     &mut style_stack,
                     &mut pending_anchors,
-                    &mut block_anchor_mark,
+                    &mut block_anchor_marks,
                     in_li,
                     &mut current_list_item_blocks,
                     &mut blocks,
@@ -2206,11 +2747,20 @@ pub fn parse_xhtml_with_css_and_context(
                     &mut current_spans,
                     &mut style_stack,
                     &mut pending_anchors,
-                    &mut block_anchor_mark,
+                    &mut block_anchor_marks,
                     in_li,
                     &mut current_list_item_blocks,
                     &mut blocks,
                 );
+                while !table_stack.is_empty() {
+                    finalize_table_frame(
+                        &mut table_stack,
+                        &mut pending_anchors,
+                        in_li,
+                        &mut current_list_item_blocks,
+                        &mut blocks,
+                    );
+                }
                 if !pending_anchors.is_empty() {
                     let marker_spans: Vec<TextSpan> = pending_anchors
                         .drain(..)
@@ -2724,5 +3274,283 @@ mod tests {
                 bad
             );
         }
+    }
+
+    #[test]
+    fn test_p2_15_block_anchor_marks_stack_prevents_li_empty_p_leak() {
+        let xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <ul>
+    <li id="fn1"><p></p></li>
+    <li>Next</li>
+  </ul>
+</body>
+</html>"#;
+        let blocks = parse_xhtml_blocks(xhtml);
+        assert_eq!(blocks.len(), 1);
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("Expected list block, got {:?}", blocks);
+        };
+        assert_eq!(items.len(), 2, "items: {:?}", items);
+
+        // First <li> must contain "fn1"
+        let li1_anchors: Vec<&str> = items[0]
+            .iter()
+            .flat_map(|b| match b {
+                Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => spans.as_slice(),
+                _ => &[],
+            })
+            .filter_map(|s| s.anchor_id.as_deref())
+            .collect();
+        assert_eq!(li1_anchors, vec!["fn1"]);
+
+        // Second <li> must NOT inherit leaked "fn1"
+        let li2_anchors: Vec<&str> = items[1]
+            .iter()
+            .flat_map(|b| match b {
+                Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => spans.as_slice(),
+                _ => &[],
+            })
+            .filter_map(|s| s.anchor_id.as_deref())
+            .collect();
+        assert!(
+            li2_anchors.is_empty(),
+            "fn1 must not leak to next <li>: {:?}",
+            items[1]
+        );
+        assert_eq!(items[1][0].plain_text(), "Next");
+    }
+
+    #[test]
+    fn test_p2_15_img_in_heading_preserves_heading_and_figure_anchors() {
+        let xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <h1 style="text-align: center">Head <img id="i1" src="a.jpg" alt="Pic"/> Tail</h1>
+  <figure id="fig1"><img src="b.jpg" alt="Fig1"/></figure>
+  <p>After fig1</p>
+  <figure id="fig2"><img id="photo2" src="c.jpg" alt="Fig2"/></figure>
+  <p>After fig2</p>
+</body>
+</html>"#;
+        let blocks = parse_xhtml_blocks(xhtml);
+        assert_eq!(blocks.len(), 8, "blocks: {:#?}", blocks);
+
+        // <h1> split by <img> preserves Block::Heading, level 1, and style on both halves
+        match &blocks[0] {
+            Block::Heading {
+                level,
+                spans,
+                style,
+                ..
+            } => {
+                assert_eq!(*level, 1);
+                assert_eq!(spans[0].text, "Head ");
+                assert!(style.as_deref().unwrap_or("").contains("align_center"));
+            }
+            other => panic!("Expected Heading before img, got {:?}", other),
+        }
+        match &blocks[1] {
+            Block::Image {
+                id, resource_id, ..
+            } => {
+                assert_eq!(id, "i1");
+                assert_eq!(resource_id, "a.jpg");
+            }
+            other => panic!("Expected Image i1, got {:?}", other),
+        }
+        match &blocks[2] {
+            Block::Heading {
+                level,
+                spans,
+                style,
+                ..
+            } => {
+                assert_eq!(*level, 1);
+                assert_eq!(spans[0].text, " Tail");
+                assert!(style.as_deref().unwrap_or("").contains("align_center"));
+            }
+            other => panic!("Expected Heading after img, got {:?}", other),
+        }
+
+        // <figure id="fig1"><img src="b.jpg"/></figure> binds fig1 directly to Block::Image.id
+        match &blocks[3] {
+            Block::Image {
+                id, resource_id, ..
+            } => {
+                assert_eq!(id, "fig1");
+                assert_eq!(resource_id, "b.jpg");
+            }
+            other => panic!("Expected Image fig1, got {:?}", other),
+        }
+        match &blocks[4] {
+            Block::Paragraph { spans, .. } => {
+                assert_eq!(spans[0].text, "After fig1");
+                assert!(spans.iter().all(|s| s.anchor_id.is_none()));
+            }
+            other => panic!("Expected Paragraph after fig1, got {:?}", other),
+        }
+
+        // <figure id="fig2"><img id="photo2" src="c.jpg"/></figure> keeps both anchors before/on image
+        match &blocks[5] {
+            Block::Paragraph { spans, .. } => {
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].text, "");
+                assert_eq!(spans[0].anchor_id.as_deref(), Some("fig2"));
+            }
+            other => panic!("Expected anchor-marker paragraph for fig2, got {:?}", other),
+        }
+        match &blocks[6] {
+            Block::Image { id, .. } => assert_eq!(id, "photo2"),
+            other => panic!("Expected Image photo2, got {:?}", other),
+        }
+        match &blocks[7] {
+            Block::Paragraph { spans, .. } => {
+                assert_eq!(spans[0].text, "After fig2");
+                assert!(spans.iter().all(|s| s.anchor_id.is_none()));
+            }
+            other => panic!("Expected Paragraph after fig2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_p2_15_nested_tables_list_routing_anchor_containment_and_eof_flush() {
+        // 1. Nested table inside <td>, <td id> containment, empty <td/>, block tags & <img> inside <td>,
+        //    and heading flush before <table>.
+        let xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <h2>Before table</h2>
+  <table id="tbl1">
+    <tr id="row1">
+      <td id="c1"><p>OuterA</p><table><tr><td id="inner_c">Inner1</td><td>Inner2</td></tr></table><p>OuterB</p><img id="td_img" src="x.jpg" alt="Icon"/></td>
+      <td/>
+      <td>Col3</td>
+    </tr>
+    <tr>
+      <td>Row2A</td>
+      <td>Row2B</td>
+    </tr>
+  </table>
+  <p>Post table</p>
+  <ul>
+    <li>Intro<table><tr><td>L1</td><td>L2</td></tr></table></li>
+  </ul>
+</body>
+</html>"#;
+        let blocks = parse_xhtml_blocks(xhtml);
+        assert_eq!(blocks.len(), 4, "blocks: {:#?}", blocks);
+        assert!(matches!(&blocks[0], Block::Heading { level: 2, .. }));
+        assert_eq!(blocks[0].plain_text(), "Before table");
+
+        match &blocks[1] {
+            Block::Table { id, rows } => {
+                assert_eq!(id, "tbl1");
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].len(), 3);
+                assert_eq!(rows[0][0], "OuterA Inner1 Inner2 OuterB Icon");
+                assert_eq!(rows[0][1], "");
+                assert_eq!(rows[0][2], "Col3");
+                assert_eq!(rows[1], vec!["Row2A", "Row2B"]);
+            }
+            other => panic!("Expected Table, got {:?}", other),
+        }
+
+        // Neither row1, c1, inner_c, nor td_img leaked onto Post table
+        match &blocks[2] {
+            Block::Paragraph { spans, .. } => {
+                assert_eq!(spans[0].text, "Post table");
+                assert!(
+                    spans.iter().all(|s| s.anchor_id.is_none()),
+                    "Table cell anchors leaked: {:?}",
+                    spans
+                );
+            }
+            other => panic!("Expected Post table paragraph, got {:?}", other),
+        }
+
+        // Table inside <li> routed into Block::List item blocks after Intro paragraph
+        match &blocks[3] {
+            Block::List { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].len(), 2, "list item blocks: {:?}", items[0]);
+                assert_eq!(items[0][0].plain_text(), "Intro");
+                match &items[0][1] {
+                    Block::Table { rows, .. } => assert_eq!(rows, &vec![vec!["L1", "L2"]]),
+                    other => panic!("Expected Table inside list item, got {:?}", other),
+                }
+            }
+            other => panic!("Expected List block, got {:?}", other),
+        }
+
+        // 2. Unclosed table at EOF flushes cleanly (and contains <td id>)
+        let eof_xhtml =
+            r#"<html><body><table id="unclosed"><tr><td id="eof_td">Cell A</td><td>Cell B"#;
+        let eof_blocks = parse_xhtml_blocks(eof_xhtml);
+        assert_eq!(eof_blocks.len(), 1, "eof_blocks: {:?}", eof_blocks);
+        match &eof_blocks[0] {
+            Block::Table { id, rows } => {
+                assert_eq!(id, "unclosed");
+                assert_eq!(rows, &vec![vec!["Cell A", "Cell B"]]);
+            }
+            other => panic!("Expected unclosed Table at EOF, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_p2_16_bounded_tag_stacks_deep_nesting_exits_cleanly() {
+        let deep_divs_open = "<div>".repeat(1_000);
+        let deep_spans_open = "<span><b>".repeat(600);
+        let deep_spans_close = "</b></span>".repeat(600);
+        let deep_bq_open = "<blockquote>".repeat(400);
+        let deep_bq_close = "</blockquote>".repeat(400);
+
+        let xhtml = format!(
+            concat!(
+                "<html>",
+                "<head>{divs}</head>",
+                "<body>",
+                "<aside epub:type=\"footnote\" id=\"fn1\">{divs}Note body</aside>",
+                "<p>{spans}Deep text{spans_close}</p>",
+                "<p><b>{spans}Unclosed deep inline</p>",
+                "<p>Clean after unclosed</p>",
+                "{bq_open}<p>Quoted</p>{bq_close}",
+                "<p>Plain after blockquote</p>",
+                "</body></html>"
+            ),
+            divs = deep_divs_open,
+            spans = deep_spans_open,
+            spans_close = deep_spans_close,
+            bq_open = deep_bq_open,
+            bq_close = deep_bq_close,
+        );
+
+        let (blocks, footnotes) = parse_xhtml_with_manifest(&xhtml, &HashMap::new());
+        assert_eq!(
+            footnotes.get("fn1").map(String::as_str),
+            Some("Note body"),
+            "Footnote sentinel must exit cleanly despite 1,000 unclosed inner divs"
+        );
+        let texts: Vec<String> = blocks.iter().map(Block::plain_text).collect();
+        assert!(texts.iter().any(|t| t == "Deep text"), "texts: {:?}", texts);
+        assert!(
+            texts.iter().any(|t| t == "Clean after unclosed"),
+            "texts: {:?}",
+            texts
+        );
+        // Clean paragraph after unclosed deep <b><span> must not inherit bold
+        let clean_p = blocks
+            .iter()
+            .find(|b| b.plain_text() == "Clean after unclosed")
+            .unwrap();
+        if let Block::Paragraph { spans, .. } = clean_p {
+            assert!(!spans[0].resolved_styles().format.bold);
+        }
+        // Quoted paragraph has blockquote style, and paragraph after all </blockquote>s does not
+        let quoted_p = blocks.iter().find(|b| b.plain_text() == "Quoted").unwrap();
+        assert!(quoted_p.resolved_style().is_blockquote);
+        let plain_p = blocks
+            .iter()
+            .find(|b| b.plain_text() == "Plain after blockquote")
+            .unwrap();
+        assert!(!plain_p.resolved_style().is_blockquote);
     }
 }

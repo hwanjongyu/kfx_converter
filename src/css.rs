@@ -11,7 +11,8 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub trait StyleKeyRef {
     fn tag(&self) -> &str;
@@ -63,6 +64,7 @@ impl StyleKeyRef for BorrowedStyleKey<'_> {
 }
 
 type StyleTokenCache = HashMap<OwnedStyleKey, Vec<String>>;
+type StyleDeclCache = HashMap<OwnedStyleKey, String>;
 
 /// Element-level CSS style cache to avoid redundant cascade evaluations,
 /// regex matching, and string allocations on recurring HTML elements.
@@ -70,6 +72,7 @@ type StyleTokenCache = HashMap<OwnedStyleKey, Vec<String>>;
 pub struct ElementStyleCache {
     style_cache: RefCell<StyleTokenCache>,
     first_letter_cache: RefCell<StyleTokenCache>,
+    decl_cache: RefCell<StyleDeclCache>,
 }
 
 impl ElementStyleCache {
@@ -125,10 +128,34 @@ impl ElementStyleCache {
         resolved
     }
 
+    /// Resolves or retrieves cached stylesheet declaration strings for `(tag, class_attr)`
+    /// before merging with an element's inline `style="..."` attribute.
+    pub fn get_or_resolve_declarations<F>(
+        &self,
+        tag: &str,
+        class_attr: Option<&str>,
+        resolve: F,
+    ) -> String
+    where
+        F: FnOnce(&str, Option<&str>) -> String,
+    {
+        let lookup = BorrowedStyleKey(tag, class_attr);
+        if let Some(cached) = self.decl_cache.borrow().get(&lookup as &dyn StyleKeyRef) {
+            return cached.clone();
+        }
+        let resolved = resolve(tag, class_attr);
+        self.decl_cache.borrow_mut().insert(
+            OwnedStyleKey(tag.to_string(), class_attr.map(|s| s.to_string())),
+            resolved.clone(),
+        );
+        resolved
+    }
+
     /// Clears the cached entries.
     pub fn clear(&self) {
         self.style_cache.borrow_mut().clear();
         self.first_letter_cache.borrow_mut().clear();
+        self.decl_cache.borrow_mut().clear();
     }
 }
 
@@ -182,8 +209,9 @@ struct CssRule {
     tag: Option<String>,
     /// Lowercased class names that must ALL be present on the element.
     classes: Vec<String>,
-    /// Ordered `(property, value)` declarations (lowercased property).
-    decls: Vec<(Cow<'static, str>, String)>,
+    /// Ordered `(property, value)` declarations (lowercased property), shared across
+    /// comma-separated selectors to avoid allocation amplification.
+    decls: Arc<[(Cow<'static, str>, String)]>,
     /// Source order, used as tiebreaker after specificity.
     order: usize,
     /// Whether this rule matches a `::first-letter` or `:first-letter` pseudo-element.
@@ -201,6 +229,10 @@ impl CssRule {
 pub struct CssStylesheet {
     rules: Vec<CssRule>,
     has_first_letter: bool,
+    total_parsed_decls: usize,
+    by_class: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    universal: Vec<usize>,
 }
 
 enum ElementClasses<'a> {
@@ -253,8 +285,19 @@ impl<'a> ElementClasses<'a> {
 pub const MAX_CSS_RULES: usize = 50_000;
 /// Upper bound on declarations accepted per CSS rule to prevent allocation amplification.
 pub const MAX_DECLARATIONS_PER_RULE: usize = 256;
+/// Upper bound on total parsed declarations across all distinct rule blocks in a stylesheet.
+pub const MAX_CSS_TOTAL_DECLARATIONS: usize = 200_000;
 /// Upper bound on nested `@media` / `@supports` recursion depth.
 const MAX_CSS_NESTING_DEPTH: usize = 32;
+
+#[inline]
+fn to_ascii_lowercase_cow(s: &str) -> Cow<'_, str> {
+    if s.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(s.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(s)
+    }
+}
 
 impl CssStylesheet {
     pub fn new() -> Self {
@@ -267,20 +310,30 @@ impl CssStylesheet {
 
     /// Parses CSS text and appends its rules (later sources win on equal specificity).
     pub fn add_css(&mut self, css: &str) {
-        self.add_css_with_depth(css, 0);
-    }
-
-    fn add_css_with_depth(&mut self, css: &str, depth: usize) {
-        if depth > MAX_CSS_NESTING_DEPTH || self.rules.len() >= MAX_CSS_RULES {
+        if self.rules.len() >= MAX_CSS_RULES
+            || self.total_parsed_decls >= MAX_CSS_TOTAL_DECLARATIONS
+        {
             return;
         }
         let css = css.trim_start_matches('\u{FEFF}');
         let cleaned = strip_comments(css);
+        self.add_cleaned_css_with_depth(&cleaned, 0);
+    }
+
+    fn add_cleaned_css_with_depth(&mut self, cleaned: &str, depth: usize) {
+        if depth > MAX_CSS_NESTING_DEPTH
+            || self.rules.len() >= MAX_CSS_RULES
+            || self.total_parsed_decls >= MAX_CSS_TOTAL_DECLARATIONS
+        {
+            return;
+        }
         let bytes = cleaned.as_bytes();
         let mut i = 0usize;
 
         while i < bytes.len() {
-            if self.rules.len() >= MAX_CSS_RULES {
+            if self.rules.len() >= MAX_CSS_RULES
+                || self.total_parsed_decls >= MAX_CSS_TOTAL_DECLARATIONS
+            {
                 break;
             }
             while i < bytes.len()
@@ -317,11 +370,11 @@ impl CssStylesheet {
                     "media" => {
                         let query_list = after_at[kw_end..].trim();
                         if is_supported_media_query_list(query_list) {
-                            self.add_css_with_depth(inner_css, depth + 1);
+                            self.add_cleaned_css_with_depth(inner_css, depth + 1);
                         }
                     }
                     "supports" => {
-                        self.add_css_with_depth(inner_css, depth + 1);
+                        self.add_cleaned_css_with_depth(inner_css, depth + 1);
                     }
                     _ => {
                         // @font-face, @page, @keyframes, @-webkit-keyframes, etc.
@@ -346,11 +399,18 @@ impl CssStylesheet {
             if sel_part.is_empty() {
                 continue;
             }
+            let remaining = MAX_CSS_TOTAL_DECLARATIONS.saturating_sub(self.total_parsed_decls);
+            if remaining == 0 {
+                break;
+            }
             let body = &cleaned[body_start..body_end];
-            let decls = parse_declarations(body);
-            if decls.is_empty() {
+            let parsed = parse_declarations_limited(body, MAX_DECLARATIONS_PER_RULE.min(remaining));
+            if parsed.is_empty() {
                 continue;
             }
+            let decls: Arc<[(Cow<'static, str>, String)]> = Arc::from(parsed);
+            self.total_parsed_decls += decls.len();
+
             for raw_sel in sel_part.split(',') {
                 if self.rules.len() >= MAX_CSS_RULES {
                     break;
@@ -368,14 +428,86 @@ impl CssStylesheet {
                     if is_first_letter {
                         self.has_first_letter = true;
                     }
-                    let order = self.rules.len();
+                    let idx = self.rules.len();
+                    if !classes.is_empty() {
+                        self.by_class
+                            .entry(classes[0].clone())
+                            .or_default()
+                            .push(idx);
+                    } else if let Some(ref tag_name) = tag {
+                        self.by_tag.entry(tag_name.clone()).or_default().push(idx);
+                    } else {
+                        self.universal.push(idx);
+                    }
                     self.rules.push(CssRule {
                         tag,
                         classes,
-                        decls: decls.clone(),
-                        order,
+                        decls: Arc::clone(&decls),
+                        order: idx,
                         is_first_letter,
                     });
+                }
+            }
+        }
+    }
+
+    fn collect_matching_rules<'a>(
+        &'a self,
+        tag: &str,
+        class_slice: &[&str],
+        first_letter: bool,
+        tier: u8,
+        out: &mut Vec<((usize, usize), u8, usize, &'a CssRule)>,
+    ) {
+        if self.rules.is_empty() || (first_letter && !self.has_first_letter) {
+            return;
+        }
+        let mut check_bucket = |indices: &[usize]| {
+            for &idx in indices {
+                let r = &self.rules[idx];
+                if r.is_first_letter == first_letter
+                    && r.tag.as_deref().is_none_or(|t| t.eq_ignore_ascii_case(tag))
+                    && (r.classes.is_empty()
+                        || (!class_slice.is_empty()
+                            && r.classes.iter().all(|c| {
+                                class_slice.iter().any(|cls| cls.eq_ignore_ascii_case(c))
+                            })))
+                {
+                    out.push((r.specificity(), tier, r.order, r));
+                }
+            }
+        };
+
+        if !self.universal.is_empty() {
+            check_bucket(&self.universal);
+        }
+        let tag_lc = to_ascii_lowercase_cow(tag);
+        if let Some(bucket) = self.by_tag.get(tag_lc.as_ref()) {
+            check_bucket(bucket);
+        }
+        if !class_slice.is_empty() && !self.by_class.is_empty() {
+            if class_slice.len() <= 16 {
+                for (pos, &cls) in class_slice.iter().enumerate() {
+                    if class_slice[..pos]
+                        .iter()
+                        .any(|prev| prev.eq_ignore_ascii_case(cls))
+                    {
+                        continue;
+                    }
+                    let cls_lc = to_ascii_lowercase_cow(cls);
+                    if let Some(bucket) = self.by_class.get(cls_lc.as_ref()) {
+                        check_bucket(bucket);
+                    }
+                }
+            } else {
+                let mut seen: HashSet<Cow<'_, str>> = HashSet::with_capacity(class_slice.len());
+                for &cls in class_slice {
+                    let cls_lc = to_ascii_lowercase_cow(cls);
+                    if seen.insert(cls_lc.clone())
+                        && let Some(bucket) = self.by_class.get(cls_lc.as_ref())
+                    {
+                        check_bucket(bucket);
+                    }
                 }
             }
         }
@@ -387,47 +519,7 @@ impl CssStylesheet {
         class_attr: Option<&str>,
         first_letter: bool,
     ) -> String {
-        if self.rules.is_empty() || (first_letter && !self.has_first_letter) {
-            return String::new();
-        }
-        let classes = ElementClasses::from_attr(class_attr);
-        let class_slice = classes.as_slice();
-
-        let mut matched: Vec<&CssRule> = Vec::new();
-        for r in &self.rules {
-            if r.is_first_letter == first_letter
-                && r.tag.as_deref().is_none_or(|t| t.eq_ignore_ascii_case(tag))
-                && (r.classes.is_empty()
-                    || (!class_slice.is_empty()
-                        && r.classes
-                            .iter()
-                            .all(|c| class_slice.iter().any(|cls| cls.eq_ignore_ascii_case(c)))))
-            {
-                matched.push(r);
-            }
-        }
-        if matched.is_empty() {
-            return String::new();
-        }
-        if matched.len() > 1 {
-            matched.sort_by_key(|r| (r.specificity(), r.order));
-        }
-
-        let total_len: usize = matched
-            .iter()
-            .flat_map(|r| r.decls.iter())
-            .map(|(p, v)| p.len() + v.len() + 2)
-            .sum();
-        let mut out = String::with_capacity(total_len);
-        for r in matched {
-            for (p, v) in &r.decls {
-                out.push_str(p);
-                out.push(':');
-                out.push_str(v);
-                out.push(';');
-            }
-        }
-        out
+        CssCascade::new(self, None).resolve_layered(tag, class_attr, first_letter)
     }
 
     /// Returns the cascaded declarations for an element as a `prop: value; ...` string,
@@ -439,6 +531,75 @@ impl CssStylesheet {
     /// Returns the cascaded declarations for an element's `::first-letter` pseudo-element.
     pub fn first_letter_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
         self.resolve_declarations(tag, class_attr, true)
+    }
+}
+
+/// Zero-clone two-tier stylesheet cascade combining a base stylesheet (external CSS)
+/// with an optional overlay stylesheet (chapter-local `<style>` blocks).
+#[derive(Debug, Clone, Copy)]
+pub struct CssCascade<'a> {
+    base: &'a CssStylesheet,
+    overlay: Option<&'a CssStylesheet>,
+}
+
+impl<'a> CssCascade<'a> {
+    pub fn new(base: &'a CssStylesheet, overlay: Option<&'a CssStylesheet>) -> Self {
+        Self { base, overlay }
+    }
+
+    fn resolve_layered(&self, tag: &str, class_attr: Option<&str>, first_letter: bool) -> String {
+        let base_empty =
+            self.base.rules.is_empty() || (first_letter && !self.base.has_first_letter);
+        let overlay_empty = self
+            .overlay
+            .is_none_or(|ov| ov.rules.is_empty() || (first_letter && !ov.has_first_letter));
+        if base_empty && overlay_empty {
+            return String::new();
+        }
+
+        let classes = ElementClasses::from_attr(class_attr);
+        let class_slice = classes.as_slice();
+        let mut matched: Vec<((usize, usize), u8, usize, &CssRule)> = Vec::new();
+        if !base_empty {
+            self.base
+                .collect_matching_rules(tag, class_slice, first_letter, 0, &mut matched);
+        }
+        if !overlay_empty && let Some(ov) = self.overlay {
+            ov.collect_matching_rules(tag, class_slice, first_letter, 1, &mut matched);
+        }
+        if matched.is_empty() {
+            return String::new();
+        }
+        if matched.len() > 1 {
+            matched.sort_by_key(|(spec, tier, order, _)| (*spec, *tier, *order));
+            matched.dedup_by_key(|(_, tier, order, _)| (*tier, *order));
+        }
+
+        let total_len: usize = matched
+            .iter()
+            .flat_map(|(_, _, _, r)| r.decls.iter())
+            .map(|(p, v)| p.len() + v.len() + 2)
+            .sum();
+        let mut out = String::with_capacity(total_len);
+        for (_, _, _, r) in matched {
+            for (p, v) in r.decls.iter() {
+                out.push_str(p);
+                out.push(':');
+                out.push_str(v);
+                out.push(';');
+            }
+        }
+        out
+    }
+
+    /// Returns cascaded declarations for an element across `base` and optional `overlay`.
+    pub fn declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        self.resolve_layered(tag, class_attr, false)
+    }
+
+    /// Returns cascaded `::first-letter` declarations across `base` and optional `overlay`.
+    pub fn first_letter_declarations_for(&self, tag: &str, class_attr: Option<&str>) -> String {
+        self.resolve_layered(tag, class_attr, true)
     }
 }
 
@@ -668,7 +829,7 @@ fn strip_comments(css: &str) -> String {
     out
 }
 
-fn split_declarations_quote_aware(body: &str) -> Vec<&str> {
+pub(crate) fn split_declarations_quote_aware(body: &str) -> Vec<&str> {
     let mut decls = Vec::new();
     let bytes = body.as_bytes();
     let mut start = 0usize;
@@ -704,7 +865,19 @@ fn split_declarations_quote_aware(body: &str) -> Vec<&str> {
     decls
 }
 
-fn parse_declarations(body: &str) -> Vec<(Cow<'static, str>, String)> {
+pub(crate) fn strip_css_important(val: &str) -> &str {
+    let trimmed = val.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 9 && bytes[bytes.len() - 9..].eq_ignore_ascii_case(b"important") {
+        let before_imp = trimmed[..bytes.len() - 9].trim_end();
+        if let Some(before_bang) = before_imp.strip_suffix('!') {
+            return before_bang.trim();
+        }
+    }
+    trimmed
+}
+
+fn parse_declarations_limited(body: &str, max_decls: usize) -> Vec<(Cow<'static, str>, String)> {
     split_declarations_quote_aware(body)
         .into_iter()
         .filter_map(|d| {
@@ -714,15 +887,20 @@ fn parse_declarations(body: &str) -> Vec<(Cow<'static, str>, String)> {
                 return None;
             }
             let p_lc = p_trim.to_ascii_lowercase();
-            let v = v.trim().trim_end_matches("!important").trim().to_string();
+            let v = strip_css_important(v).to_string();
             if v.is_empty() {
                 None
             } else {
                 Some((intern_css_property(&p_lc), v))
             }
         })
-        .take(MAX_DECLARATIONS_PER_RULE)
+        .take(max_decls)
         .collect()
+}
+
+#[cfg(test)]
+fn parse_declarations(body: &str) -> Vec<(Cow<'static, str>, String)> {
+    parse_declarations_limited(body, MAX_DECLARATIONS_PER_RULE)
 }
 
 /// Accepts only compound simple selectors: `tag`, `*`, `.a`, `tag.a`, `.a.b`, `tag.a.b`.
@@ -774,35 +952,135 @@ fn find_ascii_tag_ignore_case(
     None
 }
 
-/// Extracts the text of all inline `<style>` blocks from an XHTML document.
+/// Extracts the text of all inline `<style>` blocks from an XHTML document,
+/// skipping HTML `<!-- ... -->` comments and avoiding heap allocation when absent.
 pub fn extract_inline_style_blocks(xhtml: &str) -> String {
     let bytes = xhtml.as_bytes();
     let mut out = String::new();
-    let mut pos = 0;
-    while let Some(start) = find_ascii_tag_ignore_case(bytes, pos, b"<style") {
-        let after_tag = start + b"<style".len();
-        let Some(gt_rel) = bytes[after_tag..].iter().position(|&b| b == b'>') else {
+    let mut pos = 0usize;
+    let open_len = b"<style".len();
+    while pos < bytes.len() {
+        let Some(rel) = bytes[pos..].iter().position(|&b| b == b'<') else {
             break;
         };
-        let gt_pos = after_tag + gt_rel;
-        let content_start = gt_pos + 1;
-        if bytes[gt_pos - 1] == b'/' {
-            pos = content_start;
+        let idx = pos + rel;
+        if bytes[idx..].starts_with(b"<!--") {
+            if let Some(end_rel) = xhtml[idx + 4..].find("-->") {
+                pos = idx + 4 + end_rel + 3;
+            } else {
+                break;
+            }
             continue;
         }
-        let Some(end_idx) = find_ascii_tag_ignore_case(bytes, content_start, b"</style") else {
-            break;
-        };
-        out.push_str(&xhtml[content_start..end_idx]);
-        out.push('\n');
-        let close_after = end_idx + b"</style".len();
-        pos = if let Some(close_gt_rel) = bytes[close_after..].iter().position(|&b| b == b'>') {
-            close_after + close_gt_rel + 1
-        } else {
-            close_after
-        };
+        if idx + open_len < bytes.len()
+            && bytes[idx..idx + open_len].eq_ignore_ascii_case(b"<style")
+        {
+            let next = bytes[idx + open_len];
+            if next == b'>' || next.is_ascii_whitespace() || next == b'/' {
+                let after_tag = idx + open_len;
+                let Some(gt_rel) = bytes[after_tag..].iter().position(|&b| b == b'>') else {
+                    break;
+                };
+                let gt_pos = after_tag + gt_rel;
+                let content_start = gt_pos + 1;
+                if bytes[gt_pos - 1] == b'/' {
+                    pos = content_start;
+                    continue;
+                }
+                let Some(end_idx) = find_ascii_tag_ignore_case(bytes, content_start, b"</style")
+                else {
+                    break;
+                };
+                out.push_str(&xhtml[content_start..end_idx]);
+                out.push('\n');
+                let close_after = end_idx + b"</style".len();
+                pos = if let Some(close_gt_rel) =
+                    bytes[close_after..].iter().position(|&b| b == b'>')
+                {
+                    close_after + close_gt_rel + 1
+                } else {
+                    close_after
+                };
+                continue;
+            }
+        }
+        pos = idx + 1;
     }
     out
+}
+
+/// Extracts `href` targets of `<link rel="stylesheet">` elements inside an XHTML document's `<head>`,
+/// skipping HTML comments and stopping immediately at `</head>` or `<body>`.
+pub fn extract_linked_stylesheets(xhtml: &str) -> Vec<String> {
+    let mut reader = quick_xml::Reader::from_str(xhtml);
+    reader.config_mut().check_end_names = false;
+    let mut buf = Vec::new();
+    let mut hrefs = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e)) => {
+                let name = e.local_name();
+                if name.as_ref().eq_ignore_ascii_case(b"body") {
+                    break;
+                }
+                if name.as_ref().eq_ignore_ascii_case(b"link")
+                    && let Some(href) = extract_stylesheet_link_href(e)
+                {
+                    hrefs.push(href);
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                if e.local_name().as_ref().eq_ignore_ascii_case(b"link")
+                    && let Some(href) = extract_stylesheet_link_href(e)
+                {
+                    hrefs.push(href);
+                }
+            }
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                if e.local_name().as_ref().eq_ignore_ascii_case(b"head") {
+                    break;
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    hrefs
+}
+
+fn extract_stylesheet_link_href(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
+    let mut is_stylesheet = false;
+    let mut href: Option<String> = None;
+
+    for attr in e.attributes().flatten() {
+        let key = attr.key.as_ref();
+        if key.eq_ignore_ascii_case(b"rel") {
+            let val = attr
+                .unescape_value()
+                .map(Cow::into_owned)
+                .unwrap_or_else(|_| String::from_utf8_lossy(attr.value.as_ref()).into_owned());
+            if val
+                .split_whitespace()
+                .any(|tok| tok.eq_ignore_ascii_case("stylesheet"))
+            {
+                is_stylesheet = true;
+            }
+        } else if key.eq_ignore_ascii_case(b"href") {
+            let val = attr
+                .unescape_value()
+                .map(Cow::into_owned)
+                .unwrap_or_else(|_| String::from_utf8_lossy(attr.value.as_ref()).into_owned());
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                href = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    if is_stylesheet { href } else { None }
 }
 
 /// Converts a CSS `font-size` value into a ratio relative to the parent (1.0 = normal).
@@ -1175,6 +1453,155 @@ mod tests {
         assert_eq!(
             fl_sheet.first_letter_declarations_for("p", Some("DROP")),
             "font-size:3em;float:left;"
+        );
+    }
+
+    #[test]
+    fn test_p2_16_separate_rule_bomb_hits_total_declaration_budget() {
+        // 1,000 distinct rule blocks × 256 declarations = 256,000 > MAX_CSS_TOTAL_DECLARATIONS (200,000)
+        let decl_body: String = (0..MAX_DECLARATIONS_PER_RULE)
+            .map(|i| format!("margin-top: {}px", i))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let mut css = String::new();
+        for i in 0..1_000 {
+            css.push_str(&format!(".r{} {{ {} }}\n", i, decl_body));
+        }
+
+        let mut sheet = CssStylesheet::new();
+        sheet.add_css(&css);
+
+        assert_eq!(sheet.total_parsed_decls, MAX_CSS_TOTAL_DECLARATIONS);
+        assert!(sheet.rules.len() < 1_000);
+        // Rule 0 resolves quickly via secondary class bucket index
+        assert!(
+            sheet
+                .declarations_for("p", Some("r0"))
+                .contains("margin-top:0px")
+        );
+    }
+
+    #[test]
+    fn test_p2_16_layered_css_cascade_matches_cloned_cascade() {
+        let base_css = r#"
+            * { color: #222222; }
+            p { text-align: left; font-style: normal; }
+            .lead { font-style: italic; }
+            p.lead { text-align: justify; }
+            p.lead.special { font-weight: bold; }
+            p.drop::first-letter { font-size: 2.5em; float: left; }
+        "#;
+        let overlay_css = r#"
+            @media screen {
+                @supports (display: grid) {
+                    /* nested comment stripped once */
+                    p.lead { text-align: center ! IMPORTANT; }
+                    p.drop::first-letter { font-size: 3em ! important; }
+                }
+            }
+        "#;
+
+        let mut base = CssStylesheet::new();
+        base.add_css(base_css);
+
+        let mut overlay = CssStylesheet::new();
+        overlay.add_css(overlay_css);
+
+        let mut cloned = base.clone();
+        cloned.add_css(overlay_css);
+
+        let cascade = CssCascade::new(&base, Some(&overlay));
+
+        for (tag, cls) in [
+            ("p", None),
+            ("p", Some("lead")),
+            ("P", Some("LEAD lead special")),
+            ("div", Some("lead")),
+            ("span", None),
+        ] {
+            assert_eq!(
+                cascade.declarations_for(tag, cls),
+                cloned.declarations_for(tag, cls),
+                "Cascade mismatch for ({}, {:?})",
+                tag,
+                cls
+            );
+            assert_eq!(
+                cascade.first_letter_declarations_for(tag, cls),
+                cloned.first_letter_declarations_for(tag, cls),
+                "First-letter cascade mismatch for ({}, {:?})",
+                tag,
+                cls
+            );
+        }
+
+        let cache = ElementStyleCache::new();
+        let mut calls = 0usize;
+        let d1 = cache.get_or_resolve_declarations("p", Some("lead"), |t, c| {
+            calls += 1;
+            cascade.declarations_for(t, c)
+        });
+        let d2 = cache.get_or_resolve_declarations("p", Some("lead"), |t, c| {
+            calls += 1;
+            cascade.declarations_for(t, c)
+        });
+        assert_eq!(d1, d2);
+        assert_eq!(calls, 1);
+        cache.clear();
+        let _ = cache.get_or_resolve_declarations("p", Some("lead"), |t, c| {
+            calls += 1;
+            cascade.declarations_for(t, c)
+        });
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn test_p2_16_extract_inline_style_blocks_skips_html_comments_zero_alloc() {
+        let commented_only =
+            "<html><head><!-- <style>p{color:red;}</style> --></head><body><p>Hi</p></body></html>";
+        let empty = extract_inline_style_blocks(commented_only);
+        assert!(empty.is_empty());
+        assert_eq!(
+            empty.capacity(),
+            0,
+            "Commented-out <style> must return empty String with zero heap allocation"
+        );
+
+        let mixed = concat!(
+            "<html><head>",
+            "<!-- <style>p.dead{color:red;}</style> -->",
+            "<style>p.live{font-weight:bold;}</style>",
+            "<!-- unclosed comment <style>p.never{color:blue;}</style>",
+        );
+        assert_eq!(
+            extract_inline_style_blocks(mixed),
+            "p.live{font-weight:bold;}\n"
+        );
+    }
+
+    #[test]
+    fn test_p2_16_extract_linked_stylesheets_head_only_and_skips_comments() {
+        let xhtml = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8">
+  <!-- <link rel="stylesheet" href="../Styles/commented.css"/> -->
+  <link rel="icon" href="favicon.ico"/>
+  <link rel="alternate StyleSheet" href="../Styles/base%201.css?v=2"/>
+  <LINK REL="stylesheet" HREF="../Styles/a&amp;b.css">
+</head>
+<body>
+  <link rel="stylesheet" href="../Styles/in-body.css"/>
+  <p>Body</p>
+</body>
+</html>"#;
+        let links = extract_linked_stylesheets(xhtml);
+        assert_eq!(
+            links,
+            vec![
+                "../Styles/base%201.css?v=2".to_string(),
+                "../Styles/a&b.css".to_string()
+            ]
         );
     }
 }

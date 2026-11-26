@@ -50,27 +50,40 @@ pub fn encode_varuint(val: u64) -> Vec<u8> {
     buf[..len].to_vec()
 }
 
-/// Encodes a signed integer into Ion variable-length signed integer (VarInt).
-pub fn encode_varint(val: i64) -> Vec<u8> {
+/// Encodes a signed integer into Ion variable-length signed integer (VarInt)
+/// using a zero-allocation fixed stack array `([u8; 10], usize)`.
+#[inline]
+pub fn encode_varint_buf(val: i64) -> ([u8; 10], usize) {
     let is_neg = val < 0;
     let mut mag = val.unsigned_abs();
     if mag < 64 {
         let b = 0x80 | (if is_neg { 0x40 } else { 0x00 }) | ((mag as u8) & 0x3F);
-        return vec![b];
+        return ([b, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1);
     }
 
-    let mut chunks = Vec::new();
+    let mut tmp = [0u8; 10];
+    let mut count = 0usize;
     while mag >= 64 {
-        chunks.push((mag & 0x7F) as u8);
+        tmp[count] = (mag & 0x7F) as u8;
         mag >>= 7;
+        count += 1;
     }
     let high_byte = (if is_neg { 0x40 } else { 0x00 }) | ((mag as u8) & 0x3F);
-    chunks.push(high_byte);
-    chunks.reverse();
-    if let Some(last) = chunks.last_mut() {
-        *last |= 0x80;
+    tmp[count] = high_byte;
+    count += 1;
+
+    let mut out = [0u8; 10];
+    for i in 0..count {
+        out[i] = tmp[count - 1 - i];
     }
-    chunks
+    out[count - 1] |= 0x80;
+    (out, count)
+}
+
+/// Encodes a signed integer into Ion variable-length signed integer (VarInt).
+pub fn encode_varint(val: i64) -> Vec<u8> {
+    let (buf, len) = encode_varint_buf(val);
+    buf[..len].to_vec()
 }
 
 /// Wraps an entity payload inside a valid 21-byte ENTY header.
@@ -266,55 +279,73 @@ impl IonWriter {
             return;
         }
 
-        let mut payload = Vec::new();
+        let mut payload = [0u8; 19];
 
         // 1. Exponent as VarInt (signed)
-        let exp_bytes = encode_varint(exp as i64);
-        payload.extend_from_slice(&exp_bytes);
+        let (exp_bytes, exp_len) = encode_varint_buf(exp as i64);
+        payload[..exp_len].copy_from_slice(&exp_bytes[..exp_len]);
+        let mut payload_len = exp_len;
 
         // 2. Coefficient as signed Int (magnitude encoding)
-        if coef != 0 {
-            let is_neg_coef = coef < 0;
-            let mag = coef.unsigned_abs();
-            let byte_len = (64 - mag.leading_zeros()).div_ceil(8).max(1) as usize;
-            let full_bytes = mag.to_be_bytes();
-            let mag_bytes = &full_bytes[8 - byte_len..];
+        let is_neg_coef = coef < 0;
+        let mag = coef.unsigned_abs();
+        let byte_len = (64 - mag.leading_zeros()).div_ceil(8).max(1) as usize;
+        let full_bytes = mag.to_be_bytes();
+        let mag_bytes = &full_bytes[8 - byte_len..];
 
-            if (mag_bytes[0] & 0x80) != 0 {
-                payload.push(if is_neg_coef { 0x80 } else { 0x00 });
-                payload.extend_from_slice(mag_bytes);
+        if (mag_bytes[0] & 0x80) != 0 {
+            payload[payload_len] = if is_neg_coef { 0x80 } else { 0x00 };
+            payload_len += 1;
+            payload[payload_len..payload_len + byte_len].copy_from_slice(mag_bytes);
+            payload_len += byte_len;
+        } else {
+            payload[payload_len] = if is_neg_coef {
+                mag_bytes[0] | 0x80
             } else {
-                let first = if is_neg_coef {
-                    mag_bytes[0] | 0x80
-                } else {
-                    mag_bytes[0]
-                };
-                payload.push(first);
-                payload.extend_from_slice(&mag_bytes[1..]);
-            }
+                mag_bytes[0]
+            };
+            payload_len += 1;
+            let rest_len = byte_len - 1;
+            payload[payload_len..payload_len + rest_len].copy_from_slice(&mag_bytes[1..]);
+            payload_len += rest_len;
         }
 
-        self.write_typed_bytes(0x50, &payload);
+        self.write_typed_bytes(0x50, &payload[..payload_len]);
     }
 
     /// Serializes an annotated value (Type descriptor 0xEE: length + ann_length + annotations + value)
     pub fn write_annotated_value(&mut self, annotations: &[u32], val: &IonValue) {
-        let mut ann_bytes = Vec::new();
+        let mut ann_stack = [0u8; 32];
+        let mut ann_stack_len = 0usize;
+        let mut ann_heap: Option<Vec<u8>> = None;
+
         for &ann in annotations {
-            ann_bytes.extend_from_slice(&encode_varuint(ann as u64));
+            let (sid_bytes, sid_len) = encode_varuint_buf(ann as u64);
+            if let Some(ref mut heap) = ann_heap {
+                heap.extend_from_slice(&sid_bytes[..sid_len]);
+            } else if ann_stack_len + sid_len <= ann_stack.len() {
+                ann_stack[ann_stack_len..ann_stack_len + sid_len]
+                    .copy_from_slice(&sid_bytes[..sid_len]);
+                ann_stack_len += sid_len;
+            } else {
+                let mut heap = Vec::with_capacity(ann_stack_len + sid_len + 16);
+                heap.extend_from_slice(&ann_stack[..ann_stack_len]);
+                heap.extend_from_slice(&sid_bytes[..sid_len]);
+                ann_heap = Some(heap);
+            }
         }
-        let ann_len = encode_varuint(ann_bytes.len() as u64);
 
-        let mut val_writer = IonWriter::new();
-        val_writer.write_value(val);
-        let val_bytes = val_writer.into_bytes();
+        let ann_slice: &[u8] = match ann_heap {
+            Some(ref heap) => heap.as_slice(),
+            None => &ann_stack[..ann_stack_len],
+        };
+        let (ann_len_bytes, ann_len_count) = encode_varuint_buf(ann_slice.len() as u64);
 
-        let mut payload = Vec::with_capacity(ann_len.len() + ann_bytes.len() + val_bytes.len());
-        payload.extend_from_slice(&ann_len);
-        payload.extend_from_slice(&ann_bytes);
-        payload.extend_from_slice(&val_bytes);
-
-        self.write_typed_bytes(0xE0, &payload);
+        self.write_container_in_place(0xE0, |w| {
+            w.buf.extend_from_slice(&ann_len_bytes[..ann_len_count]);
+            w.buf.extend_from_slice(ann_slice);
+            w.write_value(val);
+        });
     }
 
     fn write_float(&mut self, val: f64) {
@@ -357,24 +388,46 @@ impl IonWriter {
         self.write_typed_bytes(0x70, &bytes[..len]);
     }
 
-    fn write_list(&mut self, items: &[IonValue]) {
-        let mut inner = IonWriter::new();
-        for item in items {
-            inner.write_value(item);
+    fn write_container_in_place<F>(&mut self, type_nibble: u8, write_body: F)
+    where
+        F: FnOnce(&mut Self),
+    {
+        let header_start = self.buf.len();
+        self.buf.push(0);
+        let payload_start = header_start + 1;
+        write_body(self);
+        let payload_end = self.buf.len();
+        let payload_len = payload_end - payload_start;
+        if payload_len < 14 {
+            self.buf[header_start] = type_nibble | (payload_len as u8);
+        } else {
+            let (len_bytes, len_count) = encode_varuint_buf(payload_len as u64);
+            self.buf[header_start] = type_nibble | 0x0E;
+            self.buf.resize(payload_end + len_count, 0);
+            self.buf
+                .copy_within(payload_start..payload_end, payload_start + len_count);
+            self.buf[payload_start..payload_start + len_count]
+                .copy_from_slice(&len_bytes[..len_count]);
         }
-        self.write_typed_bytes(0xB0, inner.to_bytes());
+    }
+
+    fn write_list(&mut self, items: &[IonValue]) {
+        self.write_container_in_place(0xB0, |w| {
+            for item in items {
+                w.write_value(item);
+            }
+        });
     }
 
     fn write_struct(&mut self, fields: &[(u32, IonValue)]) {
-        let mut inner = IonWriter::with_capacity(fields.len() * 24);
-        for (sid, val) in fields {
-            // Field SID as VarUInt
-            let (sid_bytes, sid_len) = encode_varuint_buf(*sid as u64);
-            inner.buf.extend_from_slice(&sid_bytes[..sid_len]);
-            // Field Value serialized directly into inner buffer without per-field heap allocations
-            inner.write_value(val);
-        }
-        self.write_typed_bytes(0xD0, inner.to_bytes());
+        self.write_container_in_place(0xD0, |w| {
+            for (sid, val) in fields {
+                // Field SID as VarUInt
+                let (sid_bytes, sid_len) = encode_varuint_buf(*sid as u64);
+                w.buf.extend_from_slice(&sid_bytes[..sid_len]);
+                w.write_value(val);
+            }
+        });
     }
 
     fn write_typed_bytes(&mut self, type_nibble: u8, payload: &[u8]) {
@@ -1531,5 +1584,72 @@ mod tests {
             IonReader::new(&mantissa_10b).decode_value(),
             Err(IonError::MalformedIon(_))
         ));
+    }
+
+    #[test]
+    fn test_ion_in_place_containers_boundary_lengths_and_annotations_roundtrip() {
+        // Test empty, 13-byte (inline length), 14-byte (VarUInt length), nested, and >32-byte annotations
+        let list_0 = IonValue::List(vec![]);
+        let list_13 = IonValue::List(vec![IonValue::Int(0); 13]); // 13 * 1 byte (0x20) = 13 -> inline 0xBD
+        let list_14 = IonValue::List(vec![IonValue::Int(0); 14]); // 14 * 1 byte (0x20) = 14 -> 0xBE 0x8E
+        let many_annotations: Vec<u32> = (1000..1020).collect(); // 20 * 2 bytes = 40 bytes > 32-byte stack buf
+
+        let complex = IonValue::Annotated(
+            many_annotations.clone(),
+            Box::new(IonValue::Struct(vec![
+                (10, list_0.clone()),
+                (11, list_13.clone()),
+                (12, list_14.clone()),
+                (
+                    13,
+                    IonValue::Annotated(
+                        vec![393],
+                        Box::new(IonValue::Struct(vec![
+                            (155, IonValue::Int(42)),
+                            (307, IonValue::Decimal("1.25".to_string())),
+                            (308, IonValue::Decimal("-9223372036854775808".to_string())),
+                        ])),
+                    ),
+                ),
+            ])),
+        );
+
+        let mut w = IonWriter::new();
+        w.write_bvm();
+        w.write_value(&list_13);
+        let list_13_bytes = &w.to_bytes()[4..];
+        assert_eq!(list_13_bytes[0], 0xBD);
+        assert_eq!(list_13_bytes.len(), 14);
+
+        let mut w14 = IonWriter::new();
+        w14.write_value(&list_14);
+        assert_eq!(w14.to_bytes()[0], 0xBE);
+        assert_eq!(w14.to_bytes()[1], 0x8E);
+        assert_eq!(w14.to_bytes().len(), 16);
+
+        let mut wc = IonWriter::new();
+        wc.write_bvm();
+        wc.write_value(&complex);
+        let decoded = IonReader::new(wc.to_bytes()).decode_all().unwrap();
+        assert_eq!(decoded.len(), 1);
+        let IonValue::Annotated(dec_anns, dec_inner) = &decoded[0] else {
+            panic!("Expected annotated struct");
+        };
+        assert_eq!(dec_anns, &many_annotations);
+        let IonValue::Struct(fields) = dec_inner.as_ref() else {
+            panic!("Expected struct");
+        };
+        assert_eq!(fields[0], (10, list_0));
+        assert_eq!(fields[1], (11, list_13));
+        assert_eq!(fields[2], (12, list_14));
+
+        // Verify encode_varint_buf matches i64 boundaries without overflow
+        for v in [0i64, 1, -1, 63, -63, 64, -64, i64::MAX, i64::MIN] {
+            let encoded = encode_varint(v);
+            let mut off = 0usize;
+            let decoded_v = decode_varint_slice(&encoded, &mut off).unwrap();
+            assert_eq!(decoded_v, v);
+            assert_eq!(off, encoded.len());
+        }
     }
 }

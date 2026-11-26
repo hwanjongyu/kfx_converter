@@ -459,7 +459,14 @@ impl EpubReader {
                     )));
                 }
 
-                if compressed > 0 && size > 1024 * 1024 {
+                if size > archive::MAX_ZERO_COMPRESSED_ENTRY_BYTES {
+                    if compressed == 0 {
+                        return Err(EpubError::Security(format!(
+                            "Member '{}' declares {} bytes with zero compressed size",
+                            entry.name(),
+                            size
+                        )));
+                    }
                     let ratio = (size as f64) / (compressed as f64);
                     if ratio > MAX_COMPRESSION_RATIO {
                         return Err(EpubError::Security(format!(
@@ -502,20 +509,33 @@ impl EpubReader {
         let mut manifest_items: Vec<&opf::ManifestItem> = manifest.values().collect();
         manifest_items.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.href.cmp(&b.href)));
 
-        // 3b. Build the book-level stylesheet from all manifest CSS files in deterministic order
-        let mut book_css = CssStylesheet::new();
+        // 3b. Load manifest CSS files once in deterministic order and compile the fallback stylesheet
+        let mut css_raw_by_path: HashMap<String, String> = HashMap::new();
+        let mut css_lc_to_canonical: HashMap<String, String> = HashMap::new();
+        let mut fallback_book_css = CssStylesheet::new();
         for item in &manifest_items {
             if item.media_type == "text/css" || item.href.to_ascii_lowercase().ends_with(".css") {
                 let full_path = Self::resolve_zip_path(&opf_dir, &item.href);
                 if let Ok(mut entry) = archive::open_zip_entry(archive, &full_path) {
                     match archive::read_entry_string(&mut entry, MAX_METADATA_BYTES, &mut budget) {
-                        Ok(s) => book_css.add_css(&s),
+                        Ok(s) => {
+                            fallback_book_css.add_css(&s);
+                            css_lc_to_canonical
+                                .entry(full_path.to_lowercase())
+                                .or_insert_with(|| full_path.clone());
+                            css_raw_by_path.insert(full_path, s);
+                        }
                         Err(e @ EpubError::Security(_)) => return Err(e),
                         Err(_) => {}
                     }
                 }
             }
         }
+        let fallback_cache = crate::css::ElementStyleCache::new();
+        let mut linked_css_cache: HashMap<
+            Vec<String>,
+            (CssStylesheet, crate::css::ElementStyleCache),
+        > = HashMap::new();
 
         // 4. Extract resources (images, fonts) and build href -> item_id lookup map
         let mut resources = HashMap::new();
@@ -648,12 +668,58 @@ impl EpubReader {
                     href_to_section: &href_to_section,
                     href_lc_to_section: Some(&href_lc_to_section),
                 };
-                let (blocks, sec_footnotes) = Self::parse_xhtml_with_css_and_context(
-                    &xhtml,
-                    &href_to_id,
-                    &book_css,
-                    Some(&link_ctx),
-                );
+                let linked_hrefs = crate::css::extract_linked_stylesheets(&xhtml);
+                let mut resolved_css_paths: Vec<String> = Vec::new();
+                for raw_href in linked_hrefs {
+                    let cleaned_href = raw_href
+                        .split(['?', '#'])
+                        .next()
+                        .unwrap_or(&raw_href)
+                        .trim();
+                    if cleaned_href.is_empty() {
+                        continue;
+                    }
+                    let decoded = Self::decode_percent(cleaned_href);
+                    let resolved = Self::resolve_zip_path(&chapter_dir, &decoded);
+                    let canonical = if css_raw_by_path.contains_key(&resolved) {
+                        Some(resolved)
+                    } else {
+                        css_lc_to_canonical.get(&resolved.to_lowercase()).cloned()
+                    };
+                    if let Some(canon_path) = canonical
+                        && !resolved_css_paths.iter().any(|p| p == &canon_path)
+                    {
+                        resolved_css_paths.push(canon_path);
+                    }
+                }
+                let (blocks, sec_footnotes) = if !resolved_css_paths.is_empty() {
+                    let (chapter_sheet, chapter_cache) = linked_css_cache
+                        .entry(resolved_css_paths.clone())
+                        .or_insert_with(|| {
+                            let mut sheet = CssStylesheet::new();
+                            for css_path in &resolved_css_paths {
+                                if let Some(raw_css) = css_raw_by_path.get(css_path) {
+                                    sheet.add_css(raw_css);
+                                }
+                            }
+                            (sheet, crate::css::ElementStyleCache::new())
+                        });
+                    xhtml::parse_xhtml_with_css_context_and_cache(
+                        &xhtml,
+                        &href_to_id,
+                        chapter_sheet,
+                        Some(&link_ctx),
+                        Some(chapter_cache),
+                    )
+                } else {
+                    xhtml::parse_xhtml_with_css_context_and_cache(
+                        &xhtml,
+                        &href_to_id,
+                        &fallback_book_css,
+                        Some(&link_ctx),
+                        Some(&fallback_cache),
+                    )
+                };
                 let mut sorted_footnotes: Vec<(String, String)> =
                     sec_footnotes.into_iter().collect();
                 sorted_footnotes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2555,10 +2621,12 @@ mod tests {
     <p class="has-dropcap">「人間」失格の物語。</p>
     <p class="has-dropcap">“Élégance” et style.</p>
     <p class="has-dropcap">   “It was the best of times.</p>
+    <p class="has-dropcap">
+  Once upon a time</p>
 </body>
 </html>"#;
         let blocks = EpubReader::parse_xhtml_blocks_with_manifest(xhtml, &manifest);
-        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks.len(), 4);
         if let Block::Paragraph { spans, .. } = &blocks[0] {
             assert_eq!(spans[0].text, "「人");
             assert!(spans[0].style.as_deref().unwrap().contains("dropcap_2"));
@@ -2574,11 +2642,18 @@ mod tests {
             panic!("Expected paragraph 1");
         }
         if let Block::Paragraph { spans, .. } = &blocks[2] {
-            assert_eq!(spans[0].text, "   “I");
+            assert_eq!(spans[0].text, "“I");
             assert!(spans[0].style.as_deref().unwrap().contains("dropcap_2"));
             assert_eq!(spans[1].text, "t was the best of times.");
         } else {
             panic!("Expected paragraph 2");
+        }
+        if let Block::Paragraph { spans, .. } = &blocks[3] {
+            assert_eq!(spans[0].text, "O");
+            assert!(spans[0].style.as_deref().unwrap().contains("dropcap"));
+            assert_eq!(spans[1].text, "nce upon a time");
+        } else {
+            panic!("Expected paragraph 3");
         }
     }
 
@@ -2957,5 +3032,163 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_p2_16_prescan_rejects_zero_compressed_size_entry_over_1mib() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        // Build a valid deflated ZIP containing a > 1 MiB entry, then patch its Central Directory
+        // compressed_size field to 0 to simulate a spoofed header attempting to bypass ratio checks.
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("OEBPS/Text/big.xhtml", opts).unwrap();
+            let payload = vec![b'A'; (archive::MAX_ZERO_COMPRESSED_ENTRY_BYTES as usize) + 4096];
+            zip.write_all(&payload).unwrap();
+            zip.finish().unwrap();
+        }
+        let mut raw = buf.into_inner();
+        let cd_pos = raw
+            .windows(4)
+            .position(|w| w == b"PK\x01\x02")
+            .expect("Central Directory signature must exist");
+        // Central Directory header: compressed_size is 4-byte little-endian at offset +20..+24
+        raw[cd_pos + 20..cd_pos + 24].copy_from_slice(&0u32.to_le_bytes());
+
+        let mut archive = ZipArchive::new(Cursor::new(raw)).unwrap();
+        let err = EpubReader::read_from_archive_with_limit(
+            &mut archive,
+            MAX_EPUB_UNCOMPRESSED_TOTAL,
+            false,
+        )
+        .expect_err("Pre-scan must reject > 1 MiB member declaring compressed_size == 0");
+        match err {
+            EpubError::Security(msg) => {
+                assert!(
+                    msg.contains("zero compressed size"),
+                    "Unexpected security message: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected EpubError::Security, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_p2_16_per_chapter_linked_stylesheet_scoping_and_manifest_fallback() {
+        use std::io::Cursor;
+        use zip::write::{SimpleFileOptions, ZipWriter};
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+
+            zip.start_file("META-INF/container.xml", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+            )
+            .unwrap();
+
+            zip.start_file("OEBPS/content.opf", opts).unwrap();
+            zip.write_all(
+                br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Scoped CSS Test</dc:title>
+  </metadata>
+  <manifest>
+    <item id="css_body" href="Styles/body.css" media-type="text/css"/>
+    <item id="css_cover" href="Styles/cover.css" media-type="text/css"/>
+    <item id="ch1" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="Text/chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch3" href="Text/unlinked.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+    <itemref idref="ch3"/>
+  </spine>
+</package>"#,
+            )
+            .unwrap();
+
+            zip.start_file("OEBPS/Styles/cover.css", opts).unwrap();
+            zip.write_all(b"p.box { text-align: center; }").unwrap();
+
+            zip.start_file("OEBPS/Styles/body.css", opts).unwrap();
+            zip.write_all(b"p.box { text-align: right; font-style: italic; }")
+                .unwrap();
+
+            // Chapter 1 links ONLY cover.css -> centered, NOT italic
+            zip.start_file("OEBPS/Text/cover.xhtml", opts).unwrap();
+            zip.write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml">
+<head><link rel="stylesheet" href="../Styles/cover.css"/></head>
+<body><p class="box">Cover text</p></body></html>"#,
+            )
+            .unwrap();
+
+            // Chapter 2 links ONLY body.css -> right-aligned AND italic
+            zip.start_file("OEBPS/Text/chapter1.xhtml", opts).unwrap();
+            zip.write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml">
+<head><link rel="stylesheet" href="../Styles/body.css"/></head>
+<body><p class="box">Body text</p></body></html>"#,
+            )
+            .unwrap();
+
+            // Chapter 3 has NO <link> -> falls back to manifest-sorted fallback_book_css
+            // (css_body then css_cover => center + italic)
+            zip.start_file("OEBPS/Text/unlinked.xhtml", opts).unwrap();
+            zip.write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body><p class="box">Unlinked text</p></body></html>"#,
+            )
+            .unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), buf.into_inner()).unwrap();
+        let book = EpubReader::read_from_file(tmp.path()).expect("read_from_file must succeed");
+        assert_eq!(book.sections.len(), 3);
+
+        // Section 0 (cover.xhtml): cover.css only => center, not italic
+        let s0 = book.sections[0].blocks[0].resolved_style();
+        assert_eq!(s0.alignment, crate::ir::TextAlignment::Center);
+        assert!(
+            !s0.custom_classes.iter().any(|c| c == "italic"),
+            "cover.xhtml must not receive body.css italic: {:?}",
+            s0
+        );
+
+        // Section 1 (chapter1.xhtml): body.css only => right + italic
+        let s1 = book.sections[1].blocks[0].resolved_style();
+        assert_eq!(s1.alignment, crate::ir::TextAlignment::Right);
+        assert!(
+            s1.custom_classes.iter().any(|c| c == "italic"),
+            "chapter1.xhtml must receive body.css italic: {:?}",
+            s1
+        );
+
+        // Section 2 (unlinked.xhtml): fallback manifest-sorted (css_body -> css_cover) => center + italic
+        let s2 = book.sections[2].blocks[0].resolved_style();
+        assert_eq!(s2.alignment, crate::ir::TextAlignment::Center);
+        assert!(
+            s2.custom_classes.iter().any(|c| c == "italic"),
+            "unlinked.xhtml fallback must retain manifest CSS: {:?}",
+            s2
+        );
     }
 }

@@ -207,8 +207,7 @@ impl KindleStudio {
                     })
                     .child("⚡ Dual-Pane")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = StudioTab::DualPane;
-                        this.refresh_device_internal(false, cx);
+                        this.switch_tab(StudioTab::DualPane, cx);
                     })),
             )
             .child(
@@ -232,8 +231,7 @@ impl KindleStudio {
                     })
                     .child("📥 Converter Queue")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = StudioTab::Convert;
-                        this.refresh_device_internal(false, cx);
+                        this.switch_tab(StudioTab::Convert, cx);
                     })),
             )
             .child(
@@ -257,8 +255,7 @@ impl KindleStudio {
                     })
                     .child("📂 Local Folder")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = StudioTab::LocalFolder;
-                        this.refresh_device_internal(false, cx);
+                        this.switch_tab(StudioTab::LocalFolder, cx);
                     })),
             )
             .child(
@@ -282,8 +279,7 @@ impl KindleStudio {
                     })
                     .child("📚 Kindle Explorer")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = StudioTab::Explorer;
-                        this.refresh_device_internal(false, cx);
+                        this.switch_tab(StudioTab::Explorer, cx);
                     })),
             )
     }

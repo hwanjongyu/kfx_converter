@@ -51,7 +51,8 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 | **EPUB File Boundary Preservation** | [spec-preserve-epub-file-boundaries.md](specs/spec-preserve-epub-file-boundaries.md) | [qa-preserve-epub-file-boundaries.md](qa/qa-preserve-epub-file-boundaries.md) | **PASS** |
 | **TOC & Page-List Section Link Filtering** | [spec-fix-toc-page-list-filtering.md](specs/spec-fix-toc-page-list-filtering.md) | [qa-fix-toc-page-list-filtering.md](qa/qa-fix-toc-page-list-filtering.md) | **PASS** |
 | **libYJSDK Navigation Crash Resolution** | [spec-fix-navigation-crash.md](specs/spec-fix-navigation-crash.md) | [qa-fix-navigation-crash.md](qa/qa-fix-navigation-crash.md) | **PASS** |
-| **EPUB-to-KFX Links, Anchors & Footnote Popups** | [spec-epub-kfx-links.md](specs/spec-epub-kfx-links.md) | [qa-epub-kfx-links.md](qa/qa-epub-kfx-links.md) | **PASS** |
+| **EPUB-to-KFX Links, Anchors & Footnote Popups (Stages 1 & 2)** | [spec-epub-kfx-links.md](specs/spec-epub-kfx-links.md) | [qa-epub-kfx-links.md](qa/qa-epub-kfx-links.md) | **PASS** |
+| **EPUB-to-KFX Links Stage 3 (Table Links, Image Links & Link Styles)** | [spec-epub-kfx-links-stage3.md](specs/spec-epub-kfx-links-stage3.md) | - | **Pending Approval** |
 
 ### 4. Sleep Screen Cover Art & Kindle Lockscreen Compliance
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
@@ -85,6 +86,9 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 ### 8. Prioritized Defect Remediation & Audits
 | Category | Spec | QA Log | Core Issues Resolved |
 | :--- | :--- | :--- | :--- |
+| **Nov 24 P0 Critical Audit Remediation** | [spec-fix-p0-nov24-audit.md](specs/spec-fix-p0-nov24-audit.md) | [qa-fix-p0-nov24-audit.md](qa/qa-fix-p0-nov24-audit.md) | Critical security and correctness findings `#1`–`#2` from the Nov 24 multi-model audit (`98fcdcd`). |
+| **Nov 24 P1 Major Audit Remediation** | [spec-fix-p1-nov24-audit.md](specs/spec-fix-p1-nov24-audit.md) | [qa-fix-p1-nov24-audit.md](qa/qa-fix-p1-nov24-audit.md) | Major security, UTF-16 PID parity, XML/CSS/Ion bounds, and sync findings `#3`–`#14` (`d97a01d`). |
+| **Nov 24 P2 Moderate Audit Remediation** | [spec-fix-p2-nov24-audit.md](specs/spec-fix-p2-nov24-audit.md) | [qa-fix-p2-nov24-audit.md](qa/qa-fix-p2-nov24-audit.md) | XHTML/CSS/ZIP hardening, Word Wise/SDR/sync efficiency, GPUI races, Ion/SQLite allocation cuts, CI SHA-pinning, and doc alignment (`#15`–`#22`). |
 | **Multi-Model Engineering Audit Remediation** | [spec-fix-multi-model-audit.md](specs/spec-fix-multi-model-audit.md) | [qa-fix-multi-model-audit.md](qa/qa-fix-multi-model-audit.md) | Address all consensus findings from the tri-model audit. |
 | **P1 High-Severity Review Audit Remediation** | [spec-fix-p1-review-audit.md](specs/spec-fix-p1-review-audit.md) | [qa-fix-p1-review-audit.md](qa/qa-fix-p1-review-audit.md) | Log rotation, ASIN/content-id `.sdr` preservation, Win32 eject, Word Wise pacing, HTML5 void tags, Ion/container bounds, CLI `-c`/`-w`. |
 | **P2 Medium/Low Review Audit Remediation** | [spec-fix-p2-review-audit.md](specs/spec-fix-p2-review-audit.md) | [qa-fix-p2-review-audit.md](qa/qa-fix-p2-review-audit.md) | Bare-path atomic staging, deterministic manifest/cover ordering, chunk bounds, sync locks, iterative `Clone`/`Drop`, CI/release/docs alignment. |
@@ -114,22 +118,41 @@ docs/
 │   ├── spec-advanced-typesetting.md
 │   ├── spec-amazon-ground-truth-word-wise-dictionary.md
 │   ├── spec-batch-folder-epub-ui.md
+│   ├── spec-batch-progress-ux.md
+│   ├── spec-codebase-modularization-and-ci.md
 │   ├── spec-dual-pane-ui.md
 │   ├── spec-epub-css-styling-fidelity.md
+│   ├── spec-epub-kfx-links-stage3.md
 │   ├── spec-epub-kfx-links.md
+│   ├── spec-epub-modularization.md
+│   ├── spec-epub-parser-modularization.md
 │   ├── spec-fix-cover-image-order.md
-│   ├── spec-fix-image-rendering.md
 │   ├── spec-fix-image-rendering-symbol.md
+│   ├── spec-fix-image-rendering.md
 │   ├── spec-fix-kindle-lockscreen-cover.md
 │   ├── spec-fix-multi-model-audit.md
 │   ├── spec-fix-navigation-crash.md
+│   ├── spec-fix-p0-audit-issues.md
+│   ├── spec-fix-p0-audit-remediation.md
 │   ├── spec-fix-p0-issues.md
+│   ├── spec-fix-p0-nov24-audit.md
+│   ├── spec-fix-p0-review-audit.md
+│   ├── spec-fix-p0.md
+│   ├── spec-fix-p1-audit-issues.md
+│   ├── spec-fix-p1-audit-remediation.md
 │   ├── spec-fix-p1-issues.md
+│   ├── spec-fix-p1-modularization-and-deadlock.md
+│   ├── spec-fix-p1-nov24-audit.md
 │   ├── spec-fix-p1-optimizations.md
 │   ├── spec-fix-p1-review-audit.md
+│   ├── spec-fix-p1.md
+│   ├── spec-fix-p2-audit-issues.md
+│   ├── spec-fix-p2-audit-remediation.md
 │   ├── spec-fix-p2-hardening.md
 │   ├── spec-fix-p2-issues.md
+│   ├── spec-fix-p2-nov24-audit.md
 │   ├── spec-fix-p2-review-audit.md
+│   ├── spec-fix-p3-audit-issues.md
 │   ├── spec-fix-p3-issues.md
 │   ├── spec-fix-sleep-cover-and-kfx-compliance.md
 │   ├── spec-fix-toc-page-list-filtering.md
@@ -141,6 +164,8 @@ docs/
 │   ├── spec-kfx-crash-and-perf-fix.md
 │   ├── spec-kfx-toc-and-formatting-fix.md
 │   ├── spec-kindle-paperwhite-sync-fix.md
+│   ├── spec-list-sorting-ux.md
+│   ├── spec-p3-css-interning.md
 │   ├── spec-permanent-guards-image-usb.md
 │   ├── spec-preflight-reference-validator.md
 │   ├── spec-preserve-epub-file-boundaries.md
@@ -155,34 +180,58 @@ docs/
     ├── qa-advanced-typesetting-phase4.md
     ├── qa-amazon-ground-truth-word-wise-dictionary.md
     ├── qa-batch-folder-epub-ui.md
+    ├── qa-batch-progress-ux.md
+    ├── qa-ci-pipeline-setup.md
     ├── qa-dual-pane-ui.md
     ├── qa-epub-css-styling-fidelity.md
     ├── qa-epub-kfx-links.md
+    ├── qa-epub-modularization.md
+    ├── qa-epub-xhtml-modularization.md
+    ├── qa-explorer-sorting-ux.md
     ├── qa-fix-cover-image-order.md
-    ├── qa-fix-image-rendering.md
     ├── qa-fix-image-rendering-symbol.md
+    ├── qa-fix-image-rendering.md
     ├── qa-fix-image-swap-order.md
     ├── qa-fix-kindle-lockscreen-cover.md
     ├── qa-fix-multi-model-audit.md
     ├── qa-fix-navigation-crash.md
+    ├── qa-fix-p0-audit-issues.md
+    ├── qa-fix-p0-audit-remediation.md
     ├── qa-fix-p0-issues.md
+    ├── qa-fix-p0-nov24-audit.md
+    ├── qa-fix-p0-review-audit.md
+    ├── qa-fix-p0.md
+    ├── qa-fix-p1-audit-issues.md
+    ├── qa-fix-p1-audit-remediation.md
     ├── qa-fix-p1-issues.md
+    ├── qa-fix-p1-modularization-and-deadlock.md
+    ├── qa-fix-p1-nov24-audit.md
     ├── qa-fix-p1-optimizations.md
     ├── qa-fix-p1-review-audit.md
+    ├── qa-fix-p1.md
+    ├── qa-fix-p2-audit-issues.md
+    ├── qa-fix-p2-audit-remediation.md
     ├── qa-fix-p2-hardening.md
     ├── qa-fix-p2-issues.md
+    ├── qa-fix-p2-nov24-audit.md
     ├── qa-fix-p2-review-audit.md
+    ├── qa-fix-p3-audit-issues.md
     ├── qa-fix-p3-issues.md
     ├── qa-fix-sleep-cover-and-kfx-compliance.md
     ├── qa-fix-toc-page-list-filtering.md
     ├── qa-fix-word-wise-deployment.md
     ├── qa-fix-word-wise-language-tag.md
+    ├── qa-fix-word-wise-reopen-bug.md
     ├── qa-fix-word-wise-visibility.md
     ├── qa-gui-ux-polish.md
     ├── qa-gui-virtualized-list-performance.md
+    ├── qa-headless-mtp-fallback.md
     ├── qa-kfx-crash-and-perf-fix.md
     ├── qa-kfx-toc-and-formatting-fix.md
     ├── qa-kindle-paperwhite-sync-fix.md
+    ├── qa-list-sorting-ux.md
+    ├── qa-p3-css-interning.md
+    ├── qa-packager-modularization.md
     ├── qa-permanent-guards-image-usb.md
     ├── qa-preflight-reference-validator.md
     ├── qa-preserve-epub-file-boundaries.md

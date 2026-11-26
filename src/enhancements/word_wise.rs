@@ -457,14 +457,10 @@ impl WordWiseBuilder {
 
     /// Serializes the Word Wise `.kll` SQLite database directly into an in-memory byte vector.
     pub fn to_bytes(&self) -> SqlResult<Vec<u8>> {
-        let tmp_file = tempfile::NamedTempFile::new()
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        {
-            let mut conn = Connection::open(tmp_file.path())?;
-            self.populate_connection(&mut conn)?;
-        }
-        std::fs::read(tmp_file.path())
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        let mut conn = Connection::open_in_memory()?;
+        self.populate_connection(&mut conn)?;
+        let data = conn.serialize(rusqlite::DatabaseName::Main)?;
+        Ok(data.to_vec())
     }
 
     /// Populates tables and metadata into a SQLite connection.
@@ -786,13 +782,13 @@ mod tests {
         let count = builder.generate_from_book(&ir);
         assert_eq!(count, 2);
         let gloss = builder.glosses.values().next().unwrap();
-        // Cover section: 1 (root) + 5 ("Cover") = 6 PIDs
-        // Chapter 1: 1 (root) = PID 7
+        // Cover section: 1 (root) + 1 (resolved $271 cover image) = 2 PIDs
+        // Chapter 1: 1 (root) = PID 3
         // "The " = 4 chars, so "abstruse" starts at offset 4 within block
-        // Expected start: 6 (cover) + 1 (root) + 4 ("The ") = 11
+        // Expected start: 2 (cover) + 1 (root) + 4 ("The ") = 7
         assert_eq!(
-            gloss.start, 11,
-            "Expected PID 11 with cover offset, got {}",
+            gloss.start, 7,
+            "Expected PID 7 with cover offset, got {}",
             gloss.start
         );
     }
@@ -1070,6 +1066,13 @@ mod tests {
                             width: None,
                             height: None,
                         },
+                        Block::Image {
+                            id: "img_resolved_long_alt".to_string(),
+                            resource_id: "resolved.jpg".to_string(), // resolved, 400-char alt -> still 1 PID
+                            alt: Some(format!("An abstruse diagram {}", "X".repeat(380))),
+                            width: None,
+                            height: None,
+                        },
                         Block::Paragraph {
                             id: "p1".to_string(),
                             spans: vec![TextSpan {
@@ -1109,9 +1112,10 @@ mod tests {
         );
         let gloss = builder.glosses.values().next().unwrap();
         assert_eq!(gloss.sense_id, 36391, "Expected gloss for 'elucidate'");
-        // Cover section: 1 (root) + 5 ("Cover") = 6
-        // Section 1: 1 (root) + 34 (unresolved alt) + 7 (unresolved "[Image]") + 1 (resolved alt None) + 3 ("To ") = 52
-        let expected_pid = 6 + 1 + crate::ir::str_utf16_len(alt_text) + 7 + 1 + 3;
+        // Cover section: 1 (root) + 1 (resolved cover img) = 2
+        // Section 1: 1 (root) + 34 (unresolved alt) + 7 (unresolved "[Image]") + 1 (resolved alt None)
+        //          + 1 (resolved 400-char alt) + 3 ("To ") = 49
+        let expected_pid = 2 + 1 + crate::ir::str_utf16_len(alt_text) + 7 + 1 + 1 + 3;
         assert_eq!(gloss.start, expected_pid);
 
         // Cross-check against KfxPackager's emitted $265 position_id_map total PID length
@@ -1151,8 +1155,8 @@ mod tests {
                 });
             sec1_pid_and_len = p.zip(l);
         }
-        // Section 1 starts at PID 6 and has length: 1 (root) + 34 + 7 + 1 + 13 ("To elucidate.") = 56
-        assert_eq!(sec1_pid_and_len, Some((6, 1 + 34 + 7 + 1 + 13)));
+        // Section 1 starts at PID 2 and has length: 1 (root) + 34 + 7 + 1 + 1 + 13 ("To elucidate.") = 57
+        assert_eq!(sec1_pid_and_len, Some((2, 1 + 34 + 7 + 1 + 1 + 13)));
     }
 
     #[test]
@@ -1257,27 +1261,27 @@ mod tests {
         let count = builder.generate_from_book(&ir);
         assert!(count >= 2);
 
-        // Cover: 1 + 5 = 6.
-        // sec1 root: +1 = 7.
-        // p_emoji: "📖 The " -> 📖(2) + " "(1) + "The "(4) = 7 UTF-16 units -> "abstruse" at PID 7 + 7 = 14!
+        // Cover: 1 (root) + 1 (resolved cover img) = 2.
+        // sec1 root: +1 = 3.
+        // p_emoji: "📖 The " -> 📖(2) + " "(1) + "The "(4) = 7 UTF-16 units -> "abstruse" at PID 3 + 7 = 10!
         assert!(
-            builder.glosses.contains_key(&14),
-            "Expected 'abstruse' at UTF-16 PID 14 (📖 = 2 UTF-16 units), got {:?}",
+            builder.glosses.contains_key(&10),
+            "Expected 'abstruse' at UTF-16 PID 10 (📖 = 2 UTF-16 units), got {:?}",
             builder.glosses
         );
 
-        // p_emoji UTF-16 len = 2 + 22 = 24. Next block starts at 7 + 24 = 31.
-        // List text seg 1 ("Item 𠮷"): 5 + 2 = 7 UTF-16 units -> ends at 38.
-        // List image seg ("An abstruse figure"): 18 UTF-16 units -> ends at 56 (NOT glossed!).
-        // List text seg 2 ("To elucidate."): starts at 56 -> "To " = 3 -> "elucidate" at PID 59!
+        // p_emoji UTF-16 len = 2 + 22 = 24. Next block starts at 3 + 24 = 27.
+        // List text seg 1 ("Item 𠮷"): 5 + 2 = 7 UTF-16 units -> ends at 34.
+        // List image seg (resolved fig.jpg, alt "An abstruse figure"): 1 PID -> 34..35 (NOT glossed!).
+        // List text seg 2 ("To elucidate."): starts at 35 -> "To " = 3 -> "elucidate" at PID 38!
         assert!(
-            builder.glosses.contains_key(&59),
-            "Expected 'elucidate' at PID 59 after list image, got {:?}",
+            builder.glosses.contains_key(&38),
+            "Expected 'elucidate' at PID 38 after list image, got {:?}",
             builder.glosses
         );
-        // Ensure no gloss was emitted inside the list image's alt text [38..56)
+        // Ensure no gloss was emitted on the list image PID 34
         assert!(
-            !builder.glosses.keys().any(|&k| (38..56).contains(&k)),
+            !builder.glosses.contains_key(&34),
             "List-nested image alt text must NOT be glossed: {:?}",
             builder.glosses
         );
@@ -1310,8 +1314,8 @@ mod tests {
                     _ => None,
                 });
         }
-        // Expected sec1 length: 1 (root) + 24 (p_emoji) + 7 ("Item 𠮷") + 18 (list img) + 13 ("To elucidate.") = 63
-        assert_eq!(sec1_len, Some(63));
+        // Expected sec1 length: 1 (root) + 24 (p_emoji) + 7 ("Item 𠮷") + 1 (resolved list img) + 13 ("To elucidate.") = 46
+        assert_eq!(sec1_len, Some(46));
     }
 
     #[test]
@@ -1388,5 +1392,70 @@ mod tests {
             assert!(builder.write_to_file(&dangling_link).is_err());
             assert!(!missing_target.exists());
         }
+    }
+
+    #[test]
+    fn test_word_wise_to_bytes_in_memory_sqlite_serialization() {
+        let mut builder = WordWiseBuilder::new("B0MEMTEST", "CR!MEMTEST", "en", "en-US", "42");
+        builder.add_gloss(10, Some(18), 1, 8435, false);
+        builder.add_gloss(50, Some(59), 2, 36391, true);
+
+        let bytes = builder
+            .to_bytes()
+            .expect("in-memory SQLite serialize must succeed");
+        assert!(
+            bytes.starts_with(b"SQLite format 3\0"),
+            "Serialized bytes must start with SQLite 3 magic header"
+        );
+
+        // Write bytes to a temp file solely to inspect with rusqlite::Connection::open
+        let temp = tempfile::tempdir().unwrap();
+        let verify_path = temp.path().join("verify.kll");
+        std::fs::write(&verify_path, &bytes).unwrap();
+
+        let conn =
+            Connection::open(&verify_path).expect("serialized bytes must be valid SQLite DB");
+        let acr: String = conn
+            .query_row("SELECT value FROM metadata WHERE key = 'acr'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(acr, "CR!MEMTEST");
+
+        let rev: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'bookRevision'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rev, "42");
+
+        let mut stmt = conn
+            .prepare("SELECT start, end, difficulty, sense_id, low_confidence FROM glosses ORDER BY start ASC")
+            .unwrap();
+        let rows: Vec<(i64, Option<i64>, i64, i64, bool)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (10, Some(18), 1, 8435, false),
+                (50, Some(59), 2, 36391, true)
+            ]
+        );
+
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_glosses_diff_start'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
     }
 }
