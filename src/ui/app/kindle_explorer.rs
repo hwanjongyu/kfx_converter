@@ -316,16 +316,19 @@ impl KindleStudio {
                                                 indices.len(),
                                                 cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
                                                     range
-                                                        .map(|r_idx| {
-                                                            let file_idx = indices[r_idx];
-                                                            let file = &this.files[file_idx];
-                                                            let is_confirming = this.confirm_delete_file.as_deref()
-                                                                == Some(file.full_path.as_path());
-                                                            Self::render_kindle_file_row(
+                                                        .filter_map(|r_idx| {
+                                                            let &file_idx = indices.get(r_idx)?;
+                                                            let file = this.files.get(file_idx)?;
+                                                            let is_confirming =
+                                                                this.confirm_delete_file.as_deref()
+                                                                    == Some(
+                                                                        file.full_path.as_path(),
+                                                                    );
+                                                            Some(Self::render_kindle_file_row(
                                                                 file,
                                                                 &view,
                                                                 is_confirming,
-                                                            )
+                                                            ))
                                                         })
                                                         .collect()
                                                 }),

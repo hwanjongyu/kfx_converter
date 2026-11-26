@@ -6,10 +6,11 @@ mod common;
 use byteorder::{LittleEndian, WriteBytesExt};
 use kfx_converter::ion::decode_varuint;
 use kfx_converter::{
-    ContainerError, IonError, IonReader, KfxContainer, KfxEntity, encode_varuint, wrap_enty_header,
+    ContainerError, IonError, IonReader, IonValue, IonWriter, KfxContainer, KfxEntity,
+    encode_varuint, wrap_enty_header,
 };
 use std::fs::File;
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Seek, SeekFrom, Write};
 
 // =========================================================================
 // 1. KFX Container Boundary & Tamper Defense Tests
@@ -289,6 +290,250 @@ fn test_container_write_to_with_symbols_and_format_caps() {
     assert!(written > 0);
     let bytes = cursor.into_inner();
     assert_eq!(&bytes[0..4], b"CONT");
+}
+
+#[test]
+fn test_container_read_chunk_enty_header_validated_before_payload_alloc() {
+    let temp = common::temp_dir();
+    let sparse_chunk_len = 400 * 1024 * 1024u64; // 400 MiB sparse chunk (< 500 MiB safety limit)
+    let header_len = 18u32 + 24u32;
+
+    let write_sparse_enty = |name: &str, enty_prefix: &[u8]| {
+        let path = temp.path().join(name);
+        let file = File::create(&path).unwrap();
+        file.set_len(header_len as u64 + sparse_chunk_len).unwrap();
+
+        let mut file = File::options().write(true).open(&path).unwrap();
+        file.write_all(b"CONT").unwrap();
+        file.write_u16::<LittleEndian>(2).unwrap();
+        file.write_u32::<LittleEndian>(header_len).unwrap();
+        file.write_u32::<LittleEndian>(header_len).unwrap();
+        file.write_u32::<LittleEndian>(0).unwrap();
+
+        // 1 chunk entry pointing to 400 MiB sparse payload
+        file.write_u32::<LittleEndian>(852).unwrap();
+        file.write_u32::<LittleEndian>(260).unwrap();
+        file.write_u64::<LittleEndian>(0).unwrap();
+        file.write_u64::<LittleEndian>(sparse_chunk_len).unwrap();
+
+        file.write_all(enty_prefix).unwrap();
+        path
+    };
+
+    // 1. $411 = 1 (DRM) rejected before allocating 400 MiB payload
+    let mut drm_ion = IonWriter::new();
+    drm_ion.write_bvm();
+    drm_ion.write_value(&IonValue::Struct(vec![
+        (410, IonValue::Int(0)),
+        (411, IonValue::Int(1)),
+    ]));
+    let drm_ion_bytes = drm_ion.into_bytes();
+    let mut drm_prefix = Vec::new();
+    drm_prefix.extend_from_slice(b"ENTY");
+    drm_prefix.write_u16::<LittleEndian>(1).unwrap();
+    drm_prefix
+        .write_u32::<LittleEndian>((10 + drm_ion_bytes.len()) as u32)
+        .unwrap();
+    drm_prefix.extend_from_slice(&drm_ion_bytes);
+
+    let drm_path = write_sparse_enty("sparse_drm.kfx", &drm_prefix);
+    let mut drm_container = KfxContainer::open(&drm_path).unwrap();
+    let drm_err = drm_container
+        .read_chunk(&drm_container.chunks[0].clone())
+        .unwrap_err();
+    assert!(
+        matches!(drm_err, ContainerError::DrmProtected),
+        "Expected DrmProtected for $411=1 ENTY chunk, got {:?}",
+        drm_err
+    );
+
+    // 2. $410 = 1 (unsupported compression) rejected before allocating 400 MiB payload
+    let mut comp_ion = IonWriter::new();
+    comp_ion.write_bvm();
+    comp_ion.write_value(&IonValue::Struct(vec![
+        (410, IonValue::Int(1)),
+        (411, IonValue::Int(0)),
+    ]));
+    let comp_ion_bytes = comp_ion.into_bytes();
+    let mut comp_prefix = Vec::new();
+    comp_prefix.extend_from_slice(b"ENTY");
+    comp_prefix.write_u16::<LittleEndian>(1).unwrap();
+    comp_prefix
+        .write_u32::<LittleEndian>((10 + comp_ion_bytes.len()) as u32)
+        .unwrap();
+    comp_prefix.extend_from_slice(&comp_ion_bytes);
+
+    let comp_path = write_sparse_enty("sparse_compressed.kfx", &comp_prefix);
+    let mut comp_container = KfxContainer::open(&comp_path).unwrap();
+    let comp_err = comp_container
+        .read_chunk(&comp_container.chunks[0].clone())
+        .unwrap_err();
+    match comp_err {
+        ContainerError::CorruptedHeader(msg) => {
+            assert!(
+                msg.contains("Unsupported ENTY compression type"),
+                "Unexpected compression error: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "Expected CorruptedHeader for $410=1 ENTY chunk, got {:?}",
+            other
+        ),
+    }
+
+    // 3. header_len = 500_000_000 > sparse_chunk_len rejected before any heap allocation
+    let mut huge_hdr_prefix = Vec::new();
+    huge_hdr_prefix.extend_from_slice(b"ENTY");
+    huge_hdr_prefix.write_u16::<LittleEndian>(1).unwrap();
+    huge_hdr_prefix
+        .write_u32::<LittleEndian>(500_000_000)
+        .unwrap();
+
+    let huge_hdr_path = write_sparse_enty("sparse_huge_hdr.kfx", &huge_hdr_prefix);
+    let mut huge_hdr_container = KfxContainer::open(&huge_hdr_path).unwrap();
+    let huge_hdr_err = huge_hdr_container
+        .read_chunk(&huge_hdr_container.chunks[0].clone())
+        .unwrap_err();
+    match huge_hdr_err {
+        ContainerError::CorruptedHeader(msg) => {
+            assert!(
+                msg.contains(
+                    "ENTY chunk header length (500000000) exceeds chunk buffer length (419430400)"
+                ),
+                "Unexpected header length mismatch error: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "Expected CorruptedHeader for oversized ENTY header_len, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_container_read_chunk_valid_enty_and_raw_edge_lengths() {
+    let temp = common::temp_dir();
+    let path = temp.path().join("edge_lengths.kfx");
+
+    let enty_payload = b"VALID_ENTY_UNWRAPPED_PAYLOAD";
+    let wrapped_enty = wrap_enty_header(enty_payload, 1);
+
+    let mut enty_min_empty = Vec::new();
+    enty_min_empty.extend_from_slice(b"ENTY");
+    enty_min_empty.write_u16::<LittleEndian>(1).unwrap();
+    enty_min_empty.write_u32::<LittleEndian>(10).unwrap(); // minimal 10-byte ENTY header, empty payload
+
+    let raw_0: &[u8] = b"";
+    let raw_5: &[u8] = b"12345";
+    let raw_10: &[u8] = b"0123456789";
+    let raw_32: &[u8] = b"0123456789abcdef0123456789ABCDEF";
+    let truncated_enty: &[u8] = b"ENTYX";
+
+    let raw_chunks: Vec<&[u8]> = vec![
+        &wrapped_enty,
+        &enty_min_empty,
+        raw_0,
+        raw_5,
+        raw_10,
+        raw_32,
+        truncated_enty,
+    ];
+
+    let header_len = 18u32 + (raw_chunks.len() as u32 * 24u32);
+    let mut file_buf = Vec::new();
+    file_buf.extend_from_slice(b"CONT");
+    file_buf.write_u16::<LittleEndian>(2).unwrap();
+    file_buf.write_u32::<LittleEndian>(header_len).unwrap();
+    file_buf.write_u32::<LittleEndian>(header_len).unwrap();
+    file_buf.write_u32::<LittleEndian>(0).unwrap();
+
+    let mut rel_offset = 0u64;
+    for (idx, chunk_bytes) in raw_chunks.iter().enumerate() {
+        file_buf
+            .write_u32::<LittleEndian>(852 + idx as u32)
+            .unwrap();
+        file_buf.write_u32::<LittleEndian>(260).unwrap();
+        file_buf.write_u64::<LittleEndian>(rel_offset).unwrap();
+        file_buf
+            .write_u64::<LittleEndian>(chunk_bytes.len() as u64)
+            .unwrap();
+        rel_offset += chunk_bytes.len() as u64;
+    }
+    for chunk_bytes in &raw_chunks {
+        file_buf.extend_from_slice(chunk_bytes);
+    }
+
+    std::fs::write(&path, &file_buf).unwrap();
+    let mut container = KfxContainer::open(&path).unwrap();
+    assert_eq!(container.chunks.len(), raw_chunks.len());
+
+    assert_eq!(
+        container.read_chunk(&container.chunks[0].clone()).unwrap(),
+        enty_payload
+    );
+    assert_eq!(
+        container.read_chunk(&container.chunks[1].clone()).unwrap(),
+        b""
+    );
+    assert_eq!(
+        container.read_chunk(&container.chunks[2].clone()).unwrap(),
+        raw_0
+    );
+    assert_eq!(
+        container.read_chunk(&container.chunks[3].clone()).unwrap(),
+        raw_5
+    );
+    assert_eq!(
+        container.read_chunk(&container.chunks[4].clone()).unwrap(),
+        raw_10
+    );
+    assert_eq!(
+        container.read_chunk(&container.chunks[5].clone()).unwrap(),
+        raw_32
+    );
+    assert!(matches!(
+        container.read_chunk(&container.chunks[6].clone()),
+        Err(ContainerError::InvalidChunkHeader)
+    ));
+}
+
+#[test]
+fn test_container_write_to_with_symbols_nonzero_start_offset() {
+    let entities = vec![KfxEntity {
+        entity_id: 852,
+        chunk_type: 260,
+        data: b"NONZERO_OFFSET_PAYLOAD".to_vec(),
+    }];
+
+    let mut cursor = Cursor::new(vec![0xAAu8; 64]);
+    cursor.seek(SeekFrom::Start(64)).unwrap();
+
+    let written = KfxContainer::write_to_with_symbols(
+        &entities,
+        "CR!NONZEROSTART",
+        Some(b"DOC_SYM"),
+        Some(b"FMT_CAP"),
+        &mut cursor,
+    )
+    .expect("write_to_with_symbols at non-zero offset should succeed");
+
+    let buf = cursor.into_inner();
+    assert_eq!(written, buf.len() as u64 - 64);
+    assert_eq!(&buf[..64], &[0xAAu8; 64]);
+    assert_eq!(&buf[64..68], b"CONT");
+
+    // Verify the container slice starting at offset 64 opens and roundtrips cleanly
+    let temp = common::temp_dir();
+    let kfx_path = temp.path().join("sliced_from_64.kfx");
+    std::fs::write(&kfx_path, &buf[64..]).unwrap();
+    let mut opened = KfxContainer::open(&kfx_path).unwrap();
+    assert_eq!(opened.chunks.len(), 1);
+    assert_eq!(
+        opened.read_chunk(&opened.chunks[0].clone()).unwrap(),
+        b"NONZERO_OFFSET_PAYLOAD"
+    );
 }
 
 // =========================================================================

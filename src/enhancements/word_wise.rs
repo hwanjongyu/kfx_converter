@@ -224,7 +224,7 @@ impl WordWiseBuilder {
 
             // Check sliding window density
             let window_start = start.saturating_sub(pacing.window_size);
-            let window_end = start + pacing.window_size;
+            let window_end = start.saturating_add(pacing.window_size);
 
             let in_vicinity: Vec<usize> = selected
                 .range(window_start..=window_end)
@@ -403,32 +403,6 @@ impl WordWiseBuilder {
         self.glosses.len() - initial_count
     }
 
-    /// Ensures `path` is not a symlink and clears read-only attributes on regular files before replacement.
-    #[allow(clippy::permissions_set_readonly_false)]
-    fn ensure_non_symlink_writable(path: &Path) -> SqlResult<()> {
-        match std::fs::symlink_metadata(path) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
-                        std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            format!("Refusing to overwrite symlink destination: {:?}", path),
-                        ),
-                    )));
-                }
-                if meta.permissions().readonly() {
-                    let mut perms = meta.permissions();
-                    perms.set_readonly(false);
-                    std::fs::set_permissions(path, perms)
-                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                }
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
-        }
-    }
-
     /// Writes the Word Wise `.kll` SQLite database atomically to disk.
     /// Uses a temporary file in the target directory and renames to prevent partial/corrupted
     /// writes that trigger Kindle OS `.bad_file` blacklisting.
@@ -439,19 +413,23 @@ impl WordWiseBuilder {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
 
-        Self::ensure_non_symlink_writable(path)?;
+        let map_io = |e: std::io::Error| rusqlite::Error::ToSqlConversionFailure(Box::new(e));
+        crate::storage::reject_symlink_parent(parent).map_err(map_io)?;
+        crate::storage::reject_symlink_path(path).map_err(map_io)?;
 
-        let tmp_file = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let tmp_file = tempfile::Builder::new()
+            .prefix(".kfx_tmp.")
+            .suffix(".kll.part")
+            .tempfile_in(parent)
+            .map_err(map_io)?;
         {
             let mut conn = Connection::open(tmp_file.path())?;
             self.populate_connection(&mut conn)?;
         }
 
-        Self::ensure_non_symlink_writable(path)?;
-        tmp_file
-            .persist(path)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e.error)))?;
+        crate::storage::prepare_writable_non_symlink(path).map_err(map_io)?;
+        crate::storage::reject_symlink_path(path).map_err(map_io)?;
+        tmp_file.persist(path).map_err(|e| map_io(e.error))?;
         Ok(())
     }
 
@@ -1457,5 +1435,95 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx_count, 1);
+    }
+
+    #[test]
+    fn test_priority_pacing_saturating_add_near_usize_max() {
+        let pacing = WordWisePacingConfig {
+            max_difficulty_level: 5,
+            min_distance: 20,
+            max_glosses_per_window: 2,
+            window_size: 100,
+            frontmatter_skip_chars: 0,
+            max_total_glosses: 10,
+        };
+
+        let candidates = vec![
+            WordWiseGloss {
+                start: usize::MAX - 5,
+                end: None,
+                difficulty: 1,
+                sense_id: 1001,
+                low_confidence: false,
+            },
+            WordWiseGloss {
+                start: usize::MAX - 40,
+                end: None,
+                difficulty: 2,
+                sense_id: 1002,
+                low_confidence: false,
+            },
+            WordWiseGloss {
+                start: usize::MAX - 80,
+                end: None,
+                difficulty: 3,
+                sense_id: 1003,
+                low_confidence: false,
+            },
+        ];
+
+        let selected = WordWiseBuilder::filter_candidates_priority_paced(&candidates, &pacing);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].start, usize::MAX - 40);
+        assert_eq!(selected[1].start, usize::MAX - 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_to_file_rejects_symlinks_and_overwrites_readonly() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let real_dir = temp.path().join("real_dir");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let link_dir = temp.path().join("link_dir");
+        symlink(&real_dir, &link_dir).unwrap();
+
+        let mut builder = WordWiseBuilder::new("B0TEST", "CR!TEST", "en", "en", "1");
+        builder.add_gloss(10, Some(15), 2, 201, false);
+
+        // 1. Symlink destination is rejected and victim remains untouched
+        let victim = temp.path().join("victim.kll");
+        std::fs::write(&victim, b"SAFE_VICTIM").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let dest_link = real_dir.join("dest_link.kll");
+        symlink(&victim, &dest_link).unwrap();
+
+        assert!(builder.write_to_file(&dest_link).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"SAFE_VICTIM");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+
+        // 2. Symlink parent directory is rejected without creating target file
+        let via_link_parent = link_dir.join("via_parent.kll");
+        assert!(builder.write_to_file(&via_link_parent).is_err());
+        assert!(!real_dir.join("via_parent.kll").exists());
+
+        // 3. Real read-only .kll file is atomically overwritten via O_NOFOLLOW
+        let ro_kll = real_dir.join("readonly.kll");
+        builder.write_to_file(&ro_kll).unwrap();
+        std::fs::set_permissions(&ro_kll, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(std::fs::metadata(&ro_kll).unwrap().permissions().readonly());
+
+        builder.add_gloss(40, Some(48), 1, 202, false);
+        builder.write_to_file(&ro_kll).unwrap();
+
+        let conn = Connection::open(&ro_kll).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }

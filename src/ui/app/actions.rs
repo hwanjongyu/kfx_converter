@@ -19,6 +19,88 @@ const MAX_BATCH_WORKERS: usize = 2;
 const MAX_DROP_WORKERS: usize = 4;
 const MAX_TOTAL_CONVERSION_WORKERS: usize = 4;
 const TAB_REFRESH_COOLDOWN: Duration = Duration::from_secs(3);
+pub(super) const MAX_TASK_HISTORY: usize = 200;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ConversionProgressUpdate {
+    pub progress: f32,
+    pub stage: String,
+}
+
+#[derive(Clone)]
+pub(super) struct SharedConversionProgress {
+    latest: Arc<Mutex<Option<ConversionProgressUpdate>>>,
+    dirty: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
+
+impl SharedConversionProgress {
+    pub(super) fn new() -> Self {
+        Self {
+            latest: Arc::new(Mutex::new(None)),
+            dirty: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(super) fn record(&self, pct: f32, stage: &str) {
+        let progress = if pct.is_finite() {
+            pct.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut guard = match self.latest.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = Some(ConversionProgressUpdate {
+            progress,
+            stage: stage.to_string(),
+        });
+        drop(guard);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub(super) fn take_if_dirty(&self) -> Option<ConversionProgressUpdate> {
+        if !self.dirty.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let mut guard = match self.latest.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.take()
+    }
+
+    pub(super) fn mark_done(&self) {
+        self.done.store(true, Ordering::Release);
+    }
+
+    pub(super) fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+}
+
+struct ProgressDoneGuard(SharedConversionProgress);
+
+impl Drop for ProgressDoneGuard {
+    fn drop(&mut self) {
+        self.0.mark_done();
+    }
+}
+
+pub(super) fn should_continue_scan_poll(
+    update_ok: bool,
+    generation_matches: bool,
+    cancel_token: &AtomicBool,
+) -> bool {
+    if !update_ok || !generation_matches {
+        cancel_token.store(true, Ordering::Release);
+        false
+    } else {
+        true
+    }
+}
 
 /// Resolves the final `ConversionOutcome` for an in-flight batch worker job.
 ///
@@ -45,26 +127,48 @@ pub(super) struct PreparedBatchRun {
     pub num_workers: usize,
 }
 
-fn spawn_file_manager(dir: &Path) -> Result<(), String> {
+pub(super) fn build_file_manager_command(dir: &Path) -> Result<std::process::Command, String> {
+    if dir.as_os_str().is_empty() {
+        return Err("Refusing to open empty folder path.".to_string());
+    }
+    let lossy = dir.to_string_lossy();
+    if lossy.starts_with('-') {
+        return Err("Refusing to open folder path starting with '-'.".to_string());
+    }
+    if lossy.contains('\0') {
+        return Err("Refusing to open folder path containing NUL byte.".to_string());
+    }
+
     #[cfg(target_os = "macos")]
-    let mut cmd = {
+    let cmd = {
         let mut c = std::process::Command::new("open");
         c.arg("--").arg(dir);
         c
     };
     #[cfg(target_os = "windows")]
-    let mut cmd = {
+    let cmd = {
         let mut c = std::process::Command::new("explorer");
         c.arg(dir);
         c
     };
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
+    let cmd = {
         let mut c = std::process::Command::new("xdg-open");
         c.arg(dir);
         c
     };
 
+    Ok(cmd)
+}
+
+fn spawn_file_manager(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!(
+            "Refusing to open non-directory path '{}'.",
+            dir.display()
+        ));
+    }
+    let mut cmd = build_file_manager_command(dir)?;
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("Failed to open output folder '{}': {}", dir.display(), e))
@@ -110,6 +214,124 @@ impl KindleStudio {
             })
     }
 
+    pub(super) fn push_task_bounded(&mut self, task: ConversionTask) {
+        self.tasks.insert(0, task);
+        self.trim_task_history();
+    }
+
+    /// Retains all active tasks (`Queued`, `Converting`, `Syncing`) and at most
+    /// `MAX_TASK_HISTORY` newest completed/failed historical tasks.
+    pub(super) fn trim_task_history(&mut self) {
+        let mut historical_seen = 0usize;
+        self.tasks.retain(|t| {
+            if matches!(
+                t.status,
+                TaskStatus::Queued | TaskStatus::Converting | TaskStatus::Syncing
+            ) {
+                true
+            } else {
+                historical_seen += 1;
+                historical_seen <= MAX_TASK_HISTORY
+            }
+        });
+    }
+
+    pub(super) fn format_conversion_stage(progress: f32, raw_stage: &str) -> String {
+        let lower = raw_stage.to_ascii_lowercase();
+        if lower.contains("sync") {
+            "Syncing to Kindle".to_string()
+        } else if lower.contains("word wise") {
+            "Word Wise".to_string()
+        } else if lower.contains("cover") {
+            "Optimizing Cover".to_string()
+        } else if lower.contains("serializing") || lower.contains("kfx") {
+            "Packaging KFX".to_string()
+        } else if lower.contains("reading") || lower.contains("epub") {
+            "Reading EPUB".to_string()
+        } else if !raw_stage.trim().is_empty() {
+            raw_stage.trim().to_string()
+        } else if progress >= 0.9 {
+            "Syncing to Kindle".to_string()
+        } else {
+            "Converting".to_string()
+        }
+    }
+
+    pub(super) fn apply_conversion_progress(
+        &mut self,
+        task_id: u64,
+        target_path: &Path,
+        batch_generation: Option<u64>,
+        progress: f32,
+        stage: &str,
+    ) -> bool {
+        let pct = if progress.is_finite() {
+            progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let pct_u8 = (pct * 100.0).round() as u8;
+        let display_stage = Self::format_conversion_stage(pct, stage);
+        let mut changed = false;
+
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == task_id)
+            && matches!(
+                t.status,
+                TaskStatus::Queued | TaskStatus::Converting | TaskStatus::Syncing
+            )
+        {
+            let next_progress = pct.max(t.progress);
+            let is_sync_stage = stage.to_ascii_lowercase().contains("sync");
+            let next_status = if pct >= 0.9 && (pct < 1.0 || is_sync_stage) {
+                TaskStatus::Syncing
+            } else if t.status == TaskStatus::Queued {
+                TaskStatus::Converting
+            } else {
+                t.status.clone()
+            };
+            if (next_progress - t.progress).abs() > f32::EPSILON || next_status != t.status {
+                t.progress = next_progress;
+                t.status = next_status;
+                changed = true;
+            }
+        }
+
+        if let Some(item) = self
+            .folder_state
+            .items
+            .iter_mut()
+            .find(|i| i.path == target_path)
+            && matches!(
+                item.status,
+                LocalEpubStatus::InQueue | LocalEpubStatus::Processing { .. }
+            )
+        {
+            let next_pct = match &item.status {
+                LocalEpubStatus::Processing { progress: prev, .. } => pct_u8.max(*prev),
+                _ => pct_u8,
+            };
+            let next_item_status = LocalEpubStatus::Processing {
+                stage: display_stage.clone(),
+                progress: next_pct,
+            };
+            if item.status != next_item_status {
+                item.status = next_item_status;
+                self.mark_folder_items_dirty();
+                changed = true;
+            }
+        }
+
+        if batch_generation == Some(self.batch_generation)
+            && let Some(ref mut bp) = self.folder_state.batch_progress
+            && bp.current_stage != display_stage
+        {
+            bp.current_stage = display_stage;
+            changed = true;
+        }
+
+        changed
+    }
+
     pub(super) fn apply_conversion_outcome(
         &mut self,
         task_id: u64,
@@ -137,6 +359,7 @@ impl KindleStudio {
             target_path,
             outcome,
         );
+        self.trim_task_history();
         self.mark_folder_items_dirty();
         self.mark_files_dirty();
     }
@@ -531,6 +754,7 @@ impl KindleStudio {
             .detach();
 
         cx.spawn(async move |this, cx| {
+            let mut last_snapshot: Option<ScanProgressState> = None;
             while !done.load(Ordering::Acquire) {
                 cx.background_executor()
                     .timer(Duration::from_millis(80))
@@ -545,19 +769,26 @@ impl KindleStudio {
                     Err(p) => p.into_inner().clone(),
                 };
 
-                let mut still_active = true;
-                this.update(cx, |this, cx| {
-                    if this.folder_state.scan_generation != generation {
-                        still_active = false;
-                        return;
-                    }
-                    this.folder_state.scan_progress = Some(snapshot);
-                    cx.notify();
-                })
-                .ok();
+                let changed = last_snapshot.as_ref() != Some(&snapshot);
+                let mut generation_matches = true;
+                let update_ok = this
+                    .update(cx, |this, cx| {
+                        if this.folder_state.scan_generation != generation {
+                            generation_matches = false;
+                            return;
+                        }
+                        if changed {
+                            this.folder_state.scan_progress = Some(snapshot.clone());
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
 
-                if !still_active {
+                if !should_continue_scan_poll(update_ok, generation_matches, &cancel_token) {
                     return;
+                }
+                if changed {
+                    last_snapshot = Some(snapshot);
                 }
             }
 
@@ -759,17 +990,14 @@ impl KindleStudio {
                 .to_string();
             let task_id = self.allocate_task_id();
             queued_tasks.push_back((task_id, path.clone()));
-            self.tasks.insert(
-                0,
-                ConversionTask {
-                    id: task_id,
-                    filename,
-                    file_size_str: file_size_str.clone(),
-                    status: TaskStatus::Queued,
-                    progress: 0.0,
-                    word_wise: run_settings.word_wise,
-                },
-            );
+            self.push_task_bounded(ConversionTask {
+                id: task_id,
+                filename,
+                file_size_str: file_size_str.clone(),
+                status: TaskStatus::Queued,
+                progress: 0.0,
+                word_wise: run_settings.word_wise,
+            });
         }
 
         let device = self.device.clone();
@@ -856,16 +1084,12 @@ impl KindleStudio {
                         should_run = true;
                         if let Some(t) = this.tasks.iter_mut().find(|t| t.id == task_id) {
                             t.status = TaskStatus::Converting;
-                            t.progress = 0.3;
+                            t.progress = 0.05;
                         }
                         if let Some(ref mut bp) = this.folder_state.batch_progress {
                             bp.active_tasks += 1;
                             bp.current_filename = filename.clone();
-                            bp.current_stage = if s_clone.auto_deploy {
-                                "Packaging & Transferring...".into()
-                            } else {
-                                "Packaging KFX...".into()
-                            };
+                            bp.current_stage = "Starting...".into();
                         }
                         if let Some(item) = this
                             .folder_state
@@ -874,12 +1098,8 @@ impl KindleStudio {
                             .find(|i| i.path == path_buf)
                         {
                             item.status = LocalEpubStatus::Processing {
-                                stage: if s_clone.auto_deploy {
-                                    "Packaging & Sync".into()
-                                } else {
-                                    "Packaging KFX".into()
-                                },
-                                progress: 30,
+                                stage: "Starting...".into(),
+                                progress: 5,
                             };
                             this.mark_folder_items_dirty();
                         }
@@ -890,15 +1110,54 @@ impl KindleStudio {
                         break;
                     }
 
+                    let shared_progress = SharedConversionProgress::new();
+                    let progress_for_poll = shared_progress.clone();
+                    let poll_path = path_buf.clone();
+                    let poll_this = this.clone();
+                    let progress_poller = cx.spawn(async move |cx| {
+                        while !progress_for_poll.is_done() {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(60))
+                                .await;
+                            if let Some(update) = progress_for_poll.take_if_dirty()
+                                && poll_this
+                                    .update(cx, |this, cx| {
+                                        if this.apply_conversion_progress(
+                                            task_id,
+                                            &poll_path,
+                                            Some(run_generation),
+                                            update.progress,
+                                            &update.stage,
+                                        ) {
+                                            cx.notify();
+                                        }
+                                    })
+                                    .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+
                     let target_path = path_buf.clone();
                     let s = s_clone.clone();
                     let d = d_clone.clone();
+                    let progress_for_bg = shared_progress.clone();
                     let res = cx
                         .background_executor()
                         .spawn(async move {
-                            convert_epub_file(&target_path, &s, &d, None::<fn(f32, &str)>)
+                            let _done_guard = ProgressDoneGuard(progress_for_bg.clone());
+                            convert_epub_file(
+                                &target_path,
+                                &s,
+                                &d,
+                                Some(move |pct: f32, msg: &str| {
+                                    progress_for_bg.record(pct, msg);
+                                }),
+                            )
                         })
                         .await;
+                    drop(progress_poller);
 
                     let cancel_check = cancel.clone();
                     let _ = this.update(cx, |this, cx| {
@@ -963,12 +1222,8 @@ impl KindleStudio {
         if let Some(item) = self.folder_state.items.iter_mut().find(|i| i.path == path) {
             size_opt = Some(item.file_size_str.clone());
             item.status = LocalEpubStatus::Processing {
-                stage: if sync_to_kindle {
-                    "Packaging & Sync".into()
-                } else {
-                    "Packaging KFX".into()
-                },
-                progress: 30,
+                stage: "Starting...".into(),
+                progress: 5,
             };
             self.mark_folder_items_dirty();
         }
@@ -1063,17 +1318,14 @@ impl KindleStudio {
                 .to_string();
             let file_size_str = size_opt.unwrap_or_else(|| "Pending...".into());
             let task_id = self.allocate_task_id();
-            self.tasks.insert(
-                0,
-                ConversionTask {
-                    id: task_id,
-                    filename,
-                    file_size_str,
-                    status: TaskStatus::Queued,
-                    progress: 0.0,
-                    word_wise: run_settings.word_wise,
-                },
-            );
+            self.push_task_bounded(ConversionTask {
+                id: task_id,
+                filename,
+                file_size_str,
+                status: TaskStatus::Queued,
+                progress: 0.0,
+                word_wise: run_settings.word_wise,
+            });
             prepared.push(DropJob {
                 task_id,
                 path,
@@ -1180,16 +1432,48 @@ impl KindleStudio {
                         refresh_gen = this.device_refresh_generation;
                         if let Some(t) = this.tasks.iter_mut().find(|t| t.id == job.task_id) {
                             t.status = TaskStatus::Converting;
-                            t.progress = 0.5;
+                            t.progress = 0.05;
                         }
                         cx.notify();
                     });
 
+                    let shared_progress = SharedConversionProgress::new();
+                    let progress_for_poll = shared_progress.clone();
+                    let poll_task_id = job.task_id;
+                    let poll_path = job.path.clone();
+                    let poll_this = this.clone();
+                    let progress_poller = cx.spawn(async move |cx| {
+                        while !progress_for_poll.is_done() {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(60))
+                                .await;
+                            if let Some(update) = progress_for_poll.take_if_dirty()
+                                && poll_this
+                                    .update(cx, |this, cx| {
+                                        if this.apply_conversion_progress(
+                                            poll_task_id,
+                                            &poll_path,
+                                            None,
+                                            update.progress,
+                                            &update.stage,
+                                        ) {
+                                            cx.notify();
+                                        }
+                                    })
+                                    .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+
                     let bg_path = job.path.clone();
                     let bg_settings = job.settings.clone();
+                    let progress_for_bg = shared_progress.clone();
                     let (size_str_opt, detected_device, res) = cx
                         .background_executor()
                         .spawn(async move {
+                            let _done_guard = ProgressDoneGuard(progress_for_bg.clone());
                             let size_opt = std::fs::metadata(&bg_path)
                                 .ok()
                                 .map(|m| format_file_size(m.len()));
@@ -1203,11 +1487,14 @@ impl KindleStudio {
                                 &bg_path,
                                 &bg_settings,
                                 effective_device,
-                                None::<fn(f32, &str)>,
+                                Some(move |pct: f32, msg: &str| {
+                                    progress_for_bg.record(pct, msg);
+                                }),
                             );
                             (size_opt, detected, conv_res)
                         })
                         .await;
+                    drop(progress_poller);
 
                     let _ = this.update(cx, |this, cx| {
                         if let Some(size_str) = size_str_opt
@@ -2242,5 +2529,390 @@ mod tests {
         // 5. Already connected studio does not redundantly trigger transition
         studio.device = connected_kindle.clone();
         assert!(!studio.should_apply_drop_detected_device(&connected_kindle, 4));
+    }
+
+    #[test]
+    fn test_build_file_manager_command_validation_and_argv() {
+        use super::{build_file_manager_command, spawn_file_manager};
+        use std::ffi::OsStr;
+
+        // Reject empty, flag-prefixed, and NUL-containing paths directly
+        assert!(build_file_manager_command(Path::new("")).is_err());
+        assert!(build_file_manager_command(Path::new("-rf")).is_err());
+        assert!(build_file_manager_command(Path::new("--help")).is_err());
+        assert!(build_file_manager_command(Path::new("/tmp/a\0b")).is_err());
+
+        // Verify platform binary and argv slice for a valid directory path
+        let valid_dir = Path::new("/tmp/kfx_books_output");
+        let cmd = build_file_manager_command(valid_dir).expect("Valid directory should build cmd");
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(cmd.get_program(), OsStr::new("open"));
+            assert_eq!(args, vec![OsStr::new("--"), valid_dir.as_os_str()]);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(cmd.get_program(), OsStr::new("explorer"));
+            assert_eq!(args, vec![valid_dir.as_os_str()]);
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            assert_eq!(cmd.get_program(), OsStr::new("xdg-open"));
+            assert_eq!(args, vec![valid_dir.as_os_str()]);
+        }
+
+        // Verify spawn_file_manager rejects non-existent path without spawning any process
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("nonexistent_output_dir");
+        let err = spawn_file_manager(&missing).expect_err("Non-existent path must be rejected");
+        assert!(err.contains("non-directory"));
+    }
+
+    #[test]
+    fn test_shared_conversion_progress_coalescing_and_transitions() {
+        use super::{ConversionProgressUpdate, ProgressDoneGuard, SharedConversionProgress};
+        use crate::state::BatchProgressState;
+
+        // 1. SharedConversionProgress coalescing, dirty-bit reset, clamping, NaN handling & guard
+        let shared = SharedConversionProgress::new();
+        assert!(!shared.is_done());
+        assert_eq!(shared.take_if_dirty(), None);
+
+        shared.record(f32::NAN, "NaN stage");
+        assert_eq!(
+            shared.take_if_dirty(),
+            Some(ConversionProgressUpdate {
+                progress: 0.0,
+                stage: "NaN stage".into(),
+            })
+        );
+        assert_eq!(shared.take_if_dirty(), None);
+
+        // Multiple records coalesce to latest; out-of-range values clamp to [0.0, 1.0]
+        shared.record(-0.25, "Too low");
+        shared.record(1.75, "Clamped high");
+        assert_eq!(
+            shared.take_if_dirty(),
+            Some(ConversionProgressUpdate {
+                progress: 1.0,
+                stage: "Clamped high".into(),
+            })
+        );
+        assert_eq!(shared.take_if_dirty(), None);
+
+        {
+            let _guard = ProgressDoneGuard(shared.clone());
+            assert!(!shared.is_done());
+        }
+        assert!(shared.is_done());
+
+        // 2. KindleStudio::apply_conversion_progress synced workflow
+        let mut studio = KindleStudio::new_for_test();
+        let synced_path = PathBuf::from("/books/Synced.epub");
+        let mut synced_item = dummy_item(1, synced_path.clone(), true);
+        synced_item.status = LocalEpubStatus::InQueue;
+        studio.folder_state.items = vec![synced_item];
+        studio.batch_generation = 4;
+        studio.folder_state.batch_progress = Some(BatchProgressState {
+            total_tasks: 1,
+            completed_tasks: 0,
+            failed_tasks: 0,
+            active_tasks: 1,
+            current_filename: "Synced.epub".into(),
+            current_stage: "Starting...".into(),
+            is_sync: true,
+            is_cancelled: false,
+        });
+        studio.push_task_bounded(ConversionTask {
+            id: 101,
+            filename: "Synced.epub".into(),
+            file_size_str: "1 KB".into(),
+            status: TaskStatus::Queued,
+            progress: 0.0,
+            word_wise: true,
+        });
+
+        let epoch0 = studio.folder_data_epoch;
+        assert!(studio.apply_conversion_progress(
+            101,
+            &synced_path,
+            Some(4),
+            0.10,
+            "Reading and validating EPUB archive...",
+        ));
+        assert_eq!(studio.tasks[0].status, TaskStatus::Converting);
+        assert!((studio.tasks[0].progress - 0.10).abs() < 1e-6);
+        assert_eq!(
+            studio.folder_state.items[0].status,
+            LocalEpubStatus::Processing {
+                stage: "Reading EPUB".into(),
+                progress: 10,
+            }
+        );
+        assert!(studio.folder_data_epoch > epoch0);
+        assert_eq!(
+            studio
+                .folder_state
+                .batch_progress
+                .as_ref()
+                .unwrap()
+                .current_stage,
+            "Reading EPUB"
+        );
+
+        // Advance to Word Wise (0.75)
+        assert!(studio.apply_conversion_progress(
+            101,
+            &synced_path,
+            Some(4),
+            0.75,
+            "Generating Word Wise lemma sidecar database...",
+        ));
+        assert_eq!(studio.tasks[0].status, TaskStatus::Converting);
+        assert!((studio.tasks[0].progress - 0.75).abs() < 1e-6);
+        assert_eq!(
+            studio.folder_state.items[0].status,
+            LocalEpubStatus::Processing {
+                stage: "Word Wise".into(),
+                progress: 75,
+            }
+        );
+
+        // Monotonic guard: lower percentage (0.30) must NOT regress task or folder item progress
+        assert!(studio.apply_conversion_progress(
+            101,
+            &synced_path,
+            Some(3), // stale batch_generation must NOT overwrite batch_progress.current_stage
+            0.30,
+            "Serializing Yellowjacket KFX container...",
+        ));
+        assert!((studio.tasks[0].progress - 0.75).abs() < 1e-6);
+        assert_eq!(
+            studio.folder_state.items[0].status,
+            LocalEpubStatus::Processing {
+                stage: "Packaging KFX".into(),
+                progress: 75,
+            }
+        );
+        assert_eq!(
+            studio
+                .folder_state
+                .batch_progress
+                .as_ref()
+                .unwrap()
+                .current_stage,
+            "Word Wise"
+        );
+
+        // Transition Converting -> Syncing at 0.90
+        assert!(studio.apply_conversion_progress(
+            101,
+            &synced_path,
+            Some(4),
+            0.90,
+            "Synchronizing to Kindle storage...",
+        ));
+        assert_eq!(studio.tasks[0].status, TaskStatus::Syncing);
+        assert!((studio.tasks[0].progress - 0.90).abs() < 1e-6);
+        assert_eq!(
+            studio.folder_state.items[0].status,
+            LocalEpubStatus::Processing {
+                stage: "Syncing to Kindle".into(),
+                progress: 90,
+            }
+        );
+        assert_eq!(
+            studio
+                .folder_state
+                .batch_progress
+                .as_ref()
+                .unwrap()
+                .current_stage,
+            "Syncing to Kindle"
+        );
+
+        // Terminal-state guard: once Completed & OnDevice, late progress callback is ignored
+        studio.tasks[0].status = TaskStatus::Completed;
+        studio.tasks[0].progress = 1.0;
+        studio.folder_state.items[0].status = LocalEpubStatus::OnDevice;
+        assert!(!studio.apply_conversion_progress(
+            101,
+            &synced_path,
+            None,
+            0.60,
+            "Normalizing baseline cover image...",
+        ));
+        assert_eq!(studio.tasks[0].status, TaskStatus::Completed);
+        assert!((studio.tasks[0].progress - 1.0).abs() < 1e-6);
+        assert_eq!(
+            studio.folder_state.items[0].status,
+            LocalEpubStatus::OnDevice
+        );
+
+        // 3. Local-only conversion: 1.0 ("Conversion completed successfully.") must NOT falsely
+        //    transition Converting -> Syncing
+        let local_path = PathBuf::from("/books/LocalOnly.epub");
+        let mut local_item = dummy_item(2, local_path.clone(), false);
+        local_item.status = LocalEpubStatus::Processing {
+            stage: "Starting...".into(),
+            progress: 5,
+        };
+        studio.folder_state.items.push(local_item);
+        studio.push_task_bounded(ConversionTask {
+            id: 102,
+            filename: "LocalOnly.epub".into(),
+            file_size_str: "2 KB".into(),
+            status: TaskStatus::Converting,
+            progress: 0.75,
+            word_wise: false,
+        });
+
+        assert!(studio.apply_conversion_progress(
+            102,
+            &local_path,
+            None,
+            1.0,
+            "Conversion completed successfully.",
+        ));
+        let local_task = studio.tasks.iter().find(|t| t.id == 102).unwrap();
+        assert_eq!(
+            local_task.status,
+            TaskStatus::Converting,
+            "Local-only 1.0 completion message must not falsely enter TaskStatus::Syncing"
+        );
+        assert!((local_task.progress - 1.0).abs() < 1e-6);
+        let local_folder_item = studio
+            .folder_state
+            .items
+            .iter()
+            .find(|i| i.path == local_path)
+            .unwrap();
+        assert_eq!(
+            local_folder_item.status,
+            LocalEpubStatus::Processing {
+                stage: "Conversion completed successfully.".into(),
+                progress: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_continue_scan_poll_cancels_on_entity_drop_or_stale_generation() {
+        use super::should_continue_scan_poll;
+        use std::sync::atomic::AtomicBool;
+
+        // 1. Both update_ok and generation_matches true -> continue without cancelling
+        let cancel_ok = AtomicBool::new(false);
+        assert!(should_continue_scan_poll(true, true, &cancel_ok));
+        assert!(!cancel_ok.load(Ordering::Acquire));
+
+        // 2. Entity dropped (update_ok == false) -> cancel_token set to true & stop polling
+        let cancel_dropped = AtomicBool::new(false);
+        assert!(!should_continue_scan_poll(false, true, &cancel_dropped));
+        assert!(cancel_dropped.load(Ordering::Acquire));
+
+        // 3. Stale scan generation (generation_matches == false) -> cancel_token set to true & stop
+        let cancel_stale = AtomicBool::new(false);
+        assert!(!should_continue_scan_poll(true, false, &cancel_stale));
+        assert!(cancel_stale.load(Ordering::Acquire));
+
+        // 4. Both false -> cancel_token set to true & stop
+        let cancel_both = AtomicBool::new(false);
+        assert!(!should_continue_scan_poll(false, false, &cancel_both));
+        assert!(cancel_both.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_bounded_task_history_preserves_active_and_caps_completed_at_200() {
+        use super::MAX_TASK_HISTORY;
+
+        let mut studio = KindleStudio::new_for_test();
+
+        // Insert 250 completed/failed historical tasks (IDs 1..=250; newest prepended at index 0)
+        for id in 1u64..=250 {
+            let status = match id % 4 {
+                0 => TaskStatus::Completed,
+                1 => TaskStatus::ConvertedLocalOnly,
+                2 => TaskStatus::Failed("err".into()),
+                _ => TaskStatus::SyncFailed("sync err".into()),
+            };
+            studio.push_task_bounded(ConversionTask {
+                id,
+                filename: format!("Hist{id}.epub"),
+                file_size_str: "1 KB".into(),
+                status,
+                progress: 1.0,
+                word_wise: false,
+            });
+        }
+
+        // Insert 5 active tasks across Queued / Converting / Syncing (IDs 1001..=1005)
+        let active_specs = [
+            (1001u64, TaskStatus::Queued, 0.0),
+            (1002u64, TaskStatus::Converting, 0.3),
+            (1003u64, TaskStatus::Syncing, 0.9),
+            (1004u64, TaskStatus::Queued, 0.0),
+            (1005u64, TaskStatus::Converting, 0.6),
+        ];
+        for (id, status, progress) in active_specs {
+            studio.push_task_bounded(ConversionTask {
+                id,
+                filename: format!("Active{id}.epub"),
+                file_size_str: "2 KB".into(),
+                status,
+                progress,
+                word_wise: true,
+            });
+        }
+
+        assert_eq!(studio.tasks.len(), MAX_TASK_HISTORY + 5);
+
+        // All 5 active tasks preserved
+        for active_id in 1001u64..=1005 {
+            assert!(
+                studio.tasks.iter().any(|t| t.id == active_id),
+                "Active task {active_id} must be preserved"
+            );
+        }
+
+        // Newest 200 completed/failed tasks (IDs 51..=250) preserved; oldest 50 (IDs 1..=50) evicted
+        for expected_id in 51u64..=250 {
+            assert!(
+                studio.tasks.iter().any(|t| t.id == expected_id),
+                "Newest historical task {expected_id} must be preserved"
+            );
+        }
+        for evicted_id in 1u64..=50 {
+            assert!(
+                !studio.tasks.iter().any(|t| t.id == evicted_id),
+                "Oldest historical task {evicted_id} must be evicted"
+            );
+        }
+
+        // Transitioning an active task (1001) to terminal via apply_conversion_outcome also trims
+        // so completed/failed history stays capped at MAX_TASK_HISTORY (oldest remaining 51 evicted).
+        studio.apply_conversion_outcome(
+            1001,
+            Path::new("/books/Active1001.epub"),
+            None,
+            ConversionOutcome::Finished(ConversionResult {
+                output_path: PathBuf::from("/books/Active1001.kfx"),
+                total_bytes: 1024,
+                synced_to_device: false,
+                synced_device_path: None,
+                sync_error: None,
+                word_wise_glosses: None,
+                word_wise_error: None,
+                sdr_error: None,
+            }),
+        );
+        assert_eq!(studio.tasks.len(), MAX_TASK_HISTORY + 4);
+        assert!(studio.tasks.iter().any(|t| t.id == 1001));
+        assert!(
+            !studio.tasks.iter().any(|t| t.id == 51),
+            "Task 51 should be evicted when active task 1001 transitions to completed"
+        );
     }
 }

@@ -12,6 +12,76 @@ pub fn str_utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
+/// Amazon Kindle Content Definition Environment (CDE) content type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ContentType {
+    /// Commercial e-book (`"EBOK"`): enables lockscreen cover art and full book metadata.
+    #[default]
+    Ebok,
+    /// Personal document (`"PDOC"`).
+    Pdoc,
+}
+
+impl ContentType {
+    /// Returns the canonical uppercase Kindle CDE string (`"EBOK"` or `"PDOC"`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ebok => "EBOK",
+            Self::Pdoc => "PDOC",
+        }
+    }
+
+    /// Parses `raw` ASCII case-insensitively (trimmed), defaulting unrecognized input to `Ebok`.
+    pub fn from_lossy(raw: &str) -> Self {
+        if raw.trim().eq_ignore_ascii_case("PDOC") {
+            Self::Pdoc
+        } else {
+            Self::Ebok
+        }
+    }
+
+    /// Strictly parses `"EBOK"` or `"PDOC"` (ASCII case-insensitive, trimmed).
+    pub fn parse_strict(raw: &str) -> Result<Self, String> {
+        let trimmed = raw.trim();
+        if trimmed.eq_ignore_ascii_case("EBOK") {
+            Ok(Self::Ebok)
+        } else if trimmed.eq_ignore_ascii_case("PDOC") {
+            Ok(Self::Pdoc)
+        } else {
+            Err(format!(
+                "Invalid KFX content type {:?}: expected \"EBOK\" or \"PDOC\"",
+                raw
+            ))
+        }
+    }
+}
+
+impl std::fmt::Display for ContentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ContentType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_strict(s)
+    }
+}
+
+impl AsRef<str> for ContentType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<ContentType> for String {
+    fn from(value: ContentType) -> Self {
+        value.as_str().to_string()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BookMetadata {
     pub title: String,
@@ -2545,5 +2615,42 @@ mod tests {
         };
         assert_eq!(img_long_alt.yellowjacket_pid_len(true), 1);
         assert_eq!(img_long_alt.yellowjacket_pid_len(false), 400);
+    }
+
+    #[test]
+    fn test_content_type_enum_parsing_and_formatting() {
+        // Default & canonical formatting
+        assert_eq!(ContentType::default(), ContentType::Ebok);
+        assert_eq!(ContentType::Ebok.as_str(), "EBOK");
+        assert_eq!(ContentType::Pdoc.as_str(), "PDOC");
+        assert_eq!(ContentType::Ebok.to_string(), "EBOK");
+        assert_eq!(ContentType::Pdoc.to_string(), "PDOC");
+        assert_eq!(ContentType::Ebok.as_ref(), "EBOK");
+        assert_eq!(ContentType::Pdoc.as_ref(), "PDOC");
+        assert_eq!(String::from(ContentType::Ebok), "EBOK");
+        assert_eq!(String::from(ContentType::Pdoc), "PDOC");
+
+        // Strict parsing (case-insensitive & trimmed)
+        assert_eq!(ContentType::parse_strict("EBOK"), Ok(ContentType::Ebok));
+        assert_eq!(ContentType::parse_strict("  ebok\t"), Ok(ContentType::Ebok));
+        assert_eq!(ContentType::parse_strict("PDOC"), Ok(ContentType::Pdoc));
+        assert_eq!(ContentType::parse_strict(" pDoC\n"), Ok(ContentType::Pdoc));
+        assert_eq!("ebok".parse::<ContentType>(), Ok(ContentType::Ebok));
+        assert_eq!("pdoc".parse::<ContentType>(), Ok(ContentType::Pdoc));
+
+        let err = ContentType::parse_strict("../../evil").unwrap_err();
+        assert!(err.contains("Invalid KFX content type"));
+        assert!(err.contains("\"EBOK\" or \"PDOC\""));
+        assert!("".parse::<ContentType>().is_err());
+        assert!("MOBI".parse::<ContentType>().is_err());
+
+        // Lossy parsing defaults unrecognized inputs to Ebok
+        assert_eq!(ContentType::from_lossy("PDOC"), ContentType::Pdoc);
+        assert_eq!(ContentType::from_lossy("  pdoc "), ContentType::Pdoc);
+        assert_eq!(ContentType::from_lossy("EBOK"), ContentType::Ebok);
+        assert_eq!(ContentType::from_lossy("ebok"), ContentType::Ebok);
+        assert_eq!(ContentType::from_lossy(""), ContentType::Ebok);
+        assert_eq!(ContentType::from_lossy("../../evil"), ContentType::Ebok);
+        assert_eq!(ContentType::from_lossy("PDOC2"), ContentType::Ebok);
     }
 }

@@ -77,7 +77,7 @@ fn test_cli_version_flag() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("0.1.0"));
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
@@ -97,11 +97,22 @@ fn test_cli_inspect_valid_kfx() {
         "Inspect on valid KFX should exit with code 0"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(concat!(
+        "=== Rust KFX Converter v",
+        env!("CARGO_PKG_VERSION"),
+        " ==="
+    )));
     assert!(stdout.contains("Valid KFX Container:"));
     assert!(stdout.contains("Version: 2"));
     assert!(stdout.contains("Total Chunks: 2"));
     assert!(stdout.contains("bcContId"));
     assert!(stdout.contains("section"));
+    assert!(stdout.contains("Type: bcContId ($409)"));
+    assert!(stdout.contains("Type: section ($260)"));
+    assert!(
+        !stdout.contains("($)"),
+        "Inspect output must include numeric symbol ID inside ($...): {stdout}"
+    );
 }
 
 #[test]

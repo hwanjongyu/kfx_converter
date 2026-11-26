@@ -350,11 +350,22 @@ pub struct ConversionOptions {
 impl Default for ConversionOptions {
     fn default() -> Self {
         Self {
-            content_type: "EBOK".to_string(),
+            content_type: crate::ir::ContentType::default().as_str().to_string(),
             word_wise: true,
             auto_deploy: true,
             device_root: None,
         }
+    }
+}
+
+impl ConversionOptions {
+    pub fn with_content_type(mut self, content_type: crate::ir::ContentType) -> Self {
+        self.content_type = content_type.as_str().to_string();
+        self
+    }
+
+    pub fn resolved_content_type(&self) -> crate::ir::ContentType {
+        crate::ir::ContentType::from_lossy(&self.content_type)
     }
 }
 
@@ -435,7 +446,8 @@ impl ConversionPipeline {
         if let Some(ref cb) = progress {
             cb(0.3, "Serializing Yellowjacket KFX container...");
         }
-        let mut packager = KfxPackager::new(&ir, &options.content_type);
+        let resolved_content_type = options.resolved_content_type();
+        let mut packager = KfxPackager::new_with_content_type(&ir, resolved_content_type);
         let content_id = packager.content_id().to_string();
         let container_id = packager.container_id().to_string();
         let asin = packager.asin().to_string();
@@ -485,7 +497,7 @@ impl ConversionPipeline {
                 input_path.display(),
                 output_path.display(),
                 options.word_wise,
-                options.content_type,
+                resolved_content_type,
                 options.auto_deploy,
                 ir.metadata.language
             ),
@@ -603,7 +615,7 @@ impl ConversionPipeline {
             &sdr_path,
             &asin,
             Some(&content_id),
-            Some(&options.content_type),
+            Some(resolved_content_type.as_str()),
             Some(&ir.metadata.language),
             cover_jpeg.as_deref(),
             kll_bytes.as_deref(),
@@ -637,7 +649,7 @@ impl ConversionPipeline {
                 &ir.metadata.title,
                 &asin,
                 Some(&content_id),
-                Some(&options.content_type),
+                Some(resolved_content_type.as_str()),
                 Some(&ir.metadata.language),
                 cover_jpeg.as_deref(),
                 kll_bytes.as_deref(),
@@ -769,9 +781,27 @@ mod tests {
     fn test_conversion_options_default() {
         let opts = ConversionOptions::default();
         assert_eq!(opts.content_type, "EBOK");
+        assert_eq!(opts.resolved_content_type(), crate::ir::ContentType::Ebok);
         assert!(opts.word_wise);
         assert!(opts.auto_deploy);
         assert!(opts.device_root.is_none());
+
+        let pdoc_opts =
+            ConversionOptions::default().with_content_type(crate::ir::ContentType::Pdoc);
+        assert_eq!(pdoc_opts.content_type, "PDOC");
+        assert_eq!(
+            pdoc_opts.resolved_content_type(),
+            crate::ir::ContentType::Pdoc
+        );
+
+        let sanitized_opts = ConversionOptions {
+            content_type: "../../evil".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            sanitized_opts.resolved_content_type(),
+            crate::ir::ContentType::Ebok
+        );
     }
 
     #[test]

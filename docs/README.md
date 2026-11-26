@@ -89,6 +89,7 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 | **Nov 24 P0 Critical Audit Remediation** | [spec-fix-p0-nov24-audit.md](specs/spec-fix-p0-nov24-audit.md) | [qa-fix-p0-nov24-audit.md](qa/qa-fix-p0-nov24-audit.md) | Critical security and correctness findings `#1`–`#2` from the Nov 24 multi-model audit (`98fcdcd`). |
 | **Nov 24 P1 Major Audit Remediation** | [spec-fix-p1-nov24-audit.md](specs/spec-fix-p1-nov24-audit.md) | [qa-fix-p1-nov24-audit.md](qa/qa-fix-p1-nov24-audit.md) | Major security, UTF-16 PID parity, XML/CSS/Ion bounds, and sync findings `#3`–`#14` (`d97a01d`). |
 | **Nov 24 P2 Moderate Audit Remediation** | [spec-fix-p2-nov24-audit.md](specs/spec-fix-p2-nov24-audit.md) | [qa-fix-p2-nov24-audit.md](qa/qa-fix-p2-nov24-audit.md) | XHTML/CSS/ZIP hardening, Word Wise/SDR/sync efficiency, GPUI races, Ion/SQLite allocation cuts, CI SHA-pinning, and doc alignment (`#15`–`#22`). |
+| **Nov 24 P3 Minor Audit Remediation** | [spec-fix-p3-nov24-audit.md](specs/spec-fix-p3-nov24-audit.md) | [qa-fix-p3-nov24-audit.md](qa/qa-fix-p3-nov24-audit.md) | Cargo-derived CLI/GUI versions & `--inspect` symbol IDs, GPUI runtime safety/progress/bounded history, `WordWiseBuilder` `saturating_add` + `storage` `O_NOFOLLOW` dedup, peek-before-alloc `read_chunk`, XHTML diagnostics/class hygiene, and typed `ContentType` (`#23`–`#25` + P1 note). |
 | **Multi-Model Engineering Audit Remediation** | [spec-fix-multi-model-audit.md](specs/spec-fix-multi-model-audit.md) | [qa-fix-multi-model-audit.md](qa/qa-fix-multi-model-audit.md) | Address all consensus findings from the tri-model audit. |
 | **P1 High-Severity Review Audit Remediation** | [spec-fix-p1-review-audit.md](specs/spec-fix-p1-review-audit.md) | [qa-fix-p1-review-audit.md](qa/qa-fix-p1-review-audit.md) | Log rotation, ASIN/content-id `.sdr` preservation, Win32 eject, Word Wise pacing, HTML5 void tags, Ion/container bounds, CLI `-c`/`-w`. |
 | **P2 Medium/Low Review Audit Remediation** | [spec-fix-p2-review-audit.md](specs/spec-fix-p2-review-audit.md) | [qa-fix-p2-review-audit.md](qa/qa-fix-p2-review-audit.md) | Bare-path atomic staging, deterministic manifest/cover ordering, chunk bounds, sync locks, iterative `Clone`/`Drop`, CI/release/docs alignment. |
@@ -154,6 +155,7 @@ docs/
 │   ├── spec-fix-p2-review-audit.md
 │   ├── spec-fix-p3-audit-issues.md
 │   ├── spec-fix-p3-issues.md
+│   ├── spec-fix-p3-nov24-audit.md
 │   ├── spec-fix-sleep-cover-and-kfx-compliance.md
 │   ├── spec-fix-toc-page-list-filtering.md
 │   ├── spec-fix-word-wise-deployment.md
@@ -217,6 +219,7 @@ docs/
     ├── qa-fix-p2-review-audit.md
     ├── qa-fix-p3-audit-issues.md
     ├── qa-fix-p3-issues.md
+    ├── qa-fix-p3-nov24-audit.md
     ├── qa-fix-sleep-cover-and-kfx-compliance.md
     ├── qa-fix-toc-page-list-filtering.md
     ├── qa-fix-word-wise-deployment.md

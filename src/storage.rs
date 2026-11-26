@@ -180,6 +180,16 @@ pub(crate) fn reject_symlink_path(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Rejects `parent` if it is a symbolic link, permitting OS root symlinks on macOS
+/// (`/tmp`, `/var`, `/etc`, `std::env::temp_dir()`) and `"."`.
+#[allow(dead_code)]
+pub(crate) fn reject_symlink_parent(parent: &Path) -> io::Result<()> {
+    if parent != Path::new(".") && !is_os_root_symlink(parent) {
+        reject_symlink_path(parent)?;
+    }
+    Ok(())
+}
+
 /// Rejects any symbolic link component strictly below `root` along the path to `target`.
 /// Does NOT inspect OS path components above `root` (safe on macOS `/var` -> `/private/var`).
 #[allow(dead_code)]
@@ -410,9 +420,7 @@ pub(crate) fn write_bytes_local_safe(dst: &Path, data: &[u8]) -> io::Result<()> 
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    if parent != Path::new(".") && !is_os_root_symlink(parent) {
-        reject_symlink_path(parent)?;
-    }
+    reject_symlink_parent(parent)?;
 
     let mut tmp = tempfile::Builder::new()
         .prefix(".kfx_tmp.")
@@ -663,6 +671,12 @@ mod tests {
         symlink(&real_dir, &link_dir).unwrap();
 
         // Reject symlink dir & symlink ancestor
+        reject_symlink_parent(Path::new(".")).unwrap();
+        reject_symlink_parent(&real_dir).unwrap();
+        assert_eq!(
+            reject_symlink_parent(&link_dir).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
         assert_eq!(
             ensure_non_symlink_dir(&link_dir).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied

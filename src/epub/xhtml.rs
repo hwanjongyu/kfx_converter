@@ -616,6 +616,38 @@ pub fn parse_xhtml_with_css_and_context(
     parse_xhtml_with_css_context_and_cache(xhtml, href_to_id, book_css, link_ctx, None)
 }
 
+/// Output of XHTML parsing including any non-fatal XML syntax warnings encountered.
+#[derive(Debug, Clone, Default)]
+pub struct XhtmlParseResult {
+    pub blocks: Vec<Block>,
+    pub footnotes: HashMap<String, String>,
+    pub warnings: Vec<String>,
+}
+
+/// Parses XHTML like [`parse_xhtml_with_css_and_context`], additionally returning
+/// any non-fatal XML parse diagnostics instead of logging them to stderr.
+pub fn parse_xhtml_with_warnings(
+    xhtml: &str,
+    href_to_id: &HashMap<String, String>,
+    book_css: &CssStylesheet,
+    link_ctx: Option<&XhtmlLinkContext<'_>>,
+) -> XhtmlParseResult {
+    let mut warnings = Vec::new();
+    let (blocks, footnotes) = parse_xhtml_core(
+        xhtml,
+        href_to_id,
+        book_css,
+        link_ctx,
+        None,
+        Some(&mut warnings),
+    );
+    XhtmlParseResult {
+        blocks,
+        footnotes,
+        warnings,
+    }
+}
+
 /// Parses XHTML with book CSS, optional chapter link context, and an optional shared
 /// `ElementStyleCache` reused across chapters that share the same stylesheet and have no inline `<style>`.
 pub(crate) fn parse_xhtml_with_css_context_and_cache(
@@ -624,6 +656,17 @@ pub(crate) fn parse_xhtml_with_css_context_and_cache(
     book_css: &CssStylesheet,
     link_ctx: Option<&XhtmlLinkContext<'_>>,
     shared_cache: Option<&crate::css::ElementStyleCache>,
+) -> (Vec<Block>, HashMap<String, String>) {
+    parse_xhtml_core(xhtml, href_to_id, book_css, link_ctx, shared_cache, None)
+}
+
+fn parse_xhtml_core(
+    xhtml: &str,
+    href_to_id: &HashMap<String, String>,
+    book_css: &CssStylesheet,
+    link_ctx: Option<&XhtmlLinkContext<'_>>,
+    shared_cache: Option<&crate::css::ElementStyleCache>,
+    mut warnings: Option<&mut Vec<String>>,
 ) -> (Vec<Block>, HashMap<String, String>) {
     let inline_css = crate::css::extract_inline_style_blocks(xhtml);
     let inline_sheet = if inline_css.trim().is_empty() {
@@ -2139,14 +2182,12 @@ pub(crate) fn parse_xhtml_with_css_context_and_cache(
                                 if attr.key.as_ref() == b"class" {
                                     let val = crate::epub::unescape_attr_value(&attr)
                                         .to_ascii_lowercase();
-                                    let mut has_known = false;
                                     for cls in val.split_whitespace() {
                                         if cls == "small-caps" || cls == "smallcaps" {
                                             push_unique_tokens(
                                                 &mut span_tokens,
                                                 vec!["small_caps".to_string()],
                                             );
-                                            has_known = true;
                                         } else if cls == "dropcap"
                                             || cls == "drop-cap"
                                             || cls == "drop_cap"
@@ -2162,7 +2203,6 @@ pub(crate) fn parse_xhtml_with_css_context_and_cache(
                                                 &mut span_tokens,
                                                 vec!["dropcap".to_string()],
                                             );
-                                            has_known = true;
                                         } else if cls == "uppercase"
                                             || cls == "all-caps"
                                             || cls == "allcaps"
@@ -2171,15 +2211,6 @@ pub(crate) fn parse_xhtml_with_css_context_and_cache(
                                             push_unique_tokens(
                                                 &mut span_tokens,
                                                 vec!["uppercase".to_string()],
-                                            );
-                                            has_known = true;
-                                        }
-                                    }
-                                    if !has_known {
-                                        for cls in val.split_whitespace() {
-                                            push_unique_tokens(
-                                                &mut span_tokens,
-                                                vec![cls.to_string()],
                                             );
                                         }
                                     }
@@ -2724,7 +2755,19 @@ pub(crate) fn parse_xhtml_with_css_context_and_cache(
                     }
                 }
             }
-            Ok(Event::Eof) | Err(_) => {
+            event @ (Ok(Event::Eof) | Err(_)) => {
+                if let Err(err) = event {
+                    let warning = format!(
+                        "XHTML parse error at byte offset {}: {}",
+                        xml_reader.error_position(),
+                        err
+                    );
+                    if let Some(collector) = warnings.as_deref_mut() {
+                        collector.push(warning);
+                    } else {
+                        eprintln!("[WARN] {}", warning);
+                    }
+                }
                 flush_open_paragraph(
                     &mut in_p,
                     &mut p_style,
@@ -3552,5 +3595,130 @@ mod tests {
             .find(|b| b.plain_text() == "Plain after blockquote")
             .unwrap();
         assert!(!plain_p.resolved_style().is_blockquote);
+    }
+
+    #[test]
+    fn test_span_unstyled_unknown_classes_do_not_leak_as_kfx_styles() {
+        let xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <p><span class="sub">Sub</span> <span class="sup">Sup</span> <span class="code">Code</span> <span class="bold">Bold</span> <span class="italic">Italic</span> <span class="underline">Underline</span> <span class="strike">Strike</span> <span class="noteref">Ref</span></p>
+  <p><span class="dropcap">T</span>he <span class="small-caps">Small</span> and <span class="all-caps">Loud</span></p>
+</body>
+</html>"#;
+
+        let empty_css = CssStylesheet::new();
+        let (blocks, _) = parse_xhtml_with_css(xhtml, &HashMap::new(), &empty_css);
+        assert_eq!(blocks.len(), 2);
+
+        // 1. Unstyled raw class names must NOT leak into SpanStyles formatting or custom_classes
+        match &blocks[0] {
+            Block::Paragraph { spans, .. } => {
+                for label in [
+                    "Sub",
+                    "Sup",
+                    "Code",
+                    "Bold",
+                    "Italic",
+                    "Underline",
+                    "Strike",
+                    "Ref",
+                ] {
+                    let span = spans
+                        .iter()
+                        .find(|s| s.text.trim() == label)
+                        .unwrap_or_else(|| panic!("Missing span {label:?}: {spans:?}"));
+                    assert_eq!(
+                        span.resolved_styles(),
+                        crate::ir::SpanStyles::default(),
+                        "Unstyled span {label:?} leaked styles: {:?}",
+                        span.style
+                    );
+                }
+            }
+            other => panic!("Expected Paragraph, got {:?}", other),
+        }
+
+        // 2. Semantic allowlisted classes (`dropcap`, `small-caps`, `all-caps`) continue working
+        match &blocks[1] {
+            Block::Paragraph { spans, .. } => {
+                let dropcap_span = spans.iter().find(|s| s.text == "T").unwrap();
+                assert_eq!(
+                    dropcap_span.resolved_styles().dropcap,
+                    crate::ir::DropCapStyle::StandardSingleChar
+                );
+                let sc_span = spans.iter().find(|s| s.text == "Small").unwrap();
+                assert!(sc_span.resolved_styles().format.small_caps);
+                let uc_span = spans.iter().find(|s| s.text == "Loud").unwrap();
+                assert!(uc_span.resolved_styles().format.uppercase);
+            }
+            other => panic!("Expected Paragraph, got {:?}", other),
+        }
+
+        // 3. CSS-backed `.sub { font-weight: bold; }` applies `bold` without leaking `subscript`
+        let mut book_css = CssStylesheet::new();
+        book_css.add_css(".sub { font-weight: bold; }");
+        let (styled_blocks, _) = parse_xhtml_with_css(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p><span class="sub">StyledSub</span></p></body></html>"#,
+            &HashMap::new(),
+            &book_css,
+        );
+        assert_eq!(styled_blocks.len(), 1);
+        match &styled_blocks[0] {
+            Block::Paragraph { spans, .. } => {
+                let st = spans[0].resolved_styles();
+                assert!(st.format.bold, "CSS-backed .sub should be bold: {:?}", st);
+                assert!(
+                    !st.format.subscript,
+                    "CSS-backed .sub must not leak raw subscript token: {:?}",
+                    st
+                );
+            }
+            other => panic!("Expected Paragraph, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_xhtml_with_warnings_reports_malformed_xml_and_preserves_prefix() {
+        let empty_css = CssStylesheet::new();
+
+        // 1. Well-formed XHTML produces zero warnings
+        let valid_xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <p>Clean paragraph.</p>
+</body>
+</html>"#;
+        let ok_res = parse_xhtml_with_warnings(valid_xhtml, &HashMap::new(), &empty_css, None);
+        assert!(
+            ok_res.warnings.is_empty(),
+            "Well-formed XHTML must produce no warnings, got: {:?}",
+            ok_res.warnings
+        );
+        assert_eq!(ok_res.blocks.len(), 1);
+        assert_eq!(ok_res.blocks[0].plain_text(), "Clean paragraph.");
+
+        // 2. Malformed XML emits byte-offset warning and preserves already-parsed prefix blocks
+        let malformed_xhtml = r#"<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+  <p>Valid prefix paragraph.</p>
+  <p>Broken <span class="unterminated>trailing text</p>
+</body>
+</html>"#;
+        let err_res = parse_xhtml_with_warnings(malformed_xhtml, &HashMap::new(), &empty_css, None);
+        assert!(
+            err_res
+                .warnings
+                .iter()
+                .any(|w| w.contains("XHTML parse error at byte offset")),
+            "Expected XHTML parse error diagnostic warning, got: {:?}",
+            err_res.warnings
+        );
+        assert!(
+            err_res
+                .blocks
+                .iter()
+                .any(|b| b.plain_text() == "Valid prefix paragraph."),
+            "Valid blocks before the syntax error must be preserved: {:?}",
+            err_res.blocks
+        );
     }
 }

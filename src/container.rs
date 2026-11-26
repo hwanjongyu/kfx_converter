@@ -341,16 +341,22 @@ impl KfxContainer {
             )));
         }
 
-        self.reader.seek(SeekFrom::Start(chunk.offset))?;
-        let mut buf = vec![0u8; chunk.length as usize];
-        self.reader.read_exact(&mut buf)?;
+        let chunk_len = chunk.length as usize;
+        if chunk_len == 0 {
+            return Ok(Vec::new());
+        }
 
-        // If enveloped by ENTY header, unwrap it dynamically using header_length (bytes 6..10)
-        if buf.len() >= 4 && &buf[0..4] == KFX_ENTITY_MAGIC {
-            if buf.len() < 10 {
+        self.reader.seek(SeekFrom::Start(chunk.offset))?;
+        let peek_len = chunk_len.min(10);
+        let mut prefix = [0u8; 10];
+        self.reader.read_exact(&mut prefix[..peek_len])?;
+
+        // If enveloped by ENTY header, validate header_len and Ion metadata BEFORE allocating payload
+        if peek_len >= 4 && &prefix[0..4] == KFX_ENTITY_MAGIC {
+            if peek_len < 10 {
                 return Err(ContainerError::InvalidChunkHeader);
             }
-            let header_len = usize::try_from((&buf[6..10]).read_u32::<LittleEndian>()?)
+            let header_len = usize::try_from((&prefix[6..10]).read_u32::<LittleEndian>()?)
                 .map_err(|_| ContainerError::InvalidChunkHeader)?;
             if header_len < 10 {
                 return Err(ContainerError::CorruptedHeader(format!(
@@ -358,15 +364,16 @@ impl KfxContainer {
                     header_len
                 )));
             }
-            if header_len > buf.len() {
+            if header_len > chunk_len {
                 return Err(ContainerError::CorruptedHeader(format!(
                     "ENTY chunk header length ({}) exceeds chunk buffer length ({})",
-                    header_len,
-                    buf.len()
+                    header_len, chunk_len
                 )));
             }
             if header_len > 10 {
-                let mut reader = crate::ion::IonReader::new(&buf[10..header_len]);
+                let mut hdr_buf = vec![0u8; header_len - 10];
+                self.reader.read_exact(&mut hdr_buf)?;
+                let mut reader = crate::ion::IonReader::new(&hdr_buf);
                 let hdr_val = reader.decode_value().map_err(|e| {
                     ContainerError::CorruptedHeader(format!("Malformed ENTY Ion header: {}", e))
                 })?;
@@ -401,10 +408,17 @@ impl KfxContainer {
                     }
                 }
             }
-            buf.drain(..header_len);
-            return Ok(buf);
+            let payload_len = chunk_len - header_len;
+            let mut payload = vec![0u8; payload_len];
+            self.reader.read_exact(&mut payload)?;
+            return Ok(payload);
         }
 
+        let mut buf = vec![0u8; chunk_len];
+        buf[..peek_len].copy_from_slice(&prefix[..peek_len]);
+        if chunk_len > peek_len {
+            self.reader.read_exact(&mut buf[peek_len..])?;
+        }
         Ok(buf)
     }
 
@@ -537,6 +551,8 @@ impl KfxContainer {
                 ContainerError::CorruptedHeader("Container header_length overflow".into())
             })?;
 
+        let start_pos = writer.stream_position()?;
+
         // Write Fixed 18-byte CONT Header (<4sHIII)
         writer.write_all(KFX_MAGIC)?;
         writer.write_u16::<LittleEndian>(2)?; // version 2
@@ -572,8 +588,8 @@ impl KfxContainer {
             writer.write_all(&ent.data)?;
         }
 
-        let total_size = writer.stream_position()?;
-        Ok(total_size)
+        let end_pos = writer.stream_position()?;
+        Ok(end_pos.saturating_sub(start_pos))
     }
 }
 

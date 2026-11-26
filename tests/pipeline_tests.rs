@@ -926,3 +926,119 @@ fn test_pipeline_p1_nov24_end_to_end_assets_collisions_utf16_list_images_and_nav
         .validate_container()
         .expect("End-to-end KFX container must pass full preflight validation");
 }
+
+#[test]
+fn test_pipeline_content_type_typed_builder_and_lossy_sanitization() {
+    use kfx_converter::{ContentType, IonReader, IonValue, symbol_id};
+
+    fn extract_cde_content_type(kfx_path: &std::path::Path) -> String {
+        let mut container = KfxContainer::open(kfx_path).expect("Output KFX must open cleanly");
+        let sym_book_meta = symbol_id("book_metadata").unwrap_or(490);
+        let sym_categorised = symbol_id("categorised_metadata").unwrap_or(491);
+        let sym_metadata = symbol_id("metadata").unwrap_or(258);
+        let sym_key = symbol_id("key").unwrap_or(492);
+        let sym_val = symbol_id("value").unwrap_or(307);
+
+        let chunk = container
+            .chunks
+            .iter()
+            .find(|c| c.chunk_type == sym_book_meta)
+            .cloned()
+            .expect("$490 book_metadata chunk must exist");
+        let data = container.read_chunk(&chunk).unwrap();
+        let vals = IonReader::new(&data).decode_all().unwrap();
+        if let IonValue::Struct(root) = &vals[0]
+            && let Some((_, IonValue::List(categories))) =
+                root.iter().find(|(k, _)| *k == sym_categorised)
+        {
+            for cat in categories {
+                if let IonValue::Struct(cat_fields) = cat
+                    && let Some((_, IonValue::List(entries))) =
+                        cat_fields.iter().find(|(k, _)| *k == sym_metadata)
+                {
+                    for entry in entries {
+                        if let IonValue::Struct(ef) = entry {
+                            let key =
+                                ef.iter()
+                                    .find(|(k, _)| *k == sym_key)
+                                    .and_then(|(_, v)| match v {
+                                        IonValue::String(s) => Some(s.as_str()),
+                                        _ => None,
+                                    });
+                            if key == Some("cde_content_type")
+                                && let Some((_, IonValue::String(val))) =
+                                    ef.iter().find(|(k, _)| *k == sym_val)
+                            {
+                                return val.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        panic!("cde_content_type entry not found in $490 book_metadata");
+    }
+
+    let temp = common::temp_dir();
+    let epub_path = common::create_minimal_epub(
+        temp.path(),
+        "content_type_test.epub",
+        "Content Type Test Book",
+        "en",
+        false,
+    );
+
+    // 1. Typed builder `with_content_type(ContentType::Pdoc)` emits canonical "PDOC"
+    let pdoc_kfx = temp.path().join("pdoc_book.kfx");
+    let pdoc_log = temp.path().join("pdoc.log");
+    let mut pdoc_opts = ConversionOptions::default().with_content_type(ContentType::Pdoc);
+    pdoc_opts.word_wise = false;
+    pdoc_opts.auto_deploy = false;
+    ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&pdoc_kfx),
+        &pdoc_opts,
+        Some(&pdoc_log),
+        None::<fn(f32, &str)>,
+    )
+    .expect("PDOC pipeline conversion must succeed");
+
+    assert_eq!(extract_cde_content_type(&pdoc_kfx), "PDOC");
+    let pdoc_log_text = std::fs::read_to_string(&pdoc_log).unwrap();
+    assert!(
+        pdoc_log_text.contains("content_type=PDOC"),
+        "PDOC log must contain canonical content_type=PDOC: {}",
+        pdoc_log_text
+    );
+
+    // 2. Arbitrary invalid content_type string sanitizes cleanly to "EBOK" in both KFX & logs
+    let evil_kfx = temp.path().join("sanitized_book.kfx");
+    let evil_log = temp.path().join("sanitized.log");
+    let evil_opts = ConversionOptions {
+        content_type: "../../evil".to_string(),
+        word_wise: false,
+        auto_deploy: false,
+        device_root: None,
+    };
+    ConversionPipeline::run_with_log_path(
+        &epub_path,
+        Some(&evil_kfx),
+        &evil_opts,
+        Some(&evil_log),
+        None::<fn(f32, &str)>,
+    )
+    .expect("Sanitized pipeline conversion must succeed");
+
+    assert_eq!(extract_cde_content_type(&evil_kfx), "EBOK");
+    let evil_log_text = std::fs::read_to_string(&evil_log).unwrap();
+    assert!(
+        evil_log_text.contains("content_type=EBOK"),
+        "Sanitized log must contain canonical content_type=EBOK: {}",
+        evil_log_text
+    );
+    assert!(
+        !evil_log_text.contains("../../evil"),
+        "Sanitized log must not echo raw invalid content_type: {}",
+        evil_log_text
+    );
+}

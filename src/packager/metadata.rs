@@ -395,7 +395,10 @@ impl<'a> KfxPackager<'a> {
             ]),
             IonValue::Struct(vec![
                 (sym_key, IonValue::String("cde_content_type".to_string())),
-                (sym_val, IonValue::String(self.content_type.to_string())),
+                (
+                    sym_val,
+                    IonValue::String(self.content_type.as_str().to_string()),
+                ),
             ]),
             IonValue::Struct(vec![
                 (sym_key, IonValue::String("ASIN".to_string())),

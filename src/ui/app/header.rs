@@ -47,7 +47,7 @@ impl KindleStudio {
                             .bg(Theme::bg_card_hover())
                             .text_xs()
                             .text_color(Theme::text_muted())
-                            .child("Native GPUI v0.1"),
+                            .child(concat!("Native GPUI v", env!("CARGO_PKG_VERSION"))),
                     )
                     .children(self.status_message.as_ref().map(|(msg, is_err)| {
                         div()

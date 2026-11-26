@@ -12,7 +12,7 @@ use app::KindleStudio;
 fn main() {
     Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
-        cx.open_window(
+        if let Err(err) = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -22,7 +22,9 @@ fn main() {
                 ..Default::default()
             },
             |_window, cx| cx.new(KindleStudio::new),
-        )
-        .unwrap();
+        ) {
+            eprintln!("Failed to open Kindle Studio window: {err}");
+            cx.quit();
+        }
     });
 }

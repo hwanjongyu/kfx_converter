@@ -23,7 +23,7 @@ impl CliContentType {
 #[derive(Parser, Debug)]
 #[command(name = "kfx-conv")]
 #[command(author = "hwanjongyu")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "High-performance native EPUB to Amazon KFX converter", long_about = None)]
 struct Args {
     /// Input EPUB or KFX file path
@@ -114,7 +114,7 @@ where
 fn main() {
     let args = Args::parse_from(normalize_cli_args(std::env::args_os()));
 
-    println!("=== Rust KFX Converter v0.1.0 ===");
+    println!("=== Rust KFX Converter v{} ===", env!("CARGO_PKG_VERSION"));
     println!("Target: {:?}", args.input);
 
     if args.inspect {
@@ -136,8 +136,8 @@ fn main() {
                     let type_name =
                         kfx_converter::symbol_name(c.chunk_type as u64).unwrap_or("unknown");
                     println!(
-                        "    [{}] ID: {}, Type: {} ($), Offset: {}, Length: {} bytes",
-                        i, c.entity_id, type_name, c.offset, c.length
+                        "    [{}] ID: {}, Type: {} (${}), Offset: {}, Length: {} bytes",
+                        i, c.entity_id, type_name, c.chunk_type, c.offset, c.length
                     );
                 }
                 if container.chunks.len() > 10 {

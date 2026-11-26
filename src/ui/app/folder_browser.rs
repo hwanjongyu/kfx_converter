@@ -356,10 +356,17 @@ impl KindleStudio {
                                                 indices.len(),
                                                 cx.processor(move |this, range: std::ops::Range<usize>, _window, _cx| {
                                                     range
-                                                        .map(|r_idx| {
-                                                             let item_idx = indices[r_idx];
-                                                             let item = &this.folder_state.items[item_idx];
-                                                             Self::render_epub_card(item, &view, actions_disabled)
+                                                        .filter_map(|r_idx| {
+                                                            let &item_idx = indices.get(r_idx)?;
+                                                            let item = this
+                                                                .folder_state
+                                                                .items
+                                                                .get(item_idx)?;
+                                                            Some(Self::render_epub_card(
+                                                                item,
+                                                                &view,
+                                                                actions_disabled,
+                                                            ))
                                                         })
                                                         .collect()
                                                 }),

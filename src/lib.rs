@@ -22,7 +22,8 @@ pub use enhancements::{
 pub use epub::{EpubError, EpubReader};
 pub use ion::{IonError, IonReader, IonValue, IonWriter, encode_varuint, wrap_enty_header};
 pub use ir::{
-    BlockStyle, BookIR, DropCapStyle, FontSizeBucket, SpanStyles, TextAlignment, TextFormatFlags,
+    BlockStyle, BookIR, ContentType, DropCapStyle, FontSizeBucket, SpanStyles, TextAlignment,
+    TextFormatFlags,
 };
 pub use packager::{KfxPackager, PackagerError};
 pub use pipeline::{

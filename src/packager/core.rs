@@ -9,7 +9,7 @@ use super::error::PackagerError;
 use super::symbols::*;
 use super::types::AllocatedResourceSym;
 use crate::container::{KfxContainer, KfxEntity};
-use crate::ir::{BookIR, Section};
+use crate::ir::{BookIR, ContentType, Section};
 
 /// Packages a `BookIR` into an Amazon KFX container.
 pub struct KfxPackager<'a> {
@@ -17,7 +17,7 @@ pub struct KfxPackager<'a> {
     pub(crate) sections: Cow<'a, [Section]>,
     pub(crate) toc: Vec<crate::ir::TocItem>,
     pub(crate) page_list: Vec<crate::ir::PageEntry>,
-    pub(crate) content_type: &'a str,
+    pub(crate) content_type: ContentType,
     pub(crate) container_id: String,
     pub(crate) content_id: String,
     pub(crate) asin: String,
@@ -33,7 +33,11 @@ pub struct KfxPackager<'a> {
 }
 
 impl<'a> KfxPackager<'a> {
-    pub fn new(book: &'a BookIR, content_type: &'a str) -> Self {
+    pub fn new(book: &'a BookIR, content_type: &str) -> Self {
+        Self::new_with_content_type(book, ContentType::from_lossy(content_type))
+    }
+
+    pub fn new_with_content_type(book: &'a BookIR, content_type: ContentType) -> Self {
         let seed = if !book.metadata.identifier.is_empty() {
             book.metadata.identifier.clone()
         } else {
@@ -95,6 +99,10 @@ impl<'a> KfxPackager<'a> {
 
     pub fn asin(&self) -> &str {
         &self.asin
+    }
+
+    pub fn content_type(&self) -> ContentType {
+        self.content_type
     }
 
     pub(crate) fn alloc_eid(&mut self) -> u32 {
@@ -351,5 +359,30 @@ mod tests {
             parent_err
         );
         assert!(!real_dir.join("child.kfx").exists());
+    }
+
+    #[test]
+    fn test_packager_content_type_constructors_and_lossy_sanitization() {
+        let book = BookIR::default();
+        assert_eq!(
+            KfxPackager::new(&book, "pdoc").content_type(),
+            ContentType::Pdoc
+        );
+        assert_eq!(
+            KfxPackager::new(&book, "  PDOC  ").content_type(),
+            ContentType::Pdoc
+        );
+        assert_eq!(
+            KfxPackager::new(&book, "../../evil").content_type(),
+            ContentType::Ebok
+        );
+        assert_eq!(
+            KfxPackager::new_with_content_type(&book, ContentType::Pdoc).content_type(),
+            ContentType::Pdoc
+        );
+        assert_eq!(
+            KfxPackager::new_with_content_type(&book, ContentType::Ebok).content_type(),
+            ContentType::Ebok
+        );
     }
 }
