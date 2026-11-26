@@ -1834,9 +1834,65 @@ fn test_packager_metadata_completeness_and_no_cover_omits_cover_landmark() {
         .iter()
         .find(|e| e.chunk_type == SYM_BOOK_METADATA)
         .expect("$490 missing");
+    assert_eq!(KfxPackager::normalize_bcp47_tag("en_us"), "en-US");
     assert!(meta_ent.data.windows(12).any(|w| w == b"Alice Author"));
     assert!(meta_ent.data.windows(12).any(|w| w == b"Bob Coauthor"));
-    assert!(meta_ent.data.windows(5).any(|w| w == b"en-US"));
+    assert!(
+        !meta_ent.data.windows(5).any(|w| w == b"en-US"),
+        "$490 book_metadata must NOT emit regional English tag 'en-US'"
+    );
+    let decoded_meta = crate::ion::IonReader::new(&meta_ent.data)
+        .decode_all()
+        .expect("Decode $490 book_metadata");
+    let IonValue::Struct(root_fields) = &decoded_meta[0] else {
+        panic!("Expected struct root in $490");
+    };
+    let Some((_, IonValue::List(categories))) = root_fields
+        .iter()
+        .find(|(k, _)| *k == KfxSymbol::CategorisedMetadata as u32)
+    else {
+        panic!("Expected categorised_metadata list in $490");
+    };
+    let title_meta_entries = categories
+        .iter()
+        .find_map(|cat| {
+            let IonValue::Struct(fields) = cat else {
+                return None;
+            };
+            let is_title_cat = fields.iter().any(|(k, v)| {
+                *k == KfxSymbol::Category as u32
+                    && matches!(v, IonValue::String(s) if s == "kindle_title_metadata")
+            });
+            if !is_title_cat {
+                return None;
+            }
+            fields.iter().find_map(|(k, v)| {
+                if *k == KfxSymbol::Metadata as u32
+                    && let IonValue::List(items) = v
+                {
+                    Some(items)
+                } else {
+                    None
+                }
+            })
+        })
+        .expect("kindle_title_metadata category missing from $490");
+    let has_collapsed_en_language = title_meta_entries.iter().any(|entry| {
+        let IonValue::Struct(fields) = entry else {
+            return false;
+        };
+        let is_language_key = fields.iter().any(|(k, v)| {
+            *k == KfxSymbol::Key as u32 && matches!(v, IonValue::String(s) if s == "language")
+        });
+        let is_en_val = fields.iter().any(|(k, v)| {
+            *k == KfxSymbol::Value as u32 && matches!(v, IonValue::String(s) if s == "en")
+        });
+        is_language_key && is_en_val
+    });
+    assert!(
+        has_collapsed_en_language,
+        "$490 kindle_title_metadata must contain key 'language' with value 'en'"
+    );
     assert!(meta_ent.data.windows(12).any(|w| w == b"Kindle Press"));
     assert!(meta_ent.data.windows(10).any(|w| w == b"2026-01-15"));
     assert!(meta_ent.data.windows(13).any(|w| w == b"9780123456789"));
@@ -4801,3 +4857,154 @@ fn test_packager_content_features_skips_storyline_decode_when_sections_present()
     assert!(keys_true.iter().any(|k| k == "yj_table"));
     assert!(keys_true.iter().any(|k| k == "yj_table_viewer"));
 }
+
+/// Decodes `$490 book_metadata` (`kindle_title_metadata`) and returns the string value for `key`.
+fn extract_kindle_title_metadata_string(entities: &[KfxEntity], target_key: &str) -> Option<String> {
+    let meta_ent = entities
+        .iter()
+        .find(|e| e.chunk_type == SYM_BOOK_METADATA)
+        .expect("$490 book_metadata entity missing");
+    let decoded = crate::ion::IonReader::new(&meta_ent.data)
+        .decode_all()
+        .expect("Decode $490 book_metadata");
+    let IonValue::Struct(root_fields) = &decoded[0] else {
+        panic!("Expected struct root in $490");
+    };
+    let Some((_, IonValue::List(categories))) = root_fields
+        .iter()
+        .find(|(k, _)| *k == KfxSymbol::CategorisedMetadata as u32)
+    else {
+        panic!("Expected categorised_metadata list in $490");
+    };
+    let title_meta_entries = categories
+        .iter()
+        .find_map(|cat| {
+            let IonValue::Struct(fields) = cat else {
+                return None;
+            };
+            let is_title_cat = fields.iter().any(|(k, v)| {
+                *k == KfxSymbol::Category as u32
+                    && matches!(v, IonValue::String(s) if s == "kindle_title_metadata")
+            });
+            if !is_title_cat {
+                return None;
+            }
+            fields.iter().find_map(|(k, v)| {
+                if *k == KfxSymbol::Metadata as u32
+                    && let IonValue::List(items) = v
+                {
+                    Some(items)
+                } else {
+                    None
+                }
+            })
+        })
+        .expect("kindle_title_metadata category missing from $490");
+
+    title_meta_entries.iter().find_map(|entry| {
+        let IonValue::Struct(fields) = entry else {
+            return None;
+        };
+        let key_matches = fields.iter().any(|(k, v)| {
+            *k == KfxSymbol::Key as u32 && matches!(v, IonValue::String(s) if s == target_key)
+        });
+        if !key_matches {
+            return None;
+        }
+        fields.iter().find_map(|(k, v)| {
+            if *k == KfxSymbol::Value as u32
+                && let IonValue::String(s) = v
+            {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+#[test]
+fn test_kindle_metadata_language_collapses_english_and_preserves_non_english() {
+    let english_cases = [
+        "",
+        "  ",
+        "en",
+        "EN",
+        "en-US",
+        "en_US",
+        "EN-CA",
+        "en-GB",
+        "en-AU",
+        "en-Latn-US",
+        "eng",
+        "ENG-US",
+    ];
+    for raw in english_cases {
+        assert_eq!(
+            KfxPackager::kindle_metadata_language(raw),
+            "en",
+            "Expected English tag {:?} to collapse to 'en'",
+            raw
+        );
+    }
+
+    let non_english_cases = [
+        ("zh_hans_cn", "zh-Hans-CN"),
+        ("pt_br", "pt-BR"),
+        ("fr-ca", "fr-CA"),
+        ("ko", "ko"),
+        ("ja", "ja"),
+    ];
+    for (raw, expected) in non_english_cases {
+        assert_eq!(
+            KfxPackager::kindle_metadata_language(raw),
+            expected,
+            "Expected non-English tag {:?} to normalize to {:?}",
+            raw,
+            expected
+        );
+    }
+}
+
+#[test]
+fn test_book_metadata_490_language_roundtrip_english_vs_non_english() {
+    let cases = [("en-US", "en"), ("EN-CA", "en"), ("pt_br", "pt-BR")];
+
+    for (raw_lang, expected_lang) in cases {
+        let mut book = BookIR::default();
+        book.metadata.title = format!("Language Test ({raw_lang})");
+        book.metadata.creators = vec!["Test Author".to_string()];
+        book.metadata.language = raw_lang.to_string();
+        book.sections.push(Section {
+            id: "sec1".to_string(),
+            title: "Chapter 1".to_string(),
+            blocks: vec![Block::Paragraph {
+                id: "p1".to_string(),
+                spans: vec![TextSpan {
+                    text: "Sample body text.".to_string(),
+                    style: None,
+                    anchor_id: None,
+                    href: None,
+                    ruby: None,
+                }],
+                style: None,
+            }],
+        });
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let mut buffer = Cursor::new(Vec::new());
+        let written = packager
+            .package(&mut buffer)
+            .expect("Minimal book packaging must succeed");
+        assert!(written > 0);
+
+        let actual_lang = extract_kindle_title_metadata_string(&packager.entities, "language")
+            .expect("$490 kindle_title_metadata must contain 'language'");
+        assert_eq!(
+            actual_lang, expected_lang,
+            "$490 language mismatch for input {:?}",
+            raw_lang
+        );
+    }
+}
+

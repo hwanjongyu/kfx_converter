@@ -325,6 +325,22 @@ impl<'a> KfxPackager<'a> {
         normalized.join("-")
     }
 
+    /// Normalizes a language tag for KFX `$490 book_metadata` (`kindle_title_metadata`).
+    ///
+    /// Kindle OS `KPPMainApp` queries `/mnt/us/system/kll/kll.<$490 language>.en.klld` for
+    /// Word Wise definitions, where only `kll.en.en.klld` exists on device; collapsing
+    /// English subtags (`"en"`, `"eng"`) to `"en"` prevents missing-dictionary failures
+    /// while preserving normalized BCP-47 tags for non-English languages.
+    pub(crate) fn kindle_metadata_language(raw: &str) -> String {
+        let bcp47 = Self::normalize_bcp47_tag(raw);
+        let primary = bcp47.split('-').next().unwrap_or("");
+        if matches!(primary, "en" | "eng") {
+            "en".to_string()
+        } else {
+            bcp47
+        }
+    }
+
     pub(crate) fn extract_isbn(identifier: &str) -> Option<(String, bool)> {
         let trimmed = identifier.trim();
         let stripped = trimmed
@@ -363,7 +379,7 @@ impl<'a> KfxPackager<'a> {
         let sym_key = KfxSymbol::Key as u32;
         let sym_val = KfxSymbol::Value as u32;
 
-        let lang = Self::normalize_bcp47_tag(&self.book.metadata.language);
+        let lang = Self::kindle_metadata_language(&self.book.metadata.language);
 
         let mut title_metadata = vec![IonValue::Struct(vec![
             (sym_key, IonValue::String("title".to_string())),

@@ -237,6 +237,28 @@ When testing or re-deploying books via USB, Kindle OS frequently caches previous
 > If a book was previously opened with a missing or invalid `.kll` file, the Kindle caches the failed `CacheMiss` state in `*.yjr`. 
 > Subsequent updates to `.kll` will **not** display on screen until the stale `*.yjf` and `*.yjr` files are deleted from the `.sdr` directory.
 
+### 7.5 English `$490 book_metadata` Language Tag Invariant (`language = "en"`)
+
+Kindle OS `KPPMainApp` (`WordWisePlugin`) resolves **both** the book's sidecar database and the Kindle system master dictionary path directly from the `$490 book_metadata` `"language"` string:
+1. Companion sidecar: `LanguageLayer.<$490 language>.<ASIN>.kll`
+2. System master dictionary: `/mnt/us/system/kll/kll.<$490 language>.en.klld`
+
+Observed hardware log failure ([`logs/all_system_logs_as_of_Mon_Oct_26_22.53.08_ADT_2026.txt`](../logs/all_system_logs_as_of_Mon_Oct_26_22.53.08_ADT_2026.txt#L253925-L253927)):
+```text
+KPPMainApp: [WordWisePlugin:ERROR] Database /mnt/us/system/kll/kll.EN-CA.en.klld does not exist
+```
+
+- **The Problem**: Kindle OS only ships `/mnt/us/system/kll/kll.en.en.klld`. When an English EPUB carries a regional tag (e.g., `en-US`, `EN-CA`, `en-GB`), emitting that regional tag into `$490` creates a deceptive partial-success state: because `SdrDeployer` deploys matching `LanguageLayer.en-US.<ASIN>.kll` aliases, the Kindle UI enables Word Wise, but `KPPMainApp` fails looking up `/mnt/us/system/kll/kll.en-US.en.klld` and renders **zero glosses on screen**.
+- **The Solution**: `KfxPackager::kindle_metadata_language` ([`src/packager/metadata.rs`](../src/packager/metadata.rs#L334-L342)) collapses all English primary subtags (`"en"` and `"eng"`, including `en-US`, `EN-CA`, `en-GB`, `en_US`, `eng-US`, and empty tags) to `"en"` in `$490 book_metadata` while preserving canonical BCP-47 formatting for non-English languages (`zh-Hans-CN`, `pt-BR`, `fr-CA`, `ko`, `ja`). Guarded by `test_kindle_metadata_language_collapses_english_and_preserves_non_english` and `test_book_metadata_490_language_roundtrip_english_vs_non_english` in [`src/packager/tests.rs`](../src/packager/tests.rs#L4927-L5009).
+
+### 7.6 SQLite 100-Byte Header Integrity for In-Memory Serialized `.kll` Files
+
+- **The Problem**: Calling `Connection::open_in_memory()` followed by `conn.serialize(rusqlite::DatabaseName::Main)` (introduced in `781e0af`) exports raw in-memory pager bytes without running SQLite's disk-commit header stamping, leaving three big-endian `u32` header fields at `0`:
+  - Bytes `24..28`: File change counter (`0` vs `4` in file-backed `.kll` databases)
+  - Bytes `92..96`: Version-valid-for number (`0` vs `4`)
+  - Bytes `96..100`: `SQLITE_VERSION_NUMBER` (`0` vs `3048000`)
+- **The Solution**: `WordWiseBuilder::normalize_sqlite_header` ([`src/enhancements/word_wise.rs`](../src/enhancements/word_wise.rs#L448-L489)) validates the 100-byte SQLite 3 magic header and stamps non-zero `change_counter = 1`, `version_valid_for = change_counter.max(1)`, and `sqlite_version = rusqlite::version_number()`, while leaving reserved bytes `72..92` zeroed. Guarded by `test_word_wise_to_bytes_sqlite_header_and_write_to_file_parity` and `test_normalize_sqlite_header_edge_cases` ([`src/enhancements/word_wise.rs`](../src/enhancements/word_wise.rs#L1578-L1782)).
+
 ---
 
 ## 8. The `kfx-converter` Implementation Architecture
@@ -272,3 +294,14 @@ To prevent visual clutter on e-ink screens, `WordWisePacingConfig` enforces typo
 - `max_glosses_per_window`: Maximum 4 glosses per 800-character sliding window (~1 screen).
 - `max_total_glosses`: 10,000 gloss ceiling per volume.
 - `frontmatter_skip_chars: 0`: Immediate hint availability starting from Page 1.
+
+---
+
+## 9. Incident & Remediation Log (For Future Review)
+
+| Date | Commit / Artifact | Symptom & Root Cause | Resolution & Regression Guard |
+| :--- | :--- | :--- | :--- |
+| **2026-10-26** | [spec-fix-word-wise-language-tag.md](specs/spec-fix-word-wise-language-tag.md) | `Theo of Golden` (`EN-CA`) logged both missing sidecar (`LanguageLayer.EN-CA.*.kll`) and missing system dict (`kll.EN-CA.en.klld`). Lowercase-only `starts_with("en")` check missed uppercase `EN-CA`. | Multi-tag `.sdr` sidecar aliases deployed in `SdrDeployer` (resolved sidecar lookup only; `.klld` mismatch later surfaced for `en-US` too). |
+| **2026-11-22** | `877ce3d` (P1) | Replacing `starts_with("en") -> "en"` with `normalize_bcp47_tag` caused all regional English EPUBs (`en-US`, `en-CA`, e.g., `Originals`, `The Three-Body Problem`) to emit regional tags into `$490 book_metadata`. Word Wise UI activated, but 0 glosses rendered because Kindle OS lacks `kll.en-US.en.klld`. | Fixed permanently on 2026-11-26 (see below). |
+| **2026-11-26** | [spec-fix-word-wise-kll-header.md](specs/spec-fix-word-wise-kll-header.md)<br/>[qa-fix-word-wise-kll-header.md](qa/qa-fix-word-wise-kll-header.md) | P2-#20 (`781e0af`) switched `WordWiseBuilder::to_bytes()` to `Connection::open_in_memory()` + `conn.serialize()`, leaving SQLite header offsets `24..28`, `92..96`, and `96..100` zeroed (`0`). | Added `WordWiseBuilder::normalize_sqlite_header` in `src/enhancements/word_wise.rs` plus header-parity and edge-case tests (`test_word_wise_to_bytes_sqlite_header_and_write_to_file_parity`, `test_normalize_sqlite_header_edge_cases`). |
+| **2026-11-26** | [spec-fix-kfx-english-language-tag.md](specs/spec-fix-kfx-english-language-tag.md)<br/>[qa-fix-kfx-english-language-tag.md](qa/qa-fix-kfx-english-language-tag.md) | Confirmed via Oct 26 Kindle logs + `Originals (1429)` repro that `$490 language = "en-US"` caused `KPPMainApp` to miss `/mnt/us/system/kll/kll.en.en.klld`. | Added `KfxPackager::kindle_metadata_language` in `src/packager/metadata.rs` (collapses `"en"` / `"eng"` to `"en"` in `$490`, keeps non-English BCP-47 tags) + regression tests asserting `"en-US"` is never emitted in `$490`. |

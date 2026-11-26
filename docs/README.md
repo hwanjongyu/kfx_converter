@@ -29,6 +29,8 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 ### 1. Word Wise & Linguistic Enhancements
 | Feature / Subsystem | Architectural Spec (Phase 1) | QA Validation Report (Phase 2) | Status |
 | :--- | :--- | :--- | :---: |
+| **KFX `$490` English Language Tag Normalization** | [spec-fix-kfx-english-language-tag.md](specs/spec-fix-kfx-english-language-tag.md) | [qa-fix-kfx-english-language-tag.md](qa/qa-fix-kfx-english-language-tag.md) | **PASS** |
+| **Word Wise `.kll` SQLite Header Normalization** | [spec-fix-word-wise-kll-header.md](specs/spec-fix-word-wise-kll-header.md) | [qa-fix-word-wise-kll-header.md](qa/qa-fix-word-wise-kll-header.md) | **PASS** |
 | **Kindle Master Vocabulary (52k+ Lemmas)** | [spec-word-wise-master-vocabulary-expansion.md](specs/spec-word-wise-master-vocabulary-expansion.md) | [qa-word-wise-master-vocabulary-expansion.md](qa/qa-word-wise-master-vocabulary-expansion.md) | **PASS** |
 | **Word Wise Priority Window Pacing** | [spec-word-wise-priority-pacing.md](specs/spec-word-wise-priority-pacing.md) | [qa-word-wise-priority-pacing.md](qa/qa-word-wise-priority-pacing.md) | **PASS** |
 | **Multi-Language Tag Alias Deployment** | [spec-fix-word-wise-language-tag.md](specs/spec-fix-word-wise-language-tag.md) | [qa-fix-word-wise-language-tag.md](qa/qa-fix-word-wise-language-tag.md) | **PASS** |
@@ -130,6 +132,7 @@ docs/
 │   ├── spec-fix-cover-image-order.md
 │   ├── spec-fix-image-rendering-symbol.md
 │   ├── spec-fix-image-rendering.md
+│   ├── spec-fix-kfx-english-language-tag.md
 │   ├── spec-fix-kindle-lockscreen-cover.md
 │   ├── spec-fix-multi-model-audit.md
 │   ├── spec-fix-navigation-crash.md
@@ -159,6 +162,7 @@ docs/
 │   ├── spec-fix-sleep-cover-and-kfx-compliance.md
 │   ├── spec-fix-toc-page-list-filtering.md
 │   ├── spec-fix-word-wise-deployment.md
+│   ├── spec-fix-word-wise-kll-header.md
 │   ├── spec-fix-word-wise-language-tag.md
 │   ├── spec-fix-word-wise-visibility.md
 │   ├── spec-gui-ux-polish.md
@@ -194,6 +198,7 @@ docs/
     ├── qa-fix-image-rendering-symbol.md
     ├── qa-fix-image-rendering.md
     ├── qa-fix-image-swap-order.md
+    ├── qa-fix-kfx-english-language-tag.md
     ├── qa-fix-kindle-lockscreen-cover.md
     ├── qa-fix-multi-model-audit.md
     ├── qa-fix-navigation-crash.md
@@ -223,6 +228,7 @@ docs/
     ├── qa-fix-sleep-cover-and-kfx-compliance.md
     ├── qa-fix-toc-page-list-filtering.md
     ├── qa-fix-word-wise-deployment.md
+    ├── qa-fix-word-wise-kll-header.md
     ├── qa-fix-word-wise-language-tag.md
     ├── qa-fix-word-wise-reopen-bug.md
     ├── qa-fix-word-wise-visibility.md

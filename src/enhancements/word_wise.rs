@@ -438,7 +438,54 @@ impl WordWiseBuilder {
         let mut conn = Connection::open_in_memory()?;
         self.populate_connection(&mut conn)?;
         let data = conn.serialize(rusqlite::DatabaseName::Main)?;
-        Ok(data.to_vec())
+        let mut bytes = data.to_vec();
+        Self::normalize_sqlite_header(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Stamps missing big-endian SQLite 3 header fields (`change_counter`, `version_valid_for`,
+    /// `sqlite_version`) that `conn.serialize()` leaves zeroed in in-memory databases.
+    fn normalize_sqlite_header(bytes: &mut [u8]) -> SqlResult<()> {
+        const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+        if bytes.len() < 100 || &bytes[..16] != SQLITE_MAGIC {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Serialized SQLite buffer missing valid 100-byte SQLite 3 header",
+                )
+                .into(),
+            ));
+        }
+
+        let mut change_counter = u32::from_be_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+        if change_counter == 0 {
+            change_counter = 1;
+            bytes[24..28].copy_from_slice(&change_counter.to_be_bytes());
+        }
+
+        let version_valid_for = u32::from_be_bytes([bytes[92], bytes[93], bytes[94], bytes[95]]);
+        if version_valid_for == 0 {
+            bytes[92..96].copy_from_slice(&change_counter.max(1).to_be_bytes());
+        }
+
+        let sqlite_version = u32::from_be_bytes([bytes[96], bytes[97], bytes[98], bytes[99]]);
+        if sqlite_version == 0 {
+            let ver = u32::try_from(rusqlite::version_number())
+                .ok()
+                .filter(|&v| v > 0)
+                .ok_or_else(|| {
+                    rusqlite::Error::ToSqlConversionFailure(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Invalid rusqlite::version_number() <= 0",
+                        )
+                        .into(),
+                    )
+                })?;
+            bytes[96..100].copy_from_slice(&ver.to_be_bytes());
+        }
+
+        Ok(())
     }
 
     /// Populates tables and metadata into a SQLite connection.
@@ -1525,5 +1572,212 @@ mod tests {
             .query_row("SELECT count(*) FROM glosses;", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_word_wise_to_bytes_sqlite_header_and_write_to_file_parity() {
+        let mut builder =
+            WordWiseBuilder::new("034BE348BEAA0CDDBF568FB246A84883", "CR!PARITY", "en", "en-US", "7");
+        builder.add_gloss(10, Some(18), 1, 8435, false);
+        builder.add_gloss(50, Some(59), 2, 36391, true);
+        builder.add_gloss(120, None, 3, 99102, false);
+
+        let bytes = builder.to_bytes().expect("to_bytes must succeed");
+        assert!(
+            bytes.len() >= 4096,
+            "SQLite database must be at least one 4096-byte page"
+        );
+        assert_eq!(&bytes[..16], b"SQLite format 3\0");
+
+        let change_counter = u32::from_be_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+        assert!(change_counter >= 1, "change_counter must be >= 1");
+        assert_eq!(
+            &bytes[92..96],
+            &bytes[24..28],
+            "version_valid_for must equal change_counter"
+        );
+        let expected_sqlite_ver = u32::try_from(rusqlite::version_number())
+            .expect("rusqlite version_number must fit in u32")
+            .to_be_bytes();
+        assert_eq!(&bytes[96..100], &expected_sqlite_ver);
+        assert!(
+            bytes[72..92].iter().all(|&b| b == 0),
+            "reserved expansion area 72..92 must remain all zero"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let disk_path = temp.path().join("disk_parity.kll");
+        builder
+            .write_to_file(&disk_path)
+            .expect("write_to_file must succeed");
+        let disk_bytes = std::fs::read(&disk_path).unwrap();
+        assert!(disk_bytes.len() >= 100);
+
+        // Structural SQLite header parity between to_bytes() and write_to_file()
+        assert_eq!(&bytes[16..18], &disk_bytes[16..18], "page_size parity");
+        assert_eq!(bytes[18], disk_bytes[18], "write_ver parity");
+        assert_eq!(bytes[19], disk_bytes[19], "read_ver parity");
+
+        let disk_change_counter = u32::from_be_bytes([
+            disk_bytes[24],
+            disk_bytes[25],
+            disk_bytes[26],
+            disk_bytes[27],
+        ]);
+        assert!(change_counter > 0 && disk_change_counter > 0);
+
+        let mem_vvf = u32::from_be_bytes([bytes[92], bytes[93], bytes[94], bytes[95]]);
+        let disk_vvf = u32::from_be_bytes([
+            disk_bytes[92],
+            disk_bytes[93],
+            disk_bytes[94],
+            disk_bytes[95],
+        ]);
+        assert!(mem_vvf > 0 && disk_vvf > 0);
+        assert_eq!(mem_vvf, change_counter);
+        assert_eq!(disk_vvf, disk_change_counter);
+
+        assert_eq!(
+            &bytes[96..100],
+            &disk_bytes[96..100],
+            "sqlite_version parity"
+        );
+
+        let mem_schema_cookie =
+            u32::from_be_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]);
+        let disk_schema_cookie = u32::from_be_bytes([
+            disk_bytes[40],
+            disk_bytes[41],
+            disk_bytes[42],
+            disk_bytes[43],
+        ]);
+        assert_ne!(mem_schema_cookie, 0, "schema_cookie must be non-zero");
+        assert_eq!(mem_schema_cookie, disk_schema_cookie, "schema_cookie parity");
+
+        assert_eq!(
+            &bytes[44..48],
+            &disk_bytes[44..48],
+            "schema_format parity"
+        );
+        assert_eq!(
+            &bytes[56..60],
+            &disk_bytes[56..60],
+            "text_encoding parity"
+        );
+
+        // Write to_bytes() output to a temp file and verify SQLite integrity & payload
+        let verify_path = temp.path().join("verify_bytes.kll");
+        std::fs::write(&verify_path, &bytes).unwrap();
+        let conn = Connection::open(&verify_path).expect("re-opened .kll must be valid SQLite DB");
+
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+
+        let acr: String = conn
+            .query_row("SELECT value FROM metadata WHERE key = 'acr'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(acr, "CR!PARITY");
+
+        let rev: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'bookRevision'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rev, "7");
+
+        let dict_id: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'enDictionaryId'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dict_id, "kll.en.en");
+
+        let meta_count: i64 = conn
+            .query_row("SELECT count(*) FROM metadata", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(meta_count, 9);
+
+        let mut stmt = conn
+            .prepare("SELECT start, end, difficulty, sense_id, low_confidence FROM glosses ORDER BY start ASC")
+            .unwrap();
+        let gloss_rows: Vec<(i64, Option<i64>, i64, i64, bool)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            gloss_rows,
+            vec![
+                (10, Some(18), 1, 8435, false),
+                (50, Some(59), 2, 36391, true),
+                (120, None, 3, 99102, false),
+            ]
+        );
+
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_glosses_diff_start'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1);
+    }
+
+    #[test]
+    fn test_normalize_sqlite_header_edge_cases() {
+        // 1. Reject < 100-byte buffers
+        let mut empty = Vec::new();
+        assert!(WordWiseBuilder::normalize_sqlite_header(&mut empty).is_err());
+
+        let mut short = vec![0u8; 99];
+        short[..16].copy_from_slice(b"SQLite format 3\0");
+        assert!(WordWiseBuilder::normalize_sqlite_header(&mut short).is_err());
+
+        // 2. Reject 100+ byte buffer with corrupt magic header
+        let mut bad_magic = vec![0u8; 100];
+        bad_magic[..16].copy_from_slice(b"SQLite format 2\0");
+        assert!(WordWiseBuilder::normalize_sqlite_header(&mut bad_magic).is_err());
+
+        // 3. Non-zero change_counter = 4 with zero version_valid_for & sqlite_version
+        let mut partial = vec![0u8; 100];
+        partial[..16].copy_from_slice(b"SQLite format 3\0");
+        partial[24..28].copy_from_slice(&4u32.to_be_bytes());
+        WordWiseBuilder::normalize_sqlite_header(&mut partial)
+            .expect("partial header repair must succeed");
+
+        assert_eq!(u32::from_be_bytes([partial[24], partial[25], partial[26], partial[27]]), 4);
+        assert_eq!(u32::from_be_bytes([partial[92], partial[93], partial[94], partial[95]]), 4);
+        let expected_ver = u32::try_from(rusqlite::version_number()).unwrap();
+        assert_eq!(
+            u32::from_be_bytes([partial[96], partial[97], partial[98], partial[99]]),
+            expected_ver
+        );
+        assert!(
+            partial[72..92].iter().all(|&b| b == 0),
+            "reserved bytes 72..92 must remain untouched"
+        );
+
+        // 4. Already-populated non-zero header must be left completely untouched
+        let mut populated = vec![0u8; 100];
+        populated[..16].copy_from_slice(b"SQLite format 3\0");
+        populated[24..28].copy_from_slice(&7u32.to_be_bytes());
+        populated[92..96].copy_from_slice(&7u32.to_be_bytes());
+        populated[96..100].copy_from_slice(&3_045_000u32.to_be_bytes());
+        let expected_untouched = populated.clone();
+
+        WordWiseBuilder::normalize_sqlite_header(&mut populated)
+            .expect("already populated header must succeed");
+        assert_eq!(populated, expected_untouched);
     }
 }
