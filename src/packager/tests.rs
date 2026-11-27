@@ -1166,6 +1166,12 @@ fn test_image_rendering_storyline_and_resource_dimensions() {
 
 #[test]
 fn test_cover_image_metadata_and_template_resolution() {
+    let mut cover_buf = Vec::new();
+    let cover_img = image::RgbImage::new(2, 2);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cover_buf, 90)
+        .encode_image(&cover_img)
+        .expect("Failed to encode 2x2 baseline JPEG fixture");
+
     let mut book = BookIR::default();
     book.metadata.title = "Cover Test".to_string();
     book.metadata.cover_image_id = Some("cover_asset_id".to_string());
@@ -1174,7 +1180,7 @@ fn test_cover_image_metadata_and_template_resolution() {
         crate::ir::ResourceAsset {
             id: "cover_asset_id".to_string(),
             mime_type: "image/jpeg".to_string(),
-            data: b"\xFF\xD8\xFF\xE0MockJpegData".to_vec(),
+            data: cover_buf,
         },
     );
     book.sections.push(Section {
@@ -1241,10 +1247,13 @@ fn test_cover_image_metadata_and_template_resolution() {
         .find(|e| e.chunk_type == sym_raw_media)
         .expect("Raw media entity missing");
     assert!(
-        first_raw_media
-            .data
-            .starts_with(b"\xFF\xD8\xFF\xE0MockJpegData"),
-        "First raw media entity must be the cover image"
+        first_raw_media.data.starts_with(b"\xFF\xD8\xFF\xE0"),
+        "First raw media entity must be a baseline JFIF cover image"
+    );
+    assert_eq!(
+        crate::enhancements::CoverOptimizer::get_image_dimensions(&first_raw_media.data),
+        Some((2, 2)),
+        "Cover image must retain its 2x2 dimensions rather than falling back to 1x1 placeholder"
     );
 
     // 4. Verify section 1 was recognized as cover container ($270) with scale_fit ($326)
@@ -1600,15 +1609,36 @@ fn test_packager_font_size_cascade_child_precedence() {
 
 #[test]
 fn test_packager_emits_yj_jpg_rst_marker_content_feature() {
+    let mut base_jpeg = Vec::new();
+    let img = image::RgbImage::new(1, 1);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut base_jpeg, 90)
+        .encode_image(&img)
+        .expect("Failed to encode 1x1 baseline JPEG fixture");
+    assert!(base_jpeg.starts_with(&[0xFF, 0xD8]));
+    // Insert a valid COM marker (0xFF 0xFE, length 4, payload [0xFF, 0xD0]) right after SOI
+    let mut rst_jpeg = Vec::with_capacity(base_jpeg.len() + 6);
+    rst_jpeg.extend_from_slice(&base_jpeg[..2]);
+    rst_jpeg.extend_from_slice(&[0xFF, 0xFE, 0x00, 0x04, 0xFF, 0xD0]);
+    rst_jpeg.extend_from_slice(&base_jpeg[2..]);
+
     let mut book = BookIR::default();
     book.metadata.title = "RST Test".to_string();
-    // Insert a JPEG containing a restart marker (0xFF 0xD0)
+    book.metadata.cover_image_id = Some("cover.jpg".to_string());
+    book.resources.insert(
+        "cover.jpg".to_string(),
+        crate::ir::ResourceAsset {
+            id: "cover.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            data: base_jpeg,
+        },
+    );
+    // Insert a valid baseline content JPEG containing a restart marker sequence (0xFF 0xD0)
     book.resources.insert(
         "rst_img".to_string(),
         crate::ir::ResourceAsset {
             id: "rst_img".to_string(),
             mime_type: "image/jpeg".to_string(),
-            data: vec![0xFF, 0xD8, 0xFF, 0xD0, 0x01, 0x02],
+            data: rst_jpeg,
         },
     );
     book.sections.push(Section {
@@ -1628,6 +1658,10 @@ fn test_packager_emits_yj_jpg_rst_marker_content_feature() {
     let mut buffer = Cursor::new(Vec::new());
     let size = packager.package(&mut buffer).expect("Packaging failed");
     assert!(size > 0);
+    let syms = decode_local_symbols_from_kfx_bytes(&buffer.into_inner());
+    crate::validator::KfxPreflightValidator::new(&packager.entities, Some(&syms))
+        .validate_container()
+        .expect("Packaged container with valid RST-marker JPEG must pass preflight validation");
 
     let content_features_ent = packager
         .entities
@@ -6328,4 +6362,192 @@ fn test_stage3c_zero_link_and_no_pseudo_css_stability() {
             );
         }
     }
+}
+
+struct ExpectedRasterOutcome<'a> {
+    raw: &'a [u8],
+    fmt_sym: u32,
+    mime: &'a str,
+    dims: (i64, i64),
+}
+
+fn assert_single_raster_packaged_outcome(
+    res_id: &str,
+    mime_type: &str,
+    data: Vec<u8>,
+    is_cover: bool,
+    expected: ExpectedRasterOutcome<'_>,
+) {
+    let mut book = BookIR::default();
+    book.metadata.title = format!("Raster Test: {res_id}");
+    if is_cover {
+        book.metadata.cover_image_id = Some(res_id.to_string());
+    } else {
+        book.metadata.cover_image_id = Some("cover.jpg".to_string());
+        book.resources.insert(
+            "cover.jpg".to_string(),
+            crate::ir::ResourceAsset {
+                id: "cover.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+            },
+        );
+    }
+    book.resources.insert(
+        res_id.to_string(),
+        crate::ir::ResourceAsset {
+            id: res_id.to_string(),
+            mime_type: mime_type.to_string(),
+            data,
+        },
+    );
+    book.sections.push(Section {
+        id: "sec_1".to_string(),
+        title: "Section 1".to_string(),
+        blocks: vec![Block::Image {
+            id: "img_1".to_string(),
+            resource_id: res_id.to_string(),
+            alt: Some("Img".to_string()),
+            width: None,
+            height: None,
+            href: None,
+        }],
+    });
+
+    let mut packager = KfxPackager::new(&book, "EBOK");
+    let mut buffer = Cursor::new(Vec::new());
+    packager
+        .package(&mut buffer)
+        .expect("Packaging must succeed cleanly");
+    let syms = decode_local_symbols_from_kfx_bytes(&buffer.into_inner());
+    crate::validator::KfxPreflightValidator::new(&packager.entities, Some(&syms))
+        .validate_container()
+        .expect("Packaged container must pass preflight validation");
+
+    let expected_location = format!("resource/{res_id}");
+    let ext_164 = packager
+        .entities
+        .iter()
+        .find(|e| {
+            if e.chunk_type != KfxSymbol::ExternalResource as u32 {
+                return false;
+            }
+            let Ok(vals) = crate::ion::IonReader::new(&e.data).decode_all() else {
+                return false;
+            };
+            matches!(
+                vals.first(),
+                Some(IonValue::Struct(fields)) if fields.iter().any(|(k, v)| {
+                    *k == KfxSymbol::Location as u32 && *v == IonValue::String(expected_location.clone())
+                })
+            )
+        })
+        .expect("Target external resource entity $164 must exist");
+    let vals = crate::ion::IonReader::new(&ext_164.data)
+        .decode_all()
+        .unwrap();
+    let IonValue::Struct(fields) = &vals[0] else {
+        panic!("Expected $164 Struct");
+    };
+    assert!(fields.iter().any(|(k, v)| {
+        *k == KfxSymbol::Format as u32 && *v == IonValue::Symbol(expected.fmt_sym)
+    }));
+    assert!(fields.iter().any(|(k, v)| {
+        *k == KfxSymbol::Mime as u32 && *v == IonValue::String(expected.mime.to_string())
+    }));
+    assert!(fields.iter().any(|(k, v)| {
+        *k == KfxSymbol::ResourceWidth as u32 && *v == IonValue::Int(expected.dims.0)
+    }));
+    assert!(fields.iter().any(|(k, v)| {
+        *k == KfxSymbol::ResourceHeight as u32 && *v == IonValue::Int(expected.dims.1)
+    }));
+
+    let raw_sym_id = syms
+        .get_id(&expected_location)
+        .expect("Target raw media symbol must be interned");
+    let raw_417 = packager
+        .entities
+        .iter()
+        .find(|e| e.chunk_type == KfxSymbol::Bcrawmedia as u32 && e.entity_id == raw_sym_id)
+        .expect("Target raw media entity $417 must exist");
+    assert_eq!(raw_417.data.as_slice(), expected.raw);
+}
+
+fn placeholder_raster_outcome() -> ExpectedRasterOutcome<'static> {
+    ExpectedRasterOutcome {
+        raw: crate::enhancements::FALLBACK_PLACEHOLDER_JPEG,
+        fmt_sym: KfxSymbol::Jpg as u32,
+        mime: "image/jpeg",
+        dims: (1, 1),
+    }
+}
+
+#[test]
+fn test_packager_truncated_jpeg_falls_back_to_placeholder() {
+    assert_single_raster_packaged_outcome(
+        "trunc.jpg",
+        "image/jpeg",
+        b"\xFF\xD8\xFF\xE0TRUNC".to_vec(),
+        false,
+        placeholder_raster_outcome(),
+    );
+}
+
+#[test]
+fn test_packager_truncated_png_falls_back_to_placeholder() {
+    assert_single_raster_packaged_outcome(
+        "trunc.png",
+        "image/png",
+        b"\x89PNG\r\n\x1A\nTRUNC".to_vec(),
+        false,
+        placeholder_raster_outcome(),
+    );
+}
+
+#[test]
+fn test_packager_corrupt_header_only_jpeg_cover_falls_back_to_placeholder() {
+    assert_single_raster_packaged_outcome(
+        "corrupt_cover.jpg",
+        "image/jpeg",
+        b"\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00".to_vec(),
+        true,
+        placeholder_raster_outcome(),
+    );
+}
+
+#[test]
+fn test_packager_zero_dim_and_truncated_gif_fall_back_to_placeholder() {
+    for (id, payload) in [
+        (
+            "zero_dim.gif",
+            b"GIF89a\x00\x00\x10\x00\x00\x00\x3B".as_slice(),
+        ),
+        ("trunc.gif", b"GIF89a\x01".as_slice()),
+    ] {
+        assert_single_raster_packaged_outcome(
+            id,
+            "image/gif",
+            payload.to_vec(),
+            false,
+            placeholder_raster_outcome(),
+        );
+    }
+}
+
+#[test]
+fn test_packager_valid_gif89a_cover_is_preserved_with_dimensions() {
+    // 320 (0x0140 LE) x 240 (0x00F0 LE) valid GIF89a header + trailer
+    let gif_bytes = b"GIF89a\x40\x01\xF0\x00\x00\x00\x00\x3B".to_vec();
+    assert_single_raster_packaged_outcome(
+        "cover.gif",
+        "image/gif",
+        gif_bytes.clone(),
+        true,
+        ExpectedRasterOutcome {
+            raw: &gif_bytes,
+            fmt_sym: KfxSymbol::Gif as u32,
+            mime: "image/gif",
+            dims: (320, 240),
+        },
+    );
 }

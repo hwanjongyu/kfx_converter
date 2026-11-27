@@ -592,30 +592,47 @@ pub fn apply_conversion_outcome_to_state(
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or(local_name);
-                let already_present = device_files.iter().any(|f| f.full_path == dev_path);
-                if !already_present {
-                    let (item_title, item_author) =
-                        if let Some(item) = folder_items.iter().find(|i| i.path == target_path) {
-                            (item.title.clone(), item.author.clone())
-                        } else {
-                            (
-                                res.output_path
-                                    .file_stem()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string(),
-                                "Unknown".into(),
-                            )
-                        };
-                    let now_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let size_formatted = if res.total_bytes > 0 {
-                        format_file_size(res.total_bytes)
-                    } else {
-                        "Synced".into()
-                    };
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let size_formatted = if res.total_bytes > 0 {
+                    format_file_size(res.total_bytes)
+                } else {
+                    "Synced".into()
+                };
+                let has_word_wise = res.word_wise_glosses.is_some_and(|g| g > 0)
+                    && res.word_wise_error.is_none()
+                    && res.sdr_error.is_none();
+                let folder_meta = folder_items
+                    .iter()
+                    .find(|i| i.path == target_path)
+                    .map(|i| (i.title.clone(), i.author.clone()));
+
+                if let Some(existing) = device_files.iter_mut().find(|f| f.full_path == dev_path) {
+                    existing.name = kfx_name;
+                    existing.format = "KFX".into();
+                    existing.size_formatted = size_formatted;
+                    existing.size_bytes = res.total_bytes;
+                    existing.modified = "Just now".into();
+                    existing.modified_timestamp = now_ts;
+                    existing.has_word_wise = has_word_wise;
+                    existing.has_sdr = true;
+                    if let Some((item_title, item_author)) = folder_meta {
+                        existing.title = item_title;
+                        existing.author = item_author;
+                    }
+                } else {
+                    let (item_title, item_author) = folder_meta.unwrap_or_else(|| {
+                        (
+                            res.output_path
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                            "Unknown".into(),
+                        )
+                    });
                     device_files.push(KindleFile {
                         name: kfx_name,
                         title: item_title,
@@ -626,9 +643,7 @@ pub fn apply_conversion_outcome_to_state(
                         modified: "Just now".into(),
                         modified_timestamp: now_ts,
                         full_path: dev_path,
-                        has_word_wise: res.word_wise_glosses.is_some_and(|g| g > 0)
-                            && res.word_wise_error.is_none()
-                            && res.sdr_error.is_none(),
+                        has_word_wise,
                         has_sdr: true,
                     });
                 }
@@ -2012,5 +2027,122 @@ mod tests {
         assert!(status_msg.as_ref().is_some_and(|(m, is_err)| *is_err
             && m.contains("Sidecar (.sdr):")
             && m.contains("read-only volume")));
+    }
+
+    #[test]
+    fn test_apply_conversion_outcome_updates_existing_device_file_in_place() {
+        let epub_path = PathBuf::from("/books/Dune.epub");
+        let dev_path = PathBuf::from("/kindle/documents/Dune.kfx");
+        let mut tasks = vec![ConversionTask {
+            id: 1,
+            filename: "Dune.epub".into(),
+            file_size_str: "1 MB".into(),
+            status: TaskStatus::Syncing,
+            progress: 0.9,
+            word_wise: true,
+        }];
+        let mut items = vec![LocalEpubItem {
+            id: 1,
+            path: epub_path.clone(),
+            filename: "Dune.epub".into(),
+            title: "New Title".into(),
+            author: "Frank Herbert".into(),
+            file_size_bytes: 1_048_576,
+            file_size_str: "1 MB".into(),
+            modified_timestamp: 100,
+            modified_str: "Just now".into(),
+            is_selected: true,
+            status: LocalEpubStatus::Processing {
+                stage: "Sync".into(),
+                progress: 90,
+            },
+        }];
+        let dev = DeviceStatus {
+            connected: true,
+            model: "Kindle".into(),
+            path: Some(PathBuf::from("/kindle/documents")),
+            root_path: Some(PathBuf::from("/kindle")),
+            used_gb: 1.0,
+            total_gb: 8.0,
+        };
+        let mut dev_files = vec![KindleFile {
+            name: "Dune.kfx".into(),
+            title: "Old Title".into(),
+            author: "Old Author".into(),
+            format: "AZW3".into(),
+            size_formatted: "512 B".into(),
+            size_bytes: 512,
+            modified: "2 days ago".into(),
+            modified_timestamp: 12345,
+            full_path: dev_path.clone(),
+            has_word_wise: false,
+            has_sdr: false,
+        }];
+        let mut status_msg = None;
+
+        // 1. Folder-item re-sync updates all fields (including title & author) in place
+        apply_conversion_outcome_to_state(
+            &mut tasks,
+            &mut items,
+            None,
+            &mut dev_files,
+            &dev,
+            &mut status_msg,
+            1,
+            &epub_path,
+            ConversionOutcome::Finished(ConversionResult {
+                output_path: PathBuf::from("/books/Dune.kfx"),
+                total_bytes: 4096,
+                synced_to_device: true,
+                synced_device_path: Some(dev_path.clone()),
+                sync_error: None,
+                word_wise_glosses: Some(42),
+                word_wise_error: None,
+                sdr_error: None,
+            }),
+        );
+        assert_eq!(dev_files.len(), 1);
+        assert_eq!(dev_files[0].full_path, dev_path);
+        assert_eq!(dev_files[0].name, "Dune.kfx");
+        assert_eq!(dev_files[0].format, "KFX");
+        assert_eq!(dev_files[0].title, "New Title");
+        assert_eq!(dev_files[0].author, "Frank Herbert");
+        assert_eq!(dev_files[0].size_bytes, 4096);
+        assert_eq!(dev_files[0].size_formatted, "4 KB");
+        assert_eq!(dev_files[0].modified, "Just now");
+        assert!(dev_files[0].modified_timestamp > 12345);
+        assert!(dev_files[0].has_word_wise);
+        assert!(dev_files[0].has_sdr);
+
+        // 2. Drag-and-drop re-sync (folder_items empty) updates metrics/flags in place while preserving title & author
+        let mut empty_items: Vec<LocalEpubItem> = Vec::new();
+        apply_conversion_outcome_to_state(
+            &mut tasks,
+            &mut empty_items,
+            None,
+            &mut dev_files,
+            &dev,
+            &mut status_msg,
+            1,
+            &epub_path,
+            ConversionOutcome::Finished(ConversionResult {
+                output_path: PathBuf::from("/books/Dune.kfx"),
+                total_bytes: 0,
+                synced_to_device: true,
+                synced_device_path: Some(dev_path.clone()),
+                sync_error: None,
+                word_wise_glosses: None,
+                word_wise_error: None,
+                sdr_error: None,
+            }),
+        );
+        assert_eq!(dev_files.len(), 1);
+        assert_eq!(dev_files[0].title, "New Title");
+        assert_eq!(dev_files[0].author, "Frank Herbert");
+        assert_eq!(dev_files[0].size_bytes, 0);
+        assert_eq!(dev_files[0].size_formatted, "Synced");
+        assert_eq!(dev_files[0].modified, "Just now");
+        assert!(!dev_files[0].has_word_wise);
+        assert!(dev_files[0].has_sdr);
     }
 }

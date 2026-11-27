@@ -723,48 +723,73 @@ impl<'a> KfxPreflightValidator<'a> {
                 });
             }
 
-            if let Some((actual_w, actual_h)) =
-                crate::enhancements::CoverOptimizer::get_image_dimensions(&raw_417.data)
-            {
-                let (actual_w_i64, actual_h_i64) = (actual_w as i64, actual_h as i64);
-                match declared_dims {
-                    Some((dw, dh)) if dw == actual_w_i64 && dh == actual_h_i64 => {}
-                    Some((dw, _)) if dw != actual_w_i64 => {
+            match crate::enhancements::CoverOptimizer::get_image_dimensions(&raw_417.data) {
+                Some((actual_w, actual_h)) => {
+                    let (actual_w_i64, actual_h_i64) = (actual_w as i64, actual_h as i64);
+                    match declared_dims {
+                        Some((dw, dh)) if dw == actual_w_i64 && dh == actual_h_i64 => {}
+                        Some((dw, _)) if dw != actual_w_i64 => {
+                            return Err(ValidationError::IllegalField {
+                                chunk_type: SYM_EXTERNAL_RESOURCE,
+                                eid: ent.entity_id,
+                                field_id: SYM_RESOURCE_WIDTH,
+                                field_name: "resource_width".to_string(),
+                                reason: format!(
+                                    "External resource ($164) resource_width ($422) is {}, but bcRawMedia ($417) header reports {}",
+                                    dw, actual_w_i64
+                                ),
+                            });
+                        }
+                        Some((_, dh)) => {
+                            return Err(ValidationError::IllegalField {
+                                chunk_type: SYM_EXTERNAL_RESOURCE,
+                                eid: ent.entity_id,
+                                field_id: SYM_RESOURCE_HEIGHT,
+                                field_name: "resource_height".to_string(),
+                                reason: format!(
+                                    "External resource ($164) resource_height ($423) is {}, but bcRawMedia ($417) header reports {}",
+                                    dh, actual_h_i64
+                                ),
+                            });
+                        }
+                        None => {
+                            return Err(ValidationError::IllegalField {
+                                chunk_type: SYM_EXTERNAL_RESOURCE,
+                                eid: ent.entity_id,
+                                field_id: SYM_RESOURCE_WIDTH,
+                                field_name: "resource_width".to_string(),
+                                reason: format!(
+                                    "External resource ($164) missing resource_width/resource_height ($422/$423) for {}x{} bcRawMedia ($417)",
+                                    actual_w_i64, actual_h_i64
+                                ),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    if declared_dims.is_none() {
                         return Err(ValidationError::IllegalField {
                             chunk_type: SYM_EXTERNAL_RESOURCE,
                             eid: ent.entity_id,
                             field_id: SYM_RESOURCE_WIDTH,
                             field_name: "resource_width".to_string(),
                             reason: format!(
-                                "External resource ($164) resource_width ($422) is {}, but bcRawMedia ($417) header reports {}",
-                                dw, actual_w_i64
+                                "External resource ($164) missing resource_width/resource_height ($422/$423) and bcRawMedia ($417) header for '{}' has no readable dimensions",
+                                self.resolve_symbol_name(*fmt_sym)
                             ),
                         });
                     }
-                    Some((_, dh)) => {
-                        return Err(ValidationError::IllegalField {
-                            chunk_type: SYM_EXTERNAL_RESOURCE,
-                            eid: ent.entity_id,
-                            field_id: SYM_RESOURCE_HEIGHT,
-                            field_name: "resource_height".to_string(),
-                            reason: format!(
-                                "External resource ($164) resource_height ($423) is {}, but bcRawMedia ($417) header reports {}",
-                                dh, actual_h_i64
-                            ),
-                        });
-                    }
-                    None => {
-                        return Err(ValidationError::IllegalField {
-                            chunk_type: SYM_EXTERNAL_RESOURCE,
-                            eid: ent.entity_id,
-                            field_id: SYM_RESOURCE_WIDTH,
-                            field_name: "resource_width".to_string(),
-                            reason: format!(
-                                "External resource ($164) missing resource_width/resource_height ($422/$423) for {}x{} bcRawMedia ($417)",
-                                actual_w_i64, actual_h_i64
-                            ),
-                        });
-                    }
+                    return Err(ValidationError::IllegalField {
+                        chunk_type: SYM_EXTERNAL_RESOURCE,
+                        eid: ent.entity_id,
+                        field_id: SYM_FORMAT,
+                        field_name: "format".to_string(),
+                        reason: format!(
+                            "External resource ($164) declares format '{}' (${}) but bcRawMedia ($417) is truncated or corrupt (unreadable dimensions)",
+                            self.resolve_symbol_name(*fmt_sym),
+                            fmt_sym
+                        ),
+                    });
                 }
             }
         }
@@ -4001,6 +4026,91 @@ mod tests {
                     ..
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn test_validator_rejects_truncated_raster_raw_media_with_or_without_dims() {
+        let encode = |val: &IonValue| {
+            let mut w = IonWriter::new();
+            w.write_bvm();
+            w.write_value(val);
+            w.into_bytes()
+        };
+
+        let mut symbols = LocalSymbols::new();
+        let res_sym = symbols.intern("res_trunc");
+        let raw_sym = symbols.intern("resource/res_trunc");
+
+        let cases: [(&str, u32, &[u8]); 3] = [
+            ("truncated JPEG", SYM_JPG, b"\xFF\xD8\xFF\xE0TRUNC"),
+            ("truncated PNG", SYM_PNG, b"\x89PNG\r\n\x1A\nTRUNC"),
+            ("0x0 GIF", SYM_GIF, b"GIF89a\x00\x00\x10\x00\x00\x00\x3B"),
+        ];
+
+        for (label, fmt_sym, raw_bytes) in cases {
+            let raw_ent = KfxEntity {
+                entity_id: raw_sym,
+                chunk_type: SYM_BC_RAW_MEDIA,
+                data: raw_bytes.to_vec(),
+            };
+
+            // 1. Without $422/$423 -> rejected on SYM_RESOURCE_WIDTH
+            let ext_no_dims = KfxEntity {
+                entity_id: res_sym,
+                chunk_type: SYM_EXTERNAL_RESOURCE,
+                data: encode(&IonValue::Struct(vec![
+                    (SYM_RESOURCE_NAME, IonValue::Symbol(res_sym)),
+                    (
+                        SYM_LOCATION,
+                        IonValue::String("resource/res_trunc".to_string()),
+                    ),
+                    (SYM_FORMAT, IonValue::Symbol(fmt_sym)),
+                ])),
+            };
+            let res_no_dims =
+                KfxPreflightValidator::new(&[ext_no_dims, raw_ent.clone()], Some(&symbols))
+                    .validate();
+            assert!(
+                matches!(
+                    res_no_dims,
+                    Err(ValidationError::IllegalField {
+                        chunk_type: SYM_EXTERNAL_RESOURCE,
+                        field_id: SYM_RESOURCE_WIDTH,
+                        ..
+                    })
+                ),
+                "{label} without $422/$423 must fail on SYM_RESOURCE_WIDTH, got {res_no_dims:?}"
+            );
+
+            // 2. With $422/$423 present -> rejected on SYM_FORMAT
+            let ext_with_dims = KfxEntity {
+                entity_id: res_sym,
+                chunk_type: SYM_EXTERNAL_RESOURCE,
+                data: encode(&IonValue::Struct(vec![
+                    (SYM_RESOURCE_NAME, IonValue::Symbol(res_sym)),
+                    (
+                        SYM_LOCATION,
+                        IonValue::String("resource/res_trunc".to_string()),
+                    ),
+                    (SYM_FORMAT, IonValue::Symbol(fmt_sym)),
+                    (SYM_RESOURCE_WIDTH, IonValue::Int(100)),
+                    (SYM_RESOURCE_HEIGHT, IonValue::Int(100)),
+                ])),
+            };
+            let res_with_dims =
+                KfxPreflightValidator::new(&[ext_with_dims, raw_ent], Some(&symbols)).validate();
+            assert!(
+                matches!(
+                    res_with_dims,
+                    Err(ValidationError::IllegalField {
+                        chunk_type: SYM_EXTERNAL_RESOURCE,
+                        field_id: SYM_FORMAT,
+                        ..
+                    })
+                ),
+                "{label} with $422/$423 must fail on SYM_FORMAT, got {res_with_dims:?}"
+            );
         }
     }
 }

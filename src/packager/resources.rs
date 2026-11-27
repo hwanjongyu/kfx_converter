@@ -24,6 +24,109 @@ pub(crate) fn is_reserved_packager_symbol(id: &str) -> bool {
             .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Returns valid `(width, height)` within safe limits for GIF payloads, since the `image`
+/// crate is compiled without the `gif` feature and cannot decode GIF pixels directly.
+fn is_valid_safe_gif(data: &[u8]) -> Option<(u32, u32)> {
+    if !(data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
+        return None;
+    }
+    let (w, h) = crate::enhancements::CoverOptimizer::get_image_dimensions(data)?;
+    if w <= crate::enhancements::cover::MAX_SAFE_IMAGE_DIMENSION
+        && h <= crate::enhancements::cover::MAX_SAFE_IMAGE_DIMENSION
+        && (w as u64) * (h as u64) <= crate::enhancements::cover::MAX_SAFE_IMAGE_PIXELS
+    {
+        Some((w, h))
+    } else {
+        None
+    }
+}
+
+fn placeholder_payload() -> (Vec<u8>, u32, String, Option<(u32, u32)>) {
+    (
+        crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
+        KfxSymbol::Jpg as u32,
+        "image/jpeg".to_string(),
+        Some((1, 1)),
+    )
+}
+
+/// Optimizes cover/content raster image payloads and enforces well-formed fallback semantics.
+/// Valid safe GIFs are preserved verbatim with header dimensions; corrupt or unsafe non-GIF
+/// rasters fall back to the 1x1 baseline JPEG placeholder.
+fn resolve_raster_payload(
+    res_id: &str,
+    data: &[u8],
+    is_cover_res: bool,
+    ext_hint: &str,
+) -> (Vec<u8>, u32, String, Option<(u32, u32)>) {
+    let (result, success_hint, label) = if is_cover_res {
+        (
+            crate::enhancements::CoverOptimizer::optimize_cover_image(
+                data,
+                crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
+            ),
+            "jpg",
+            "Cover image resource",
+        )
+    } else {
+        (
+            crate::enhancements::CoverOptimizer::optimize_content_image(
+                data,
+                crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
+            ),
+            ext_hint,
+            "Image resource",
+        )
+    };
+
+    match result {
+        Ok(opt_data) => {
+            let (_, f_sym, m_type) =
+                crate::enhancements::detect_image_format(&opt_data, success_hint);
+            (opt_data, f_sym, m_type.to_string(), None)
+        }
+        Err(crate::enhancements::CoverError::EmptyData) => {
+            eprintln!(
+                "Warning: {} '{}' is empty; substituting 1x1 placeholder JPEG.",
+                label, res_id
+            );
+            placeholder_payload()
+        }
+        Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
+            eprintln!(
+                "Warning: {} '{}' dimensions ({}x{}) exceed safe limits; substituting 1x1 placeholder JPEG.",
+                label, res_id, w, h
+            );
+            placeholder_payload()
+        }
+        Err(crate::enhancements::CoverError::LimitExceeded(reason)) => {
+            eprintln!(
+                "Warning: {} '{}' limit exceeded ({}); substituting 1x1 placeholder JPEG.",
+                label, res_id, reason
+            );
+            placeholder_payload()
+        }
+        Err(
+            crate::enhancements::CoverError::Decode(_) | crate::enhancements::CoverError::Io(_),
+        ) => {
+            if let Some((w, h)) = is_valid_safe_gif(data) {
+                (
+                    data.to_vec(),
+                    KfxSymbol::Gif as u32,
+                    "image/gif".to_string(),
+                    Some((w, h)),
+                )
+            } else {
+                eprintln!(
+                    "Warning: {} '{}' has corrupt or unrecognized bytes; substituting 1x1 placeholder JPEG.",
+                    label, res_id
+                );
+                placeholder_payload()
+            }
+        }
+    }
+}
+
 impl<'a> KfxPackager<'a> {
     /// Pre-allocates collision-free local symbols for all supported raster image resources
     /// (`$164 external_resource` and `$417 bcRawMedia`), running immediately after `build_styles`
@@ -109,7 +212,6 @@ impl<'a> KfxPackager<'a> {
         let sym_mime = KfxSymbol::Mime as u32;
         let sym_resource_width = KfxSymbol::ResourceWidth as u32;
         let sym_resource_height = KfxSymbol::ResourceHeight as u32;
-        let sym_jpg = KfxSymbol::Jpg as u32;
 
         let cover_id = self.resolve_cover_resource_id();
         let mut sorted_resources: Vec<(String, AllocatedResourceSym)> = self
@@ -128,15 +230,6 @@ impl<'a> KfxPackager<'a> {
                 _ => a_key.cmp(b_key),
             }
         });
-
-        let placeholder = || {
-            (
-                crate::enhancements::FALLBACK_PLACEHOLDER_JPEG.to_vec(),
-                sym_jpg,
-                "image/jpeg".to_string(),
-                Some((1, 1)),
-            )
-        };
 
         for (res_id, alloc) in sorted_resources {
             let Some(asset) = self.book.resources.get(&res_id) else {
@@ -157,105 +250,10 @@ impl<'a> KfxPackager<'a> {
                 .unwrap_or(asset.mime_type.as_str());
 
             // For the book cover, transcode to a Kindle-compliant baseline RGB JPEG (JFIF).
-            // For empty, oversized, limit-exceeding, or unrecognized non-raster payloads, substitute
-            // a valid 1x1 baseline placeholder JPEG rather than emitting corrupt/empty $417 chunks.
-            let (payload_data, format_sym, mime_type, forced_dims) = if is_cover_res {
-                match crate::enhancements::CoverOptimizer::optimize_cover_image(
-                    &asset.data,
-                    crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
-                ) {
-                    Ok(data) => {
-                        let (_, f_sym, m_type) =
-                            crate::enhancements::detect_image_format(&data, "jpg");
-                        (data, f_sym, m_type.to_string(), None)
-                    }
-                    Err(crate::enhancements::CoverError::EmptyData) => {
-                        eprintln!(
-                            "Warning: Cover image resource '{}' is empty; substituting 1x1 placeholder JPEG.",
-                            res_id
-                        );
-                        placeholder()
-                    }
-                    Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
-                        eprintln!(
-                            "Warning: Cover image dimensions ({}x{}) exceed safe limits; substituting 1x1 placeholder JPEG.",
-                            w, h
-                        );
-                        placeholder()
-                    }
-                    Err(crate::enhancements::CoverError::LimitExceeded(reason)) => {
-                        eprintln!(
-                            "Warning: Cover image limit exceeded ({}); substituting 1x1 placeholder JPEG.",
-                            reason
-                        );
-                        placeholder()
-                    }
-                    Err(
-                        crate::enhancements::CoverError::Decode(_)
-                        | crate::enhancements::CoverError::Io(_),
-                    ) => {
-                        if crate::enhancements::cover::has_known_raster_magic(&asset.data) {
-                            let (_, f_sym, m_type) =
-                                crate::enhancements::detect_image_format(&asset.data, ext_hint);
-                            (asset.data.clone(), f_sym, m_type.to_string(), None)
-                        } else {
-                            eprintln!(
-                                "Warning: Cover image resource '{}' has corrupt or unrecognized bytes; substituting 1x1 placeholder JPEG.",
-                                res_id
-                            );
-                            placeholder()
-                        }
-                    }
-                }
-            } else {
-                match crate::enhancements::CoverOptimizer::optimize_content_image(
-                    &asset.data,
-                    crate::enhancements::KINDLE_MAX_CONTENT_IMAGE_DIM,
-                ) {
-                    Ok(data) => {
-                        let (_, f_sym, m_type) =
-                            crate::enhancements::detect_image_format(&data, ext_hint);
-                        (data, f_sym, m_type.to_string(), None)
-                    }
-                    Err(crate::enhancements::CoverError::EmptyData) => {
-                        eprintln!(
-                            "Warning: Image resource '{}' is empty; substituting 1x1 placeholder JPEG.",
-                            res_id
-                        );
-                        placeholder()
-                    }
-                    Err(crate::enhancements::CoverError::ImageTooLarge(w, h)) => {
-                        eprintln!(
-                            "Warning: Image resource '{}' dimensions ({}x{}) exceed safe limits; substituting 1x1 placeholder JPEG.",
-                            res_id, w, h
-                        );
-                        placeholder()
-                    }
-                    Err(crate::enhancements::CoverError::LimitExceeded(reason)) => {
-                        eprintln!(
-                            "Warning: Image resource '{}' limit exceeded ({}); substituting 1x1 placeholder JPEG.",
-                            res_id, reason
-                        );
-                        placeholder()
-                    }
-                    Err(
-                        crate::enhancements::CoverError::Decode(_)
-                        | crate::enhancements::CoverError::Io(_),
-                    ) => {
-                        if crate::enhancements::cover::has_known_raster_magic(&asset.data) {
-                            let (_, f_sym, m_type) =
-                                crate::enhancements::detect_image_format(&asset.data, ext_hint);
-                            (asset.data.clone(), f_sym, m_type.to_string(), None)
-                        } else {
-                            eprintln!(
-                                "Warning: Image resource '{}' has corrupt or unrecognized bytes; substituting 1x1 placeholder JPEG.",
-                                res_id
-                            );
-                            placeholder()
-                        }
-                    }
-                }
-            };
+            // For empty, oversized, limit-exceeding, or corrupt/unrecognized non-GIF payloads,
+            // substitute a valid 1x1 baseline placeholder JPEG rather than emitting corrupt $417 chunks.
+            let (payload_data, format_sym, mime_type, forced_dims) =
+                resolve_raster_payload(&res_id, &asset.data, is_cover_res, ext_hint);
 
             let dimensions = forced_dims.or_else(|| {
                 crate::enhancements::CoverOptimizer::get_image_dimensions(&payload_data)
