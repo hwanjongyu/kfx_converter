@@ -117,12 +117,15 @@ fn ensure_safe_log_dir(parent: &Path) -> Result<(), ()> {
             {
                 crate::storage::ensure_non_symlink_dir(grandparent).map_err(|_| ())?;
             }
-            let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
+                let mut b = std::fs::DirBuilder::new();
+                b.mode(0o700);
+                b
+            };
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
             match builder.create(parent) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}

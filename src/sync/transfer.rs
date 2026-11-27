@@ -439,10 +439,13 @@ mod tests {
         std::fs::create_dir_all(&docs).unwrap();
         std::fs::create_dir_all(&src_dir).unwrap();
 
-        let mut cases = vec![("...kfx", "book"), ("..hidden.. .kfx", "_hidden")];
-        // DOS reserved filenames cannot be created as real files on Windows hosts.
-        #[cfg(not(windows))]
-        cases.push(("CON.kfx", "book_CON"));
+        let cases = [
+            ("...kfx", "book"),
+            ("..hidden.. .kfx", "_hidden"),
+            // DOS reserved filenames cannot be created as real files on Windows hosts.
+            #[cfg(not(windows))]
+            ("CON.kfx", "book_CON"),
+        ];
 
         for (src_name, expected_stem) in cases {
             let kfx_src = src_dir.join(src_name);

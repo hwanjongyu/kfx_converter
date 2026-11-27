@@ -88,6 +88,7 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 ### 8. Prioritized Defect Remediation & Audits
 | Category | Spec | QA Log | Core Issues Resolved |
 | :--- | :--- | :--- | :--- |
+| **Windows Clippy CI & `kfx-studio` Lint Remediation** | [spec-fix-windows-clippy-ci.md](specs/spec-fix-windows-clippy-ci.md) | [qa-fix-windows-clippy-ci.md](qa/qa-fix-windows-clippy-ci.md) | Windows `#[cfg]` scoping for `unused_imports`, `unused_mut`, `dead_code`, and proactive `clippy::collapsible_if` helper extraction (`strip_windows_extended_prefix`). |
 | **Nov 26 P1 Review Remediation** | [spec-fix-p1-nov26-review.md](specs/spec-fix-p1-nov26-review.md) | [qa-fix-p1-nov26-review.md](qa/qa-fix-p1-nov26-review.md) | Corrupt/truncated raster image fallback & validator dimension enforcement (`P1-1`), GPUI explorer in-place re-sync updates (`P1-2`). |
 | **Nov 26 P2 Review Remediation** | [spec-fix-p2-nov26-review.md](specs/spec-fix-p2-nov26-review.md) | [qa-fix-p2-nov26-review.md](qa/qa-fix-p2-nov26-review.md) | Symlink-parent consolidation & read-only overwrite handling (`P2-1`), path-boundary cover resolution (`P2-2`), symlink skipping in UI EPUB scanner (`P2-3`), macOS/Windows CI Clippy gate (`P2-4`). |
 | **Nov 26 P3 Review Remediation** | [spec-fix-p3-nov26-review.md](specs/spec-fix-p3-nov26-review.md) | [qa-fix-p3-nov26-review.md](qa/qa-fix-p3-nov26-review.md) | Modularization of `xhtml.rs`, `validator.rs`, and `packager/tests.rs` (`P3-1A..C`), GPUI `folder_browser.rs` pure view-model tests (`P3-1D`), and docs/comment drift cleanup (`P3-2`). |
@@ -167,6 +168,7 @@ docs/
 │   ├── spec-fix-p3-nov26-review.md
 │   ├── spec-fix-sleep-cover-and-kfx-compliance.md
 │   ├── spec-fix-toc-page-list-filtering.md
+│   ├── spec-fix-windows-clippy-ci.md
 │   ├── spec-fix-word-wise-deployment.md
 │   ├── spec-fix-word-wise-kll-header.md
 │   ├── spec-fix-word-wise-language-tag.md
@@ -237,6 +239,7 @@ docs/
     ├── qa-fix-p3-nov26-review.md
     ├── qa-fix-sleep-cover-and-kfx-compliance.md
     ├── qa-fix-toc-page-list-filtering.md
+    ├── qa-fix-windows-clippy-ci.md
     ├── qa-fix-word-wise-deployment.md
     ├── qa-fix-word-wise-kll-header.md
     ├── qa-fix-word-wise-language-tag.md

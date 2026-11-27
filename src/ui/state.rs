@@ -142,6 +142,18 @@ pub fn format_task_error(context: &str, err: &str) -> String {
     }
 }
 
+/// Strips Windows verbatim `\\?\` drive-letter prefixes (e.g. `\\?\C:\...` -> `C:\...`)
+/// while preserving `\\?\UNC\...` network paths unchanged.
+#[cfg(any(windows, test))]
+fn strip_windows_extended_prefix(canon: PathBuf) -> PathBuf {
+    let stripped = canon
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .filter(|s| !s.starts_with("UNC\\"))
+        .map(PathBuf::from);
+    stripped.unwrap_or(canon)
+}
+
 /// Resolves and validates an output folder target for launching the OS file manager.
 ///
 /// Accepts either an existing directory or an existing file (resolving to its parent directory),
@@ -177,18 +189,7 @@ pub fn resolve_output_folder_target(path: &Path) -> Result<PathBuf, String> {
     }
 
     #[cfg(windows)]
-    let resolved = {
-        let raw = canon.to_string_lossy();
-        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
-            if !stripped.starts_with("UNC\\") {
-                PathBuf::from(stripped)
-            } else {
-                canon
-            }
-        } else {
-            canon
-        }
-    };
+    let resolved = strip_windows_extended_prefix(canon);
     #[cfg(not(windows))]
     let resolved = canon;
 
@@ -2202,5 +2203,21 @@ mod tests {
 
         assert!(collect_incoming_epub_paths(&scan_root.join("link_book.epub")).is_empty());
         assert!(collect_incoming_epub_paths(&scan_root.join("link_dir")).is_empty());
+    }
+
+    #[test]
+    fn test_strip_windows_extended_prefix() {
+        assert_eq!(
+            strip_windows_extended_prefix(PathBuf::from(r"\\?\C:\Users\Books")),
+            PathBuf::from(r"C:\Users\Books")
+        );
+        assert_eq!(
+            strip_windows_extended_prefix(PathBuf::from(r"\\?\UNC\server\share\Books")),
+            PathBuf::from(r"\\?\UNC\server\share\Books")
+        );
+        assert_eq!(
+            strip_windows_extended_prefix(PathBuf::from(r"C:\Users\Books")),
+            PathBuf::from(r"C:\Users\Books")
+        );
     }
 }

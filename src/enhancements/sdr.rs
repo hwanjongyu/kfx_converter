@@ -148,7 +148,7 @@ impl SdrDeployer {
 
     /// Safely writes bytes to a file inside the `.sdr` directory, handling pre-existing read-only permissions
     /// and performing atomic file persistence via a staged temporary file (or bounded `gio copy` on GVFS MTP).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, unix))]
     fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Self::write_file_with_mtp(path, bytes, true)
     }

@@ -6,6 +6,7 @@
 use super::DEVICE_SYNC_LOCK;
 use super::types::{KindleDeviceInfo, SyncError, UnmountedKindleUsb};
 use std::path::{Path, PathBuf};
+#[cfg(any(unix, test))]
 use std::process::Command;
 
 /// Decodes `\OOO` octal escapes (e.g. `\040`, `\011`, `\012`, `\134`, and multi-byte UTF-8
