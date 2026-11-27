@@ -97,7 +97,11 @@ kfx_converter/
 │   │   ├── nav.rs                       # NCX & NAV navigation, TOC and page-list separation
 │   │   ├── opf.rs                       # OPF package parsing and manifest resolution
 │   │   ├── ruby.rs                      # Furigana state machine (RubyState)
-│   │   └── xhtml.rs                     # Quick-XML event handler, links, and block coordinator
+│   │   └── xhtml/                       # Modular Quick-XML XHTML parser & tests
+│   │       ├── mod.rs                   # Public facade, link context, and re-exports
+│   │       ├── helpers.rs               # Tag/footnote/style stacks & element classifiers
+│   │       ├── parser.rs                # XhtmlParser state machine & event handlers
+│   │       └── tests.rs                 # XHTML parser unit and regression tests
 │   ├── ir.rs                            # Book intermediate representation and section fragmenter
 │   ├── packager/                        # Modular Yellowjacket packaging engine
 │   │   ├── mod.rs                       # Packager module exports
@@ -112,9 +116,16 @@ kfx_converter/
 │   │   ├── storylines.rs                # Sections ($260), storylines ($259), anchors ($266), yj.note ($617)
 │   │   ├── styles.rs                    # Style dictionary assembly ($157, including style_link 890)
 │   │   ├── symbols.rs                   # Local symbol interning and SID allocation ($852+)
-│   │   └── tests.rs                     # Packager unit and regression tests
+│   │   └── tests/                       # Modular packager unit and regression tests
+│   │       ├── mod.rs                   # Shared test helpers & core container/ID tests
+│   │       ├── resources.rs             # Resource, cover, image, GIF, SVG & font tests
+│   │       ├── styles_and_metadata.rs   # Styles, headings, CSS, dropcaps & $490/$585 tests
+│   │       └── links_and_navigation.rs  # TOC, page-list, links, tables & footnote tests
 │   ├── pipeline.rs                      # Unified ConversionPipeline orchestrator
-│   ├── validator.rs                     # Preflight Yellowjacket entity, link, and reference validator
+│   ├── validator/                       # Preflight Yellowjacket entity, link, and reference validator
+│   │   ├── mod.rs                       # ValidationError, ValidationReport & container checks
+│   │   ├── walk.rs                      # WalkContext & recursive Ion field validators
+│   │   └── tests.rs                     # Preflight validator unit and regression tests
 │   ├── sync/                            # Universal Kindle sync subsystem
 │   │   ├── mod.rs                       # KindleSync facade and DEVICE_SYNC_LOCK
 │   │   ├── catalog.rs                   # Device library scanning and stale .sdr cleanup
@@ -260,9 +271,9 @@ Valid KFX Container:
   ContainerInfo Offset: 88 bytes
   ContainerInfo Length: 124 bytes
   Total Chunks: 14
-    [0] ID: 852, Type: bcContId ($), Offset: 212, Length: 64 bytes
-    [1] ID: 853, Type: book_metadata ($), Offset: 276, Length: 512 bytes
-    [2] ID: 854, Type: section ($), Offset: 788, Length: 4096 bytes
+    [0] ID: 852, Type: bcContId ($409), Offset: 212, Length: 64 bytes
+    [1] ID: 853, Type: book_metadata ($490), Offset: 276, Length: 512 bytes
+    [2] ID: 854, Type: section ($260), Offset: 788, Length: 4096 bytes
     ...
 ```
 

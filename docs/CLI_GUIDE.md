@@ -105,7 +105,7 @@ kfx-conv my_book.kfx -i
 
 Example Output:
 ```text
-=== Rust KFX Converter v0.1.0 ===
+=== Rust KFX Converter v0.1.1 ===
 Target: "my_book.kfx"
 Valid KFX Container:
   Version: 2
@@ -113,10 +113,10 @@ Valid KFX Container:
   ContainerInfo Offset: 88 bytes
   ContainerInfo Length: 124 bytes
   Total Chunks: 18
-    [0] ID: 852, Type: bcContId ($), Offset: 212, Length: 64 bytes
-    [1] ID: 853, Type: book_metadata ($), Offset: 276, Length: 512 bytes
-    [2] ID: 854, Type: section ($), Offset: 788, Length: 4096 bytes
-    [3] ID: 855, Type: storyline ($), Offset: 4884, Length: 1228 bytes
+    [0] ID: 852, Type: bcContId ($409), Offset: 212, Length: 64 bytes
+    [1] ID: 853, Type: book_metadata ($490), Offset: 276, Length: 512 bytes
+    [2] ID: 854, Type: section ($260), Offset: 788, Length: 4096 bytes
+    [3] ID: 855, Type: storyline ($259), Offset: 4884, Length: 1228 bytes
     ...
 ```
 

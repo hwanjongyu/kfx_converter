@@ -167,31 +167,31 @@ impl<'a> KfxPackager<'a> {
         // 6. Build resource entities ($164 external_resource and $417 bcRawMedia) before content_features ($585)
         self.build_resources(&mut symbols);
 
-        // 6. Build content features ($585) with dynamic section size, table, & emitted image flags
+        // 7. Build content features ($585) with dynamic section size, table, & emitted image flags
         self.build_content_features(&section_data);
 
-        // 7. Build navigation ($389 book_navigation and $391 nav_container)
+        // 8. Build navigation ($389 book_navigation and $391 nav_container)
         self.build_navigation(&mut symbols, &section_data);
 
-        // 8. Build metadata ($258) with synchronized reading_orders
+        // 9. Build metadata ($258) with synchronized reading_orders
         self.build_metadata(&section_data);
 
-        // 9. Build Kindle OS position maps ($609, $264, $265, $550, $621)
+        // 10. Build Kindle OS position maps ($609, $264, $265, $550, $621)
         self.build_position_maps(&section_data);
 
-        // 10. Build container_entity_map ($419) BEFORE document_data ($538) so max_id covers all symbols
+        // 11. Build container_entity_map ($419) BEFORE document_data ($538) so max_id covers all symbols
         self.build_container_entity_map(&section_data, &mut symbols);
 
-        // 11. Build document data ($538) with Decimal font_size & line_height
+        // 12. Build document data ($538) with Decimal font_size & line_height
         self.build_document_data(&section_data, &symbols);
 
-        // 12. Build $ion_symbol_table document symbols data
+        // 13. Build $ion_symbol_table document symbols data
         let doc_sym_data = symbols.to_ion_symbol_table();
 
-        // 13. Build format capabilities ($593) - emitted into container header based on actual post-optimization chunks
+        // 14. Build format capabilities ($593) - emitted into container header based on actual post-optimization chunks
         let format_caps_data = self.build_format_capabilities();
 
-        // 14. Pre-flight container and reference validation to ensure 100% integrity
+        // 15. Pre-flight container and reference validation to ensure 100% integrity
         let validator =
             crate::validator::KfxPreflightValidator::new(&self.entities, Some(&symbols));
         validator.validate_container()?;

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use super::KindleStudio;
@@ -7,6 +8,296 @@ use crate::state::{
 use crate::theme::Theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+
+/// Formats the active folder path or the empty placeholder prompt for the header card.
+fn format_folder_path_display(current_folder: Option<&Path>) -> String {
+    current_folder
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "No folder selected (Click Choose Folder)".to_string())
+}
+
+/// Returns the empty-state message for the EPUB table when no items are displayed.
+fn empty_folder_message(has_folder: bool) -> &'static str {
+    if has_folder {
+        "No EPUB books found in this folder."
+    } else {
+        "Click 'Choose Folder' above to select your EPUB directory."
+    }
+}
+
+/// Derives `(icon, detail, badge, fraction)` for the folder scan progress card and banner.
+fn scan_progress_summary(sp: &ScanProgressState) -> (&'static str, String, String, f32) {
+    match &sp.phase {
+        ScanPhase::Discovering { found_files } => (
+            "🔍",
+            "Scanning folders for EPUB files...".to_string(),
+            format!("{} found", found_files),
+            0.12,
+        ),
+        ScanPhase::ReadingMetadata {
+            processed,
+            total,
+            current_file,
+        } => {
+            let pct = sp.percentage();
+            let frac = sp.fraction().clamp(0.04, 1.0);
+            let detail = if current_file.is_empty() {
+                format!("Loading metadata: {} / {}", processed, total)
+            } else {
+                format!(
+                    "Loading metadata: {} / {} — {}",
+                    processed, total, current_file
+                )
+            };
+            ("📚", detail, format!("{}%", pct), frac)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchVisualTone {
+    Cancelled,
+    CompletedWithErrors,
+    CompletedSuccess,
+    Syncing,
+    Converting,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BatchProgressViewModel {
+    is_done: bool,
+    #[allow(dead_code)]
+    pct: u8,
+    clamped_fraction: f32,
+    tone: BatchVisualTone,
+    icon: &'static str,
+    title: String,
+    subtitle: String,
+    failed_badge: Option<String>,
+    dismiss_label: Option<&'static str>,
+}
+
+/// Builds the GPUI-independent presentation model for the bottom batch progress bar.
+fn build_batch_progress_view_model(bp: &BatchProgressState) -> BatchProgressViewModel {
+    let pct = bp.overall_percentage();
+    let clamped_fraction = bp.overall_progress().clamp(0.02, 1.0);
+    let is_cancelled = bp.is_cancelled;
+    let is_done = (bp.completed_tasks.saturating_add(bp.failed_tasks) >= bp.total_tasks
+        || is_cancelled)
+        && bp.active_tasks == 0;
+
+    let tone = if is_done && is_cancelled {
+        BatchVisualTone::Cancelled
+    } else if is_done && bp.failed_tasks > 0 {
+        BatchVisualTone::CompletedWithErrors
+    } else if is_done {
+        BatchVisualTone::CompletedSuccess
+    } else if bp.is_sync {
+        BatchVisualTone::Syncing
+    } else {
+        BatchVisualTone::Converting
+    };
+
+    let icon = match tone {
+        BatchVisualTone::Cancelled => "⏹",
+        BatchVisualTone::CompletedWithErrors => "⚠",
+        BatchVisualTone::CompletedSuccess => "✓",
+        BatchVisualTone::Syncing => "📲",
+        BatchVisualTone::Converting => "⚡",
+    };
+
+    let title = if is_done && is_cancelled {
+        format!(
+            "Batch cancelled ({} completed, {} cancelled/failed)",
+            bp.completed_tasks, bp.failed_tasks
+        )
+    } else if is_cancelled {
+        format!("Cancelling batch... ({} active remaining)", bp.active_tasks)
+    } else if is_done && bp.failed_tasks > 0 {
+        format!(
+            "Finished processing {} of {} books",
+            bp.completed_tasks, bp.total_tasks
+        )
+    } else if is_done {
+        format!(
+            "Finished processing {} books successfully!",
+            bp.completed_tasks
+        )
+    } else if bp.is_sync {
+        format!(
+            "Transferring to Kindle: {} of {} done ({}%)",
+            bp.completed_tasks, bp.total_tasks, pct
+        )
+    } else {
+        format!(
+            "Converting Books: {} of {} done ({}%)",
+            bp.completed_tasks, bp.total_tasks, pct
+        )
+    };
+
+    let subtitle = if is_done && is_cancelled {
+        "Batch conversion cancelled. Click Dismiss to close.".to_string()
+    } else if is_done {
+        "All tasks finished. Click Dismiss to close.".to_string()
+    } else if !bp.current_filename.is_empty() {
+        format!("Active: {} ({})", bp.current_filename, bp.current_stage)
+    } else {
+        bp.current_stage.clone()
+    };
+
+    let failed_badge = if bp.failed_tasks > 0 && !is_cancelled {
+        Some(format!("({} failed)", bp.failed_tasks))
+    } else {
+        None
+    };
+
+    let dismiss_label = if is_done {
+        Some(if is_cancelled {
+            "Dismiss"
+        } else {
+            "✓ Dismiss"
+        })
+    } else {
+        None
+    };
+
+    BatchProgressViewModel {
+        is_done,
+        pct,
+        clamped_fraction,
+        tone,
+        icon,
+        title,
+        subtitle,
+        failed_badge,
+        dismiss_label,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BatchToolbarCounts {
+    completed: usize,
+    active: usize,
+    waiting: usize,
+}
+
+/// Computes toolbar counters `(completed, active, waiting)` from a `BatchProgressState`.
+fn batch_toolbar_counts(bp: &BatchProgressState) -> BatchToolbarCounts {
+    let accounted = bp
+        .completed_tasks
+        .saturating_add(bp.failed_tasks)
+        .saturating_add(bp.active_tasks);
+    BatchToolbarCounts {
+        completed: bp.completed_tasks,
+        active: bp.active_tasks,
+        waiting: bp.total_tasks.saturating_sub(accounted),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusBadgeTone {
+    Neutral,
+    Queued,
+    Processing,
+    LocalReady,
+    OnKindle,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct EpubStatusPresentation {
+    tone: StatusBadgeTone,
+    label: String,
+    is_processing: bool,
+    progress_fraction: Option<f32>,
+    show_quick_convert: bool,
+}
+
+/// Derives badge styling, progress-bar fraction, and quick-convert visibility for an EPUB row.
+fn derive_epub_status_presentation(status: &LocalEpubStatus) -> EpubStatusPresentation {
+    match status {
+        LocalEpubStatus::Unconverted => EpubStatusPresentation {
+            tone: StatusBadgeTone::Neutral,
+            label: "⚪ Unconverted".to_string(),
+            is_processing: false,
+            progress_fraction: None,
+            show_quick_convert: true,
+        },
+        LocalEpubStatus::InQueue => EpubStatusPresentation {
+            tone: StatusBadgeTone::Queued,
+            label: "⏳ In Queue".to_string(),
+            is_processing: false,
+            progress_fraction: None,
+            show_quick_convert: false,
+        },
+        LocalEpubStatus::Processing { stage, progress } => EpubStatusPresentation {
+            tone: StatusBadgeTone::Processing,
+            label: format!("🟡 {} ({}%)", stage, progress),
+            is_processing: true,
+            progress_fraction: Some((*progress as f32 / 100.0).clamp(0.08, 1.0)),
+            show_quick_convert: false,
+        },
+        LocalEpubStatus::ConvertedLocal => EpubStatusPresentation {
+            tone: StatusBadgeTone::LocalReady,
+            label: "🔵 Local KFX".to_string(),
+            is_processing: false,
+            progress_fraction: None,
+            show_quick_convert: false,
+        },
+        LocalEpubStatus::OnDevice => EpubStatusPresentation {
+            tone: StatusBadgeTone::OnKindle,
+            label: "🟢 On Kindle".to_string(),
+            is_processing: false,
+            progress_fraction: None,
+            show_quick_convert: false,
+        },
+        LocalEpubStatus::Error(err) => EpubStatusPresentation {
+            tone: StatusBadgeTone::Error,
+            label: format!("Error: {}", err),
+            is_processing: false,
+            progress_fraction: None,
+            show_quick_convert: false,
+        },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FolderToolbarState {
+    selection_summary: String,
+    rescan_label: &'static str,
+    actions_disabled: bool,
+    can_batch_convert: bool,
+    can_batch_sync: bool,
+    convert_button_label: String,
+    sync_button_label: String,
+}
+
+/// Computes toolbar summary text, rescan label, and batch action enablement flags.
+fn compute_folder_toolbar_state(
+    selected_count: usize,
+    total_count: usize,
+    is_scanning: bool,
+    is_batch_active: bool,
+    eject_in_progress: bool,
+    device_connected: bool,
+) -> FolderToolbarState {
+    let actions_disabled = is_batch_active || eject_in_progress;
+    let can_batch_convert = selected_count > 0 && !actions_disabled;
+    let can_batch_sync = can_batch_convert && device_connected;
+    FolderToolbarState {
+        selection_summary: format!("{}/{} books selected", selected_count, total_count),
+        rescan_label: if is_scanning {
+            "⏳ Scanning..."
+        } else {
+            "🔄 Refresh"
+        },
+        actions_disabled,
+        can_batch_convert,
+        can_batch_sync,
+        convert_button_label: format!("⚡ Convert Selected ({})", selected_count),
+        sync_button_label: format!("📲 Transfer to Kindle ({})", selected_count),
+    }
+}
 
 impl KindleStudio {
     /// Renders the Local Folder EPUB Browser View (Path selector, Filter/Selection bar, Table, Batch actions).
@@ -23,6 +314,14 @@ impl KindleStudio {
             .filter(|i| i.is_selected)
             .count();
         let total_count = self.folder_state.items.len();
+        let toolbar = compute_folder_toolbar_state(
+            selected_count,
+            total_count,
+            self.folder_state.is_scanning,
+            self.is_batch_active(),
+            self.eject_in_progress,
+            self.device.connected,
+        );
 
         let filtered_indices = self.cached_folder_indices();
 
@@ -60,12 +359,9 @@ impl KindleStudio {
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(Theme::text_primary())
-                                    .child(
-                                        self.folder_state.current_folder
-                                            .as_ref()
-                                            .map(|p| p.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| "No folder selected (Click Choose Folder)".into())
-                                    ),
+                                    .child(format_folder_path_display(
+                                        self.folder_state.current_folder.as_deref(),
+                                    )),
                             ),
                     )
                     .child(
@@ -100,7 +396,7 @@ impl KindleStudio {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(Theme::text_primary())
                                     .cursor_pointer()
-                                    .child(if self.folder_state.is_scanning { "⏳ Scanning..." } else { "🔄 Refresh" })
+                                    .child(toolbar.rescan_label)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.rescan_folder(cx);
                                     })),
@@ -230,7 +526,7 @@ impl KindleStudio {
                     )
                     .child(
                         if let Some(ref bp) = self.folder_state.batch_progress {
-                            let waiting = bp.total_tasks.saturating_sub(bp.completed_tasks + bp.failed_tasks + bp.active_tasks);
+                            let counts = batch_toolbar_counts(bp);
                             div()
                                 .flex()
                                 .items_center()
@@ -244,7 +540,7 @@ impl KindleStudio {
                                         .text_xs()
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(Theme::accent_green())
-                                        .child(format!("✓ {} done", bp.completed_tasks)),
+                                        .child(format!("✓ {} done", counts.completed)),
                                 )
                                 .child(
                                     div()
@@ -255,7 +551,7 @@ impl KindleStudio {
                                         .text_xs()
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(Theme::accent_amber())
-                                        .child(format!("⚡ {} active", bp.active_tasks)),
+                                        .child(format!("⚡ {} active", counts.active)),
                                 )
                                 .child(
                                     div()
@@ -266,7 +562,7 @@ impl KindleStudio {
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(Theme::text_muted())
-                                        .child(format!("⏳ {} waiting", waiting)),
+                                        .child(format!("⏳ {} waiting", counts.waiting)),
                                 )
                                 .into_any_element()
                         } else {
@@ -283,7 +579,7 @@ impl KindleStudio {
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(if selected_count > 0 { Theme::text_primary() } else { Theme::text_muted() })
-                                        .child(format!("{}/{} books selected", selected_count, total_count)),
+                                        .child(toolbar.selection_summary),
                                 )
                                 .into_any_element()
                         }
@@ -338,19 +634,15 @@ impl KindleStudio {
                                                         .text_base()
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .text_color(Theme::text_muted())
-                                                        .child(
-                                                            if self.folder_state.current_folder.is_none() {
-                                                                "Click 'Choose Folder' above to select your EPUB directory."
-                                                            } else {
-                                                                "No EPUB books found in this folder."
-                                                            }
-                                                        ),
+                                                        .child(empty_folder_message(
+                                                            self.folder_state.current_folder.is_some(),
+                                                        )),
                                                 )
                                                 .into_any_element()
                                         } else {
                                             let view = cx.entity().downgrade();
                                             let indices = Arc::clone(&filtered_indices);
-                                            let actions_disabled = self.is_batch_active() || self.eject_in_progress;
+                                            let actions_disabled = toolbar.actions_disabled;
                                             uniform_list(
                                                 "folder_epub_uniform_list",
                                                 indices.len(),
@@ -389,9 +681,8 @@ impl KindleStudio {
                 if let Some(ref bp) = self.folder_state.batch_progress {
                     self.render_batch_progress_bar(bp, cx)
                 } else {
-                    let batch_busy = self.is_batch_active() || self.eject_in_progress;
-                    let can_batch_convert = selected_count > 0 && !batch_busy;
-                    let can_batch_sync = can_batch_convert && self.device.connected;
+                    let can_batch_convert = toolbar.can_batch_convert;
+                    let can_batch_sync = toolbar.can_batch_sync;
 
                     div()
                         .flex()
@@ -410,7 +701,7 @@ impl KindleStudio {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(format!("⚡ Convert Selected ({})", selected_count))
+                                .child(toolbar.convert_button_label)
                                 .when(can_batch_convert, |el| {
                                     el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
                                         this.convert_selected_epubs(false, cx);
@@ -430,7 +721,7 @@ impl KindleStudio {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(format!("📲 Transfer to Kindle ({})", selected_count))
+                                .child(toolbar.sync_button_label)
                                 .when(can_batch_sync, |el| {
                                     el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
                                         this.convert_selected_epubs(true, cx);
@@ -526,71 +817,40 @@ impl KindleStudio {
         let item_id = item.id;
         let item_path = item.path.clone();
         let is_sel = item.is_selected;
-        let is_processing = matches!(&item.status, LocalEpubStatus::Processing { .. });
-        let progress_val = if let LocalEpubStatus::Processing { progress, .. } = &item.status {
-            *progress
-        } else {
-            0
+        let status_vm = derive_epub_status_presentation(&item.status);
+
+        let status_badge = {
+            let base = div().px_2().py_0p5().rounded_md().text_xs();
+            match status_vm.tone {
+                StatusBadgeTone::Neutral => base
+                    .bg(Theme::bg_card_hover())
+                    .text_color(Theme::text_muted()),
+                StatusBadgeTone::Queued => base
+                    .bg(Theme::bg_card_hover())
+                    .border_1()
+                    .border_color(Theme::border())
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(Theme::text_muted()),
+                StatusBadgeTone::Processing => base
+                    .bg(Theme::accent_amber())
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(Theme::bg_root()),
+                StatusBadgeTone::LocalReady => base
+                    .bg(Theme::accent_blue())
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(Theme::text_primary()),
+                StatusBadgeTone::OnKindle => base
+                    .bg(Theme::accent_green())
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(Theme::bg_root()),
+                StatusBadgeTone::Error => base
+                    .bg(Theme::accent_red())
+                    .text_color(Theme::text_primary()),
+            }
+            .child(status_vm.label)
         };
 
-        let status_badge = match &item.status {
-            LocalEpubStatus::Unconverted => div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(Theme::bg_card_hover())
-                .text_xs()
-                .text_color(Theme::text_muted())
-                .child("⚪ Unconverted"),
-            LocalEpubStatus::InQueue => div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(Theme::bg_card_hover())
-                .border_1()
-                .border_color(Theme::border())
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(Theme::text_muted())
-                .child("⏳ In Queue"),
-            LocalEpubStatus::Processing { stage, progress } => div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(Theme::accent_amber())
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(Theme::bg_root())
-                .child(format!("🟡 {} ({}%)", stage, progress)),
-            LocalEpubStatus::ConvertedLocal => div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(Theme::accent_blue())
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(Theme::text_primary())
-                .child("🔵 Local KFX"),
-            LocalEpubStatus::OnDevice => div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(Theme::accent_green())
-                .text_xs()
-                .font_weight(FontWeight::BOLD)
-                .text_color(Theme::bg_root())
-                .child("🟢 On Kindle"),
-            LocalEpubStatus::Error(err) => div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(Theme::accent_red())
-                .text_xs()
-                .text_color(Theme::text_primary())
-                .child(format!("Error: {}", err)),
-        };
-
-        let quick_btn = if item.status == LocalEpubStatus::Unconverted {
+        let quick_btn = if status_vm.show_quick_convert {
             let p = item_path.clone();
             let view_quick = view.clone();
             Some(
@@ -664,20 +924,22 @@ impl KindleStudio {
                             })
                             .ok();
                     })
-                    .child(if is_processing {
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .h(px(3.0))
-                            .bg(Theme::accent_amber())
-                            .w(DefiniteLength::Fraction(
-                                (progress_val as f32 / 100.0).clamp(0.08, 1.0),
-                            ))
-                            .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    })
+                    .child(
+                        if status_vm.is_processing
+                            && let Some(progress_fraction) = status_vm.progress_fraction
+                        {
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .h(px(3.0))
+                                .bg(Theme::accent_amber())
+                                .w(DefiniteLength::Fraction(progress_fraction))
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        },
+                    )
                     // Checkbox
                     .child(
                         div()
@@ -787,31 +1049,7 @@ impl KindleStudio {
     }
 
     fn scan_progress_summary(sp: &ScanProgressState) -> (&'static str, String, String, f32) {
-        match &sp.phase {
-            ScanPhase::Discovering { found_files } => (
-                "🔍",
-                "Scanning folders for EPUB files...".to_string(),
-                format!("{} found", found_files),
-                0.12,
-            ),
-            ScanPhase::ReadingMetadata {
-                processed,
-                total,
-                current_file,
-            } => {
-                let pct = sp.percentage();
-                let frac = sp.fraction().clamp(0.04, 1.0);
-                let detail = if current_file.is_empty() {
-                    format!("Loading metadata: {} / {}", processed, total)
-                } else {
-                    format!(
-                        "Loading metadata: {} / {} — {}",
-                        processed, total, current_file
-                    )
-                };
-                ("📚", detail, format!("{}%", pct), frac)
-            }
-        }
+        scan_progress_summary(sp)
     }
 
     fn render_scan_progress_card(
@@ -1009,12 +1247,24 @@ impl KindleStudio {
         bp: &BatchProgressState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let pct = bp.overall_percentage();
-        let frac = bp.overall_progress();
-        let is_cancelled = bp.is_cancelled;
-        let is_done = (bp.completed_tasks + bp.failed_tasks >= bp.total_tasks || is_cancelled)
-            && bp.active_tasks == 0;
-        let is_sync = bp.is_sync;
+        let vm = build_batch_progress_view_model(bp);
+        let border_color = match vm.tone {
+            BatchVisualTone::Cancelled => Theme::accent_amber(),
+            BatchVisualTone::CompletedWithErrors => Theme::accent_red(),
+            BatchVisualTone::CompletedSuccess => Theme::accent_green(),
+            BatchVisualTone::Syncing | BatchVisualTone::Converting => Theme::border(),
+        };
+        let fill_color = match vm.tone {
+            BatchVisualTone::Cancelled => hsla(38.0 / 360.0, 0.92, 0.50, 0.25),
+            BatchVisualTone::CompletedWithErrors => hsla(0.0, 0.84, 0.60, 0.22),
+            BatchVisualTone::CompletedSuccess => hsla(142.0 / 360.0, 0.70, 0.45, 0.25),
+            BatchVisualTone::Syncing => hsla(160.0 / 360.0, 0.84, 0.39, 0.25),
+            BatchVisualTone::Converting => hsla(38.0 / 360.0, 0.92, 0.50, 0.25),
+        };
+        let dismiss_bg = match vm.tone {
+            BatchVisualTone::Cancelled => Theme::accent_amber(),
+            _ => Theme::accent_green(),
+        };
 
         div()
             .w_full()
@@ -1028,33 +1278,15 @@ impl KindleStudio {
                     .rounded_xl()
                     .bg(Theme::bg_card())
                     .border_1()
-                    .border_color(if is_done && is_cancelled {
-                        Theme::accent_amber()
-                    } else if is_done && bp.failed_tasks > 0 {
-                        Theme::accent_red()
-                    } else if is_done {
-                        Theme::accent_green()
-                    } else {
-                        Theme::border()
-                    })
+                    .border_color(border_color)
                     .child(
                         div()
                             .absolute()
                             .top_0()
                             .left_0()
                             .h_full()
-                            .bg(if is_done && is_cancelled {
-                                hsla(38.0 / 360.0, 0.92, 0.50, 0.25)
-                            } else if is_done && bp.failed_tasks > 0 {
-                                hsla(0.0, 0.84, 0.60, 0.22)
-                            } else if is_done {
-                                hsla(142.0 / 360.0, 0.70, 0.45, 0.25)
-                            } else if is_sync {
-                                hsla(160.0 / 360.0, 0.84, 0.39, 0.25)
-                            } else {
-                                hsla(38.0 / 360.0, 0.92, 0.50, 0.25)
-                            })
-                            .w(DefiniteLength::Fraction(frac.clamp(0.02, 1.0))),
+                            .bg(fill_color)
+                            .w(DefiniteLength::Fraction(vm.clamped_fraction)),
                     )
                     .child(
                         div()
@@ -1069,21 +1301,7 @@ impl KindleStudio {
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .child(
-                                        div()
-                                            .text_base()
-                                            .child(if is_done && is_cancelled {
-                                                "⏹"
-                                            } else if is_done && bp.failed_tasks > 0 {
-                                                "⚠"
-                                            } else if is_done {
-                                                "✓"
-                                            } else if is_sync {
-                                                "📲"
-                                            } else {
-                                                "⚡"
-                                            }),
-                                    )
+                                    .child(div().text_base().child(vm.icon))
                                     .child(
                                         div()
                                             .flex()
@@ -1099,103 +1317,397 @@ impl KindleStudio {
                                                             .text_xs()
                                                             .font_weight(FontWeight::BOLD)
                                                             .text_color(Theme::text_primary())
-                                                            .child(if is_done && is_cancelled {
-                                                                format!(
-                                                                    "Batch cancelled ({} completed, {} cancelled/failed)",
-                                                                    bp.completed_tasks,
-                                                                    bp.failed_tasks
-                                                                )
-                                                            } else if is_cancelled {
-                                                                format!(
-                                                                    "Cancelling batch... ({} active remaining)",
-                                                                    bp.active_tasks
-                                                                )
-                                                            } else if is_done && bp.failed_tasks > 0 {
-                                                                format!(
-                                                                    "Finished processing {} of {} books",
-                                                                    bp.completed_tasks,
-                                                                    bp.total_tasks
-                                                                )
-                                                            } else if is_done {
-                                                                format!("Finished processing {} books successfully!", bp.completed_tasks)
-                                                            } else if is_sync {
-                                                                format!("Transferring to Kindle: {} of {} done ({}%)", bp.completed_tasks, bp.total_tasks, pct)
-                                                            } else {
-                                                                format!("Converting Books: {} of {} done ({}%)", bp.completed_tasks, bp.total_tasks, pct)
-                                                            }),
+                                                            .child(vm.title),
                                                     )
-                                                    .child(
-                                                        if bp.failed_tasks > 0 && !is_cancelled {
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(Theme::accent_red())
-                                                                .child(format!("({} failed)", bp.failed_tasks))
-                                                                .into_any_element()
-                                                        } else {
-                                                            div().into_any_element()
-                                                        }
-                                                    ),
+                                                    .child(if let Some(badge) = vm.failed_badge {
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(Theme::accent_red())
+                                                            .child(badge)
+                                                            .into_any_element()
+                                                    } else {
+                                                        div().into_any_element()
+                                                    }),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
                                                     .text_color(Theme::text_muted())
-                                                    .child(if is_done && is_cancelled {
-                                                        "Batch conversion cancelled. Click Dismiss to close.".to_string()
-                                                    } else if is_done {
-                                                        "All tasks finished. Click Dismiss to close.".to_string()
-                                                    } else if !bp.current_filename.is_empty() {
-                                                        format!("Active: {} ({})", bp.current_filename, bp.current_stage)
-                                                    } else {
-                                                        bp.current_stage.clone()
-                                                    }),
+                                                    .child(vm.subtitle),
                                             ),
                                     ),
                             )
-                            .child(
-                                if is_done {
-                                    div()
-                                        .id("btn_batch_dismiss")
-                                        .cursor_pointer()
-                                        .px_3()
-                                        .py_1p5()
-                                        .rounded_lg()
-                                        .bg(if is_cancelled {
-                                            Theme::accent_amber()
-                                        } else {
-                                            Theme::accent_green()
-                                        })
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(Theme::bg_root())
-                                        .child(if is_cancelled { "Dismiss" } else { "✓ Dismiss" })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.folder_state.batch_progress = None;
-                                            cx.notify();
-                                        }))
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .id("btn_batch_cancel")
-                                        .cursor_pointer()
-                                        .px_3()
-                                        .py_1p5()
-                                        .rounded_lg()
-                                        .bg(Theme::bg_card_hover())
-                                        .border_1()
-                                        .border_color(Theme::border())
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(Theme::accent_red())
-                                        .child("⏹ Cancel")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.cancel_batch_conversion(cx);
-                                        }))
-                                        .into_any_element()
-                                }
-                            ),
+                            .child(if vm.is_done {
+                                div()
+                                    .id("btn_batch_dismiss")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded_lg()
+                                    .bg(dismiss_bg)
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::bg_root())
+                                    .child(vm.dismiss_label.unwrap_or("Dismiss"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.folder_state.batch_progress = None;
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id("btn_batch_cancel")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded_lg()
+                                    .bg(Theme::bg_card_hover())
+                                    .border_1()
+                                    .border_color(Theme::border())
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(Theme::accent_red())
+                                    .child("⏹ Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_batch_conversion(cx);
+                                    }))
+                                    .into_any_element()
+                            }),
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BatchProgressState, BatchToolbarCounts, BatchVisualTone, LocalEpubStatus, ScanPhase,
+        ScanProgressState, StatusBadgeTone, batch_toolbar_counts, build_batch_progress_view_model,
+        compute_folder_toolbar_state, derive_epub_status_presentation, empty_folder_message,
+        format_folder_path_display, scan_progress_summary,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_format_folder_path_display_and_empty_messages() {
+        assert_eq!(
+            format_folder_path_display(None),
+            "No folder selected (Click Choose Folder)"
+        );
+        let sample_path = PathBuf::from("/tmp/ebooks/library");
+        assert_eq!(
+            format_folder_path_display(Some(&sample_path)),
+            "/tmp/ebooks/library"
+        );
+        assert_eq!(
+            empty_folder_message(false),
+            "Click 'Choose Folder' above to select your EPUB directory."
+        );
+        assert_eq!(
+            empty_folder_message(true),
+            "No EPUB books found in this folder."
+        );
+    }
+
+    #[test]
+    fn test_scan_progress_summary_discovering_and_reading_metadata() {
+        let discovering = ScanProgressState {
+            phase: ScanPhase::Discovering { found_files: 17 },
+        };
+        let (icon, detail, badge, frac) = scan_progress_summary(&discovering);
+        assert_eq!(icon, "🔍");
+        assert_eq!(detail, "Scanning folders for EPUB files...");
+        assert_eq!(badge, "17 found");
+        assert!((frac - 0.12).abs() < 1e-6);
+
+        let reading_empty_file = ScanProgressState {
+            phase: ScanPhase::ReadingMetadata {
+                processed: 0,
+                total: 100,
+                current_file: String::new(),
+            },
+        };
+        let (icon, detail, badge, frac) = scan_progress_summary(&reading_empty_file);
+        assert_eq!(icon, "📚");
+        assert_eq!(detail, "Loading metadata: 0 / 100");
+        assert_eq!(badge, "0%");
+        assert!((frac - 0.04).abs() < 1e-6);
+
+        let reading_with_file = ScanProgressState {
+            phase: ScanPhase::ReadingMetadata {
+                processed: 3,
+                total: 4,
+                current_file: "novel.epub".to_string(),
+            },
+        };
+        let (icon, detail, badge, frac) = scan_progress_summary(&reading_with_file);
+        assert_eq!(icon, "📚");
+        assert_eq!(detail, "Loading metadata: 3 / 4 — novel.epub");
+        assert_eq!(badge, "75%");
+        assert!((frac - 0.75).abs() < 1e-6);
+
+        let reading_over = ScanProgressState {
+            phase: ScanPhase::ReadingMetadata {
+                processed: 10,
+                total: 10,
+                current_file: "done.epub".to_string(),
+            },
+        };
+        let (_, _, badge_done, frac_done) = scan_progress_summary(&reading_over);
+        assert_eq!(badge_done, "100%");
+        assert!((frac_done - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_batch_progress_view_model_states_and_toolbar_counts() {
+        // 1. Active converting (0% clamps fraction to 0.02)
+        let active_convert = BatchProgressState {
+            total_tasks: 5,
+            completed_tasks: 0,
+            failed_tasks: 0,
+            active_tasks: 2,
+            current_filename: "book1.epub".to_string(),
+            current_stage: "Packaging".to_string(),
+            is_sync: false,
+            is_cancelled: false,
+        };
+        let vm = build_batch_progress_view_model(&active_convert);
+        assert!(!vm.is_done);
+        assert_eq!(vm.pct, 0);
+        assert!((vm.clamped_fraction - 0.02).abs() < 1e-6);
+        assert_eq!(vm.tone, BatchVisualTone::Converting);
+        assert_eq!(vm.icon, "⚡");
+        assert_eq!(vm.title, "Converting Books: 0 of 5 done (0%)");
+        assert_eq!(vm.subtitle, "Active: book1.epub (Packaging)");
+        assert_eq!(vm.failed_badge, None);
+        assert_eq!(vm.dismiss_label, None);
+        assert_eq!(
+            batch_toolbar_counts(&active_convert),
+            BatchToolbarCounts {
+                completed: 0,
+                active: 2,
+                waiting: 3,
+            }
+        );
+
+        // 2. Active syncing with empty filename and 1 failure
+        let active_sync = BatchProgressState {
+            total_tasks: 4,
+            completed_tasks: 1,
+            failed_tasks: 1,
+            active_tasks: 1,
+            current_filename: String::new(),
+            current_stage: "Transferring".to_string(),
+            is_sync: true,
+            is_cancelled: false,
+        };
+        let vm = build_batch_progress_view_model(&active_sync);
+        assert!(!vm.is_done);
+        assert_eq!(vm.pct, 50);
+        assert!((vm.clamped_fraction - 0.5).abs() < 1e-6);
+        assert_eq!(vm.tone, BatchVisualTone::Syncing);
+        assert_eq!(vm.icon, "📲");
+        assert_eq!(vm.title, "Transferring to Kindle: 1 of 4 done (50%)");
+        assert_eq!(vm.subtitle, "Transferring");
+        assert_eq!(vm.failed_badge.as_deref(), Some("(1 failed)"));
+        assert_eq!(vm.dismiss_label, None);
+
+        // 3. Cancelling with active > 0
+        let cancelling = BatchProgressState {
+            total_tasks: 4,
+            completed_tasks: 1,
+            failed_tasks: 1,
+            active_tasks: 2,
+            current_filename: "a.epub".to_string(),
+            current_stage: "Stopping".to_string(),
+            is_sync: false,
+            is_cancelled: true,
+        };
+        let vm = build_batch_progress_view_model(&cancelling);
+        assert!(!vm.is_done);
+        assert_eq!(vm.tone, BatchVisualTone::Converting);
+        assert_eq!(vm.title, "Cancelling batch... (2 active remaining)");
+        assert_eq!(vm.failed_badge, None);
+        assert_eq!(vm.dismiss_label, None);
+
+        // 4. Cancelled done
+        let cancelled_done = BatchProgressState {
+            total_tasks: 4,
+            completed_tasks: 2,
+            failed_tasks: 2,
+            active_tasks: 0,
+            current_filename: String::new(),
+            current_stage: String::new(),
+            is_sync: true,
+            is_cancelled: true,
+        };
+        let vm = build_batch_progress_view_model(&cancelled_done);
+        assert!(vm.is_done);
+        assert_eq!(vm.tone, BatchVisualTone::Cancelled);
+        assert_eq!(vm.icon, "⏹");
+        assert_eq!(
+            vm.title,
+            "Batch cancelled (2 completed, 2 cancelled/failed)"
+        );
+        assert_eq!(
+            vm.subtitle,
+            "Batch conversion cancelled. Click Dismiss to close."
+        );
+        assert_eq!(vm.failed_badge, None);
+        assert_eq!(vm.dismiss_label, Some("Dismiss"));
+
+        // 5. Completed with failures
+        let completed_errors = BatchProgressState {
+            total_tasks: 3,
+            completed_tasks: 2,
+            failed_tasks: 1,
+            active_tasks: 0,
+            current_filename: String::new(),
+            current_stage: String::new(),
+            is_sync: false,
+            is_cancelled: false,
+        };
+        let vm = build_batch_progress_view_model(&completed_errors);
+        assert!(vm.is_done);
+        assert_eq!(vm.pct, 100);
+        assert!((vm.clamped_fraction - 1.0).abs() < 1e-6);
+        assert_eq!(vm.tone, BatchVisualTone::CompletedWithErrors);
+        assert_eq!(vm.icon, "⚠");
+        assert_eq!(vm.title, "Finished processing 2 of 3 books");
+        assert_eq!(vm.subtitle, "All tasks finished. Click Dismiss to close.");
+        assert_eq!(vm.failed_badge.as_deref(), Some("(1 failed)"));
+        assert_eq!(vm.dismiss_label, Some("✓ Dismiss"));
+
+        // 6. Completed clean
+        let completed_clean = BatchProgressState {
+            total_tasks: 3,
+            completed_tasks: 3,
+            failed_tasks: 0,
+            active_tasks: 0,
+            current_filename: String::new(),
+            current_stage: String::new(),
+            is_sync: false,
+            is_cancelled: false,
+        };
+        let vm = build_batch_progress_view_model(&completed_clean);
+        assert!(vm.is_done);
+        assert_eq!(vm.tone, BatchVisualTone::CompletedSuccess);
+        assert_eq!(vm.icon, "✓");
+        assert_eq!(vm.title, "Finished processing 3 books successfully!");
+        assert_eq!(vm.failed_badge, None);
+        assert_eq!(vm.dismiss_label, Some("✓ Dismiss"));
+
+        // 7. Over-reported counts saturate waiting to 0
+        let over_reported = BatchProgressState {
+            total_tasks: 2,
+            completed_tasks: 2,
+            failed_tasks: 1,
+            active_tasks: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            batch_toolbar_counts(&over_reported),
+            BatchToolbarCounts {
+                completed: 2,
+                active: 1,
+                waiting: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn test_derive_epub_status_presentation_all_variants() {
+        let unconverted = derive_epub_status_presentation(&LocalEpubStatus::Unconverted);
+        assert_eq!(unconverted.tone, StatusBadgeTone::Neutral);
+        assert_eq!(unconverted.label, "⚪ Unconverted");
+        assert!(!unconverted.is_processing);
+        assert_eq!(unconverted.progress_fraction, None);
+        assert!(unconverted.show_quick_convert);
+
+        let queued = derive_epub_status_presentation(&LocalEpubStatus::InQueue);
+        assert_eq!(queued.tone, StatusBadgeTone::Queued);
+        assert_eq!(queued.label, "⏳ In Queue");
+        assert!(!queued.is_processing);
+        assert_eq!(queued.progress_fraction, None);
+        assert!(!queued.show_quick_convert);
+
+        let proc_zero = derive_epub_status_presentation(&LocalEpubStatus::Processing {
+            stage: "Parsing".to_string(),
+            progress: 0,
+        });
+        assert_eq!(proc_zero.tone, StatusBadgeTone::Processing);
+        assert_eq!(proc_zero.label, "🟡 Parsing (0%)");
+        assert!(proc_zero.is_processing);
+        assert!((proc_zero.progress_fraction.unwrap() - 0.08).abs() < 1e-6);
+        assert!(!proc_zero.show_quick_convert);
+
+        let proc_full = derive_epub_status_presentation(&LocalEpubStatus::Processing {
+            stage: "Syncing".to_string(),
+            progress: 120,
+        });
+        assert_eq!(proc_full.tone, StatusBadgeTone::Processing);
+        assert!((proc_full.progress_fraction.unwrap() - 1.0).abs() < 1e-6);
+        assert!(!proc_full.show_quick_convert);
+
+        let local = derive_epub_status_presentation(&LocalEpubStatus::ConvertedLocal);
+        assert_eq!(local.tone, StatusBadgeTone::LocalReady);
+        assert_eq!(local.label, "🔵 Local KFX");
+        assert!(!local.is_processing);
+        assert_eq!(local.progress_fraction, None);
+        assert!(!local.show_quick_convert);
+
+        let on_dev = derive_epub_status_presentation(&LocalEpubStatus::OnDevice);
+        assert_eq!(on_dev.tone, StatusBadgeTone::OnKindle);
+        assert_eq!(on_dev.label, "🟢 On Kindle");
+        assert!(!on_dev.is_processing);
+        assert_eq!(on_dev.progress_fraction, None);
+        assert!(!on_dev.show_quick_convert);
+
+        let err = derive_epub_status_presentation(&LocalEpubStatus::Error("IO".to_string()));
+        assert_eq!(err.tone, StatusBadgeTone::Error);
+        assert_eq!(err.label, "Error: IO");
+        assert!(!err.is_processing);
+        assert_eq!(err.progress_fraction, None);
+        assert!(!err.show_quick_convert);
+    }
+
+    #[test]
+    fn test_compute_folder_toolbar_state_gating() {
+        let none_selected = compute_folder_toolbar_state(0, 10, false, false, false, true);
+        assert_eq!(none_selected.selection_summary, "0/10 books selected");
+        assert_eq!(none_selected.rescan_label, "🔄 Refresh");
+        assert!(!none_selected.actions_disabled);
+        assert!(!none_selected.can_batch_convert);
+        assert!(!none_selected.can_batch_sync);
+        assert_eq!(
+            none_selected.convert_button_label,
+            "⚡ Convert Selected (0)"
+        );
+        assert_eq!(none_selected.sync_button_label, "📲 Transfer to Kindle (0)");
+
+        let selected_disconnected = compute_folder_toolbar_state(3, 10, true, false, false, false);
+        assert_eq!(selected_disconnected.rescan_label, "⏳ Scanning...");
+        assert!(!selected_disconnected.actions_disabled);
+        assert!(selected_disconnected.can_batch_convert);
+        assert!(!selected_disconnected.can_batch_sync);
+        assert_eq!(
+            selected_disconnected.convert_button_label,
+            "⚡ Convert Selected (3)"
+        );
+
+        let selected_connected = compute_folder_toolbar_state(2, 5, false, false, false, true);
+        assert!(selected_connected.can_batch_convert);
+        assert!(selected_connected.can_batch_sync);
+
+        let batch_busy = compute_folder_toolbar_state(2, 5, false, true, false, true);
+        assert!(batch_busy.actions_disabled);
+        assert!(!batch_busy.can_batch_convert);
+        assert!(!batch_busy.can_batch_sync);
+
+        let eject_busy = compute_folder_toolbar_state(2, 5, false, false, true, true);
+        assert!(eject_busy.actions_disabled);
+        assert!(!eject_busy.can_batch_convert);
+        assert!(!eject_busy.can_batch_sync);
     }
 }

@@ -6,6 +6,9 @@
 **Audit Framework:** Antigravity Multi-Model Consensus (`Gemini Pro`, `Claude Sonnet`, `Claude Opus` reviewer personas)  
 **Domain:** Software Engineering (Rust 2024 Edition — Native EPUB-to-KFX Converter, Word Wise `.kll`, Kindle Sync & GPUI Desktop Studio)
 
+> [!NOTE]
+> **Historical Baseline Snapshot (`e560d12`, 2026-11-24):** This document preserves the pre-remediation tri-model audit findings captured at commit `e560d12` (`v0.1.0`). All `P0`–`P3` findings below have since been remediated in the completed **`v0.1.1`** release and subsequent Nov 24 / Nov 26 engineering cycles; see the completed specifications and QA verification reports indexed in [`docs/README.md`](README.md).
+
 ---
 
 ## 1. Executive Summary

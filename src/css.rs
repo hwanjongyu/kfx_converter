@@ -5,9 +5,10 @@
 //! (`tag`, `.class`, `tag.class`, `.a.b`) and resolves the cascaded declarations for an
 //! element so that `EpubReader::sanitize_css_style` can translate them into IR tokens.
 //!
-//! Intentionally unsupported (skipped, never mis-applied): descendant/child/sibling
-//! combinators, attribute selectors, pseudo-classes/elements, `@`-rules wrappers are
-//! unwrapped and their inner simple rules kept.
+//! Supported pseudo-selectors: `::first-letter`, `:link`, and `:visited` on simple
+//! selectors. Intentionally unsupported (skipped, never mis-applied): descendant/child/
+//! sibling combinators, attribute selectors, and all other pseudo-classes/elements;
+//! `@`-rule wrappers are unwrapped and their inner simple rules kept.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
