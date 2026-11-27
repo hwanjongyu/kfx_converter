@@ -302,23 +302,13 @@ fn reject_symlink_destination(dst: &Path) -> Result<(), SyncError> {
 }
 
 fn reject_symlink_parent(parent: &Path) -> Result<(), SyncError> {
-    if parent == Path::new(".") {
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if parent == Path::new("/tmp") || parent == Path::new("/var") || parent == Path::new("/etc")
-        {
-            return Ok(());
+    crate::storage::reject_symlink_parent(parent).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            SyncError::SecurityViolation(e.to_string())
+        } else {
+            SyncError::Io(e)
         }
-        let tmp = std::env::temp_dir();
-        let tmp_str = tmp.to_string_lossy();
-        let tmp_trimmed = Path::new(tmp_str.trim_end_matches('/'));
-        if parent == tmp || parent == tmp_trimmed {
-            return Ok(());
-        }
-    }
-    reject_symlink_destination(parent)
+    })
 }
 
 fn prepare_writable_sync(dst: &Path) -> Result<(), SyncError> {

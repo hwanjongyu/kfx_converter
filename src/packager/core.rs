@@ -124,18 +124,14 @@ impl<'a> KfxPackager<'a> {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        if parent != Path::new(".")
-            && !(cfg!(target_os = "macos")
-                && (parent == Path::new("/tmp") || parent == Path::new("/var")))
-        {
-            crate::storage::reject_symlink_path(parent)?;
-        }
+        crate::storage::reject_symlink_parent(parent)?;
         crate::storage::reject_symlink_path(path)?;
         let mut tmp_file = tempfile::Builder::new()
             .prefix(".kfx_tmp.")
             .tempfile_in(parent)?;
         let total_size = self.package(&mut tmp_file)?;
         tmp_file.flush()?;
+        crate::storage::prepare_writable_non_symlink(path)?;
         crate::storage::reject_symlink_path(path)?;
         tmp_file.persist(path).map_err(|e| e.error)?;
         Ok(total_size)
@@ -359,6 +355,52 @@ mod tests {
             parent_err
         );
         assert!(!real_dir.join("child.kfx").exists());
+    }
+
+    #[test]
+    fn test_package_to_file_overwrites_readonly_regular_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("readonly_book.kfx");
+        std::fs::write(&out, b"OLD_READONLY").unwrap();
+        let mut perms = std::fs::metadata(&out).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&out, perms).unwrap();
+
+        let book = BookIR {
+            metadata: BookMetadata {
+                title: "Readonly Overwrite Test".to_string(),
+                identifier: "urn:uuid:readonly-overwrite-test".to_string(),
+                language: "en".to_string(),
+                ..Default::default()
+            },
+            sections: vec![Section {
+                id: "sec1".to_string(),
+                title: "Chapter 1".to_string(),
+                blocks: vec![Block::Paragraph {
+                    id: "p1".to_string(),
+                    spans: vec![TextSpan {
+                        text: "Overwriting read-only regular file.".to_string(),
+                        ..Default::default()
+                    }],
+                    style: None,
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let mut packager = KfxPackager::new(&book, "EBOK");
+        let written = packager
+            .package_to_file(&out)
+            .expect("package_to_file must overwrite existing read-only regular file");
+        assert!(written > 0);
+
+        let container = KfxContainer::open(&out).expect("Valid overwritten KFX output");
+        assert!(!container.chunks.is_empty());
+
+        let meta = std::fs::symlink_metadata(&out).unwrap();
+        assert!(!meta.file_type().is_symlink());
+        assert!(meta.file_type().is_file());
+        assert!(!meta.permissions().readonly());
     }
 
     #[test]

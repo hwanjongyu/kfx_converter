@@ -464,19 +464,8 @@ impl ConversionPipeline {
 
         if let Some(target_id) = cover_id_opt {
             let asset = ir.resources.get(&target_id).or_else(|| {
-                let fn_opt = std::path::Path::new(&target_id)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string());
-                let fn_str = fn_opt.as_deref()?;
-                let mut keys: Vec<&String> = ir.resources.keys().collect();
-                keys.sort();
-                keys.into_iter().find_map(|k| {
-                    if k == fn_str || k.ends_with(fn_str) {
-                        ir.resources.get(k)
-                    } else {
-                        None
-                    }
-                })
+                ir.resolve_resource_key(&target_id)
+                    .and_then(|k| ir.resources.get(&k))
             });
             if let Some(asset) = asset
                 && let Ok(optimized) = CoverOptimizer::optimize_thumbnail(&asset.data)

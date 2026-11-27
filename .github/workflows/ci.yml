@@ -63,6 +63,8 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          components: clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -70,6 +72,10 @@ jobs:
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/setup-linux-gui-deps
+
+      - name: Check Clippy lints on macOS/Windows (cargo clippy)
+        if: runner.os != 'Linux'
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run full test suite (All features, Unit + Integration)
         run: cargo test --locked --all-features --verbose

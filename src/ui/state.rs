@@ -701,25 +701,32 @@ pub fn apply_conversion_outcome_to_state(
 /// off the UI thread.
 pub fn collect_incoming_epub_paths(path: &Path) -> Vec<(PathBuf, String)> {
     let mut paths = Vec::new();
-    if path.is_file() {
-        if path
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
-        {
-            paths.push(path.to_path_buf());
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        let ft = meta.file_type();
+        if !ft.is_symlink() {
+            if ft.is_file() {
+                if path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
+                {
+                    paths.push(path.to_path_buf());
+                }
+            } else if ft.is_dir() {
+                collect_epub_files(path, true, 0, 5, &mut paths, None, None);
+                paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            }
         }
-    } else if path.is_dir() {
-        collect_epub_files(path, true, 0, 5, &mut paths, None, None);
-        paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
     }
 
     paths
         .into_iter()
         .map(|p| {
-            let size_str = std::fs::metadata(&p)
+            let size_str = std::fs::symlink_metadata(&p)
+                .ok()
+                .filter(|m| !m.file_type().is_symlink() && m.file_type().is_file())
                 .map(|m| format_file_size(m.len()))
-                .unwrap_or_else(|_| "Unknown".into());
+                .unwrap_or_else(|| "Unknown".into());
             (p, size_str)
         })
         .collect()
@@ -840,12 +847,18 @@ fn collect_epub_files(
                 return;
             }
             let path = entry.path();
-            if path.is_file() {
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_file() {
                 if path
                     .extension()
                     .and_then(|s| s.to_str())
-                    .map(|ext| ext.eq_ignore_ascii_case("epub"))
-                    .unwrap_or(false)
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
                 {
                     out.push(path);
                     if out.len() == 1 || out.len().is_multiple_of(10) {
@@ -857,7 +870,7 @@ fn collect_epub_files(
                         );
                     }
                 }
-            } else if recursive && path.is_dir() && depth < max_depth {
+            } else if recursive && ft.is_dir() && depth < max_depth {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 if !name.starts_with('.') && !name.ends_with(".sdr") {
                     collect_epub_files(
@@ -2144,5 +2157,50 @@ mod tests {
         assert_eq!(dev_files[0].modified, "Just now");
         assert!(!dev_files[0].has_word_wise);
         assert!(dev_files[0].has_sdr);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_collect_epub_files_and_incoming_skip_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside.epub"), b"outside").unwrap();
+        std::fs::write(outside.join("outside_sub.epub"), b"outside_sub").unwrap();
+
+        let scan_root = temp.path().join("scan_root");
+        let sub_dir = scan_root.join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let real_epub = scan_root.join("real.epub");
+        let nested_epub = sub_dir.join("nested.epub");
+        std::fs::write(&real_epub, vec![b'A'; 2048]).unwrap();
+        std::fs::write(&nested_epub, vec![b'B'; 4096]).unwrap();
+
+        symlink(
+            outside.join("outside.epub"),
+            scan_root.join("link_book.epub"),
+        )
+        .unwrap();
+        symlink(&outside, scan_root.join("link_dir")).unwrap();
+
+        let mut collected = Vec::new();
+        collect_epub_files(&scan_root, true, 0, 5, &mut collected, None, None);
+        collected.sort();
+        let mut expected = vec![real_epub.clone(), nested_epub.clone()];
+        expected.sort();
+        assert_eq!(collected, expected);
+
+        let incoming = collect_incoming_epub_paths(&scan_root);
+        assert_eq!(incoming.len(), 2);
+        assert_eq!(incoming[0].0, nested_epub);
+        assert_ne!(incoming[0].1, "Unknown");
+        assert_eq!(incoming[1].0, real_epub);
+        assert_ne!(incoming[1].1, "Unknown");
+
+        assert!(collect_incoming_epub_paths(&scan_root.join("link_book.epub")).is_empty());
+        assert!(collect_incoming_epub_paths(&scan_root.join("link_dir")).is_empty());
     }
 }

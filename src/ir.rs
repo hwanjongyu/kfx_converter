@@ -1090,18 +1090,9 @@ impl BookIR {
         // 1. Explicit metadata cover_image_id
         self.metadata
             .cover_image_id
-            .as_ref()
-            .and_then(|id| {
-                if let Some(res) = self.resources.get(id)
-                    && res.is_supported_raster_image()
-                {
-                    return Some(id.clone());
-                }
-                // Try case-insensitive or stripped filename matching against raster image resources
-                find_image_key(&|k| {
-                    k.eq_ignore_ascii_case(id) || k.ends_with(id.as_str()) || id.ends_with(k)
-                })
-            })
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .and_then(|id| self.resolve_resource_key(id))
             // 2. First image block in the first section
             .or_else(|| {
                 self.sections.first().and_then(|s| {
@@ -2443,14 +2434,30 @@ mod tests {
             Some("cover_a.jpg".to_string())
         );
 
-        // Tier 1 fuzzy fallback determinism ("a.jpg" matches both cover_a.jpg and thumb_a.jpg)
+        // Tier 1 path-boundary filename fallback determinism ("sub/cover_z.jpg" -> "cover_z.jpg" ahead of Tier 3 "cover_a.jpg")
         assert_eq!(
-            build_book(keys_forward.to_vec(), Some("a.jpg")).resolve_cover_resource_id(),
-            Some("cover_a.jpg".to_string())
+            build_book(keys_forward.to_vec(), Some("sub/cover_z.jpg")).resolve_cover_resource_id(),
+            Some("cover_z.jpg".to_string())
         );
         assert_eq!(
-            build_book(reversed, Some("a.jpg")).resolve_cover_resource_id(),
-            Some("cover_a.jpg".to_string())
+            build_book(reversed, Some("sub/cover_z.jpg")).resolve_cover_resource_id(),
+            Some("cover_z.jpg".to_string())
+        );
+        assert_eq!(
+            build_book(
+                vec!["dir_b/cover.jpg", "dir_a/cover.jpg"],
+                Some("OEBPS/cover.jpg")
+            )
+            .resolve_cover_resource_id(),
+            Some("dir_a/cover.jpg".to_string())
+        );
+        assert_eq!(
+            build_book(
+                vec!["dir_a/cover.jpg", "dir_b/cover.jpg"],
+                Some("OEBPS/cover.jpg")
+            )
+            .resolve_cover_resource_id(),
+            Some("dir_a/cover.jpg".to_string())
         );
 
         // Tier 5 fallback determinism (only img_01..img_12)
@@ -2467,6 +2474,96 @@ mod tests {
         assert_eq!(
             build_book(plain_rev, None).resolve_cover_resource_id(),
             Some("img_01.png".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_cover_resource_id_no_suffix_substring_false_match() {
+        let make_asset = |id: &str, mime: &str| ResourceAsset {
+            id: id.to_string(),
+            mime_type: mime.to_string(),
+            data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+        };
+
+        // 1. Exact filename boundary match beats earlier lexicographical suffix substring ("discover.jpg")
+        let mut book = BookIR::default();
+        book.metadata.cover_image_id = Some("cover.jpg".to_string());
+        book.resources.insert(
+            "OEBPS/Images/discover.jpg".to_string(),
+            make_asset("OEBPS/Images/discover.jpg", "image/jpeg"),
+        );
+        book.resources.insert(
+            "OEBPS/Images/cover.jpg".to_string(),
+            make_asset("OEBPS/Images/cover.jpg", "image/jpeg"),
+        );
+        assert_eq!(
+            book.resolve_cover_resource_id(),
+            Some("OEBPS/Images/cover.jpg".to_string())
+        );
+
+        // 2. When only "discover.jpg" exists, "cover.jpg" does NOT false-match Tier 1 and falls through to Tier 2
+        let mut fallback_book = BookIR::default();
+        fallback_book.metadata.cover_image_id = Some("cover.jpg".to_string());
+        fallback_book.resources.insert(
+            "OEBPS/Images/discover.jpg".to_string(),
+            make_asset("OEBPS/Images/discover.jpg", "image/jpeg"),
+        );
+        fallback_book.resources.insert(
+            "OEBPS/Images/hero.png".to_string(),
+            make_asset("OEBPS/Images/hero.png", "image/png"),
+        );
+        fallback_book.sections.push(Section {
+            id: "sec0".to_string(),
+            title: "Intro".to_string(),
+            blocks: vec![Block::Image {
+                id: "img0".to_string(),
+                resource_id: "OEBPS/Images/hero.png".to_string(),
+                alt: None,
+                width: None,
+                height: None,
+                href: None,
+            }],
+        });
+        assert_eq!(
+            fallback_book.resolve_cover_resource_id(),
+            Some("OEBPS/Images/hero.png".to_string())
+        );
+
+        // 3. Empty or whitespace-only cover_image_id skips Tier 1 and falls through to Tier 2
+        let mut empty_id_book = BookIR::default();
+        empty_id_book.resources.insert(
+            "a_other.png".to_string(),
+            make_asset("a_other.png", "image/png"),
+        );
+        empty_id_book.resources.insert(
+            "b_hero.png".to_string(),
+            make_asset("b_hero.png", "image/png"),
+        );
+        empty_id_book.sections.push(Section {
+            id: "sec0".to_string(),
+            title: "Intro".to_string(),
+            blocks: vec![Block::Image {
+                id: "img0".to_string(),
+                resource_id: "b_hero.png".to_string(),
+                alt: None,
+                width: None,
+                height: None,
+                href: None,
+            }],
+        });
+        assert_eq!(empty_id_book.resolve_resource_key(""), None);
+        assert_eq!(empty_id_book.resolve_resource_key("   "), None);
+
+        empty_id_book.metadata.cover_image_id = Some(String::new());
+        assert_eq!(
+            empty_id_book.resolve_cover_resource_id(),
+            Some("b_hero.png".to_string())
+        );
+
+        empty_id_book.metadata.cover_image_id = Some("   ".to_string());
+        assert_eq!(
+            empty_id_book.resolve_cover_resource_id(),
+            Some("b_hero.png".to_string())
         );
     }
 

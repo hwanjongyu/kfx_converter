@@ -89,6 +89,7 @@ All modifications follow the **NEXUS Handoff Protocol** (`<RULE[user_global]>`):
 | Category | Spec | QA Log | Core Issues Resolved |
 | :--- | :--- | :--- | :--- |
 | **Nov 26 P1 Review Remediation** | [spec-fix-p1-nov26-review.md](specs/spec-fix-p1-nov26-review.md) | [qa-fix-p1-nov26-review.md](qa/qa-fix-p1-nov26-review.md) | Corrupt/truncated raster image fallback & validator dimension enforcement (`P1-1`), GPUI explorer in-place re-sync updates (`P1-2`). |
+| **Nov 26 P2 Review Remediation** | [spec-fix-p2-nov26-review.md](specs/spec-fix-p2-nov26-review.md) | [qa-fix-p2-nov26-review.md](qa/qa-fix-p2-nov26-review.md) | Symlink-parent consolidation & read-only overwrite handling (`P2-1`), path-boundary cover resolution (`P2-2`), symlink skipping in UI EPUB scanner (`P2-3`), macOS/Windows CI Clippy gate (`P2-4`). |
 | **Nov 24 P0 Critical Audit Remediation** | [spec-fix-p0-nov24-audit.md](specs/spec-fix-p0-nov24-audit.md) | [qa-fix-p0-nov24-audit.md](qa/qa-fix-p0-nov24-audit.md) | Critical security and correctness findings `#1`–`#2` from the Nov 24 multi-model audit (`98fcdcd`). |
 | **Nov 24 P1 Major Audit Remediation** | [spec-fix-p1-nov24-audit.md](specs/spec-fix-p1-nov24-audit.md) | [qa-fix-p1-nov24-audit.md](qa/qa-fix-p1-nov24-audit.md) | Major security, UTF-16 PID parity, XML/CSS/Ion bounds, and sync findings `#3`–`#14` (`d97a01d`). |
 | **Nov 24 P2 Moderate Audit Remediation** | [spec-fix-p2-nov24-audit.md](specs/spec-fix-p2-nov24-audit.md) | [qa-fix-p2-nov24-audit.md](qa/qa-fix-p2-nov24-audit.md) | XHTML/CSS/ZIP hardening, Word Wise/SDR/sync efficiency, GPUI races, Ion/SQLite allocation cuts, CI SHA-pinning, and doc alignment (`#15`–`#22`). |
@@ -157,6 +158,7 @@ docs/
 │   ├── spec-fix-p2-hardening.md
 │   ├── spec-fix-p2-issues.md
 │   ├── spec-fix-p2-nov24-audit.md
+│   ├── spec-fix-p2-nov26-review.md
 │   ├── spec-fix-p2-review-audit.md
 │   ├── spec-fix-p3-audit-issues.md
 │   ├── spec-fix-p3-issues.md
@@ -225,6 +227,7 @@ docs/
     ├── qa-fix-p2-hardening.md
     ├── qa-fix-p2-issues.md
     ├── qa-fix-p2-nov24-audit.md
+    ├── qa-fix-p2-nov26-review.md
     ├── qa-fix-p2-review-audit.md
     ├── qa-fix-p3-audit-issues.md
     ├── qa-fix-p3-issues.md
